@@ -8,6 +8,17 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from dotenv import load_dotenv
 import os
+from flask import Flask
+from threading import Thread
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Бот активен!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8000)
 
 load_dotenv()
 
@@ -18,10 +29,25 @@ class BotConfig:
     HF_API_TOKEN = os.getenv("HF_API_TOKEN")
     PROVIDER = os.getenv("PROVIDER", "novita")
     MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V3-0324")
-    MAX_TOKENS = int(os.getenv("MAX_TOKENS", 2000))
-    TEMPERATURE = float(os.getenv("TEMPERATURE", 0.7))
+    max_tokens = os.getenv("MAX_TOKENS", "2000")
+    try:
+        MAX_TOKENS = int(max_tokens)
+    except ValueError:
+        logger.error(f"Неверное значение MAX_TOKENS: {max_tokens}. Используется значение по умолчанию: 2000")
+        MAX_TOKENS = 2000
+    temperature = os.getenv("TEMPERATURE", "0.7")
+    try:
+        TEMPERATURE = float(temperature)
+    except ValueError:
+        logger.error(f"Неверное значение TEMPERATURE: {temperature}. Используется значение по умолчанию: 0.7")
+        TEMPERATURE = 0.7
     TOKEN = os.getenv("DISCORD_TOKEN")
-    DEVELOPER_ID = int(os.getenv("DEVELOPER_ID"))
+    developer_id = os.getenv("DEVELOPER_ID")
+    try:
+        DEVELOPER_ID = int(developer_id) if developer_id else None
+    except (ValueError, TypeError):
+        logger.error(f"Неверное значение DEVELOPER_ID: {developer_id}. Укажи корректный ID.")
+        DEVELOPER_ID = None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -43,7 +69,7 @@ class MemoryManager:
 memory = MemoryManager()
 
 def check_say_permissions():
-    async def predicate(interaction: discord.Interaction) -> bool:
+    async def predicate(interaction):
         if isinstance(interaction.channel, discord.DMChannel):
             return True
         if interaction.user.id == BotConfig.DEVELOPER_ID:
@@ -54,7 +80,6 @@ def check_say_permissions():
             has_moderator = any(role.permissions.manage_channels or role.permissions.manage_messages for role in member.roles)
             return has_admin or has_moderator
         return False
-    
     return app_commands.check(predicate)
 
 async def update_presence():
@@ -138,6 +163,8 @@ async def say(interaction, message: str):
     await interaction.delete_original_response()
 
 async def main():
+    flask_thread = Thread(target=run_flask)
+    flask_thread.start()
     await bot.start(BotConfig.TOKEN)
 
 if __name__ == "__main__":
