@@ -1,0 +1,5 @@
+discord.py
+huggingface_hub
+asyncio
+flask
+python-dotenv

@@ -1,0 +1,25 @@
+# Файл .gitignore
+
+# Файлы Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Файлы окружения
+.env
+
+# Логи
+*.log
+
+# Временные файлы
+*.tmp
+*.bak
+
+# Файлы IDE
+.idea/
+.vscode/
+
+# Зависимости
+venv/
+env/
+virtualenv/
