@@ -24,8 +24,8 @@
 
 1. **Клонируйте репозиторий**:
    ```bash
-   git clone https://github.com/ваш-username/ваш-репозиторий.git
-   cd ваш-репозиторий
+   git clone https://github.com/Qiota/AI-discord.git
+   cd AI-discord
    ```
 
 2. **Установите зависимости**:
