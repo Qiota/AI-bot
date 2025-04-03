@@ -30,12 +30,13 @@ class BotConfig:
             logger.critical("DISCORD_TOKEN обязателен для работы бота")
             raise ValueError("DISCORD_TOKEN обязателен для работы бота")
 
-        if self.FIREBASE_CRED_PATH:
+        if self.FIREBASE_CRED_PATH and not hasattr(self, '_firebase_warned'):
             if not Path(self.FIREBASE_CRED_PATH).is_file():
                 logger.warning(f"Файл Firebase не найден: {self.FIREBASE_CRED_PATH}. Будет использовано локальное хранилище.")
                 self.FIREBASE_CRED_PATH = None
             elif not self.FIREBASE_CRED_PATH.endswith(".json"):
-                logger.warning(f"Файл Firebase должен быть в формате JSON: {self.FIREBASE_CRED_PATH}. Будет использовано локальное хранилище.")
                 self.FIREBASE_CRED_PATH = None
-        else:
-            logger.warning("FIREBASE_CRED_PATH не указан. Будет использовано локальное хранилище.")
+            else:
+                self._firebase_warned = True
+        elif not self.FIREBASE_CRED_PATH and not hasattr(self, '_firebase_warned'):
+            self._firebase_warned = True

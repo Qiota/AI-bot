@@ -35,12 +35,14 @@ class BotClient:
         self.bot = discord.Client(intents=self.intents)
         self.tree = app_commands.CommandTree(self.bot)
         self.processed_messages = set()
+        self.link_cache = {}
 
     async def setup(self) -> None:
         """Настройка бота."""
         self.config.validate()
         self.bot.event(self.on_ready)
         self.bot.event(self.on_message)
+        self.bot.event(self.on_message_edit)
         register_commands(self.tree, self)
         logger.info("Бот настроен.")
 
@@ -51,34 +53,36 @@ class BotClient:
 
     async def on_ready(self) -> None:
         """Событие, когда бот готов."""
+        self.processed_messages.clear()
         await self.tree.sync()
         logger.info(f"Бот {self.bot.user.name} готов!")
+
+    async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
+        """Обрабатывает редактирование сообщений, чтобы избежать дублирования."""
+        if before.content == after.content:
+            return
+        await self.on_message(after)
 
     def split_response(self, text: str, max_length: int = 2000) -> List[str]:
         """Разделяет текст на части, если он превышает max_length."""
         if len(text) <= max_length:
             return [text]
-
         parts = []
         current_part = ""
         sentences = text.split(". ")
-
         for sentence in sentences:
             sentence = sentence.strip()
             if not sentence:
                 continue
             sentence += ". "
-
             if len(current_part) + len(sentence) <= max_length:
                 current_part += sentence
             else:
                 if current_part:
                     parts.append(current_part.strip())
                 current_part = sentence
-
         if current_part:
             parts.append(current_part.strip())
-
         return parts
 
     async def check_link_validity(self, url: str) -> bool:
@@ -86,10 +90,9 @@ class BotClient:
         if url in self.link_cache:
             logger.debug(f"Использую кэшированный результат для {url}: {self.link_cache[url]}")
             return self.link_cache[url]
-
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.head(url, timeout=5) as response:
+                async with session.head(url, timeout=5, allow_redirects=True) as response:
                     is_valid = response.status == 200
                     self.link_cache[url] = is_valid
                     logger.debug(f"Проверка ссылки {url}: статус {response.status}, валидность: {is_valid}")
@@ -103,33 +106,22 @@ class BotClient:
         """Форматирует ссылки в тексте в формате [text](<ссылка>), зачеркивает текст невалидных ссылок."""
         url_pattern = r'(?<!\]\()https?://[^\s<>\]\)]+[^\s<>\]\)\.,/A-Z0-9-]?[/)](?!\))?'
         urls = re.findall(url_pattern, text, re.IGNORECASE)
-
         logger.debug(f"Найденные URL: {urls}")
-
         for url in urls:
             if not re.search(r'\[.*?\]\(<' + re.escape(url) + r'>\)', text):
                 match = re.search(r'([^\s\(]+)(?:\s*\(|\s+)' + re.escape(url), text)
                 if match:
-                    link_text = match.group(1).strip()
-                    link_text = link_text.rstrip(':').rstrip('.')
+                    link_text = match.group(1).strip().rstrip(':').rstrip('.')
                 else:
                     link_text = "Link"
-
                 clean_url = url.rstrip('/').rstrip(')')
                 is_valid = await self.check_link_validity(clean_url)
-
-                if is_valid:
-                    formatted_link = f"[{link_text}](<{clean_url}>)"
-                else:
-                    formatted_link = f"~~{link_text}~~"
-
+                formatted_link = f"[{link_text}](<{clean_url}>)" if is_valid else f"~~{link_text}~~"
                 if match:
-                    text = text.replace(f"{match.group(1)} {url}", formatted_link)
-                    text = text.replace(f"{match.group(1)} ({url})", formatted_link)
+                    text = text.replace(f"{match.group(1)} {url}", formatted_link).replace(f"{match.group(1)} ({url})", formatted_link)
                 else:
                     text = text.replace(url, formatted_link)
                 logger.debug(f"Форматированная ссылка: {formatted_link}, валидность: {is_valid}")
-
         return text
 
     async def generate_response(self, user_id: str, message_id: str, text: str) -> str:
@@ -144,19 +136,11 @@ class BotClient:
                 "2. Используй **дружелюбный тон**. Добавляй смайлики, если уместно.\n"
                 "3. Если не знаешь ответа, предложи альтернативу: 'Я не уверен, но могу помочь с...'\n"
                 "4. Текущая дата: {current_date}, время: {current_time}. Используй для актуализации.\n"
-                "   - Пример: 'Какой сегодня день?' → '**Сегодня** *{current_date}*!'\n"
-                "5. Веб-поиск: сначала попробуй ответить без веб-поиска. Если ответ требует актуальных данных (события, статистика, новости) или ты не уверен, используй веб-поиск.\n"
-                "   - Пример: 'Как испечь торт?' — отвечай без веб-поиска.\n"
-                "   - Пример: 'Что произошло сегодня?' — используй веб-поиск.\n"
-                "   - Если не уверен в актуальности данных, используй веб-поиск.*'\n"
+                "5. Веб-поиск: сначала попробуй ответить без веб-поиска. Если ответ требует актуальных данных или ты не уверен, используй веб-поиск.\n"
                 "6. Форматируй ответы с использованием Discord Markdown.\n"
             ).format(current_date=current_date, current_time=current_time)
 
-            messages = context + [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text}
-            ]
-
+            messages = context + [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
             keywords_requiring_web_search = ["сегодня", "сейчас", "новости", "события", "погода", "статистика"]
             needs_web_search = any(keyword in text.lower() for keyword in keywords_requiring_web_search)
 
@@ -166,7 +150,7 @@ class BotClient:
                     response = await asyncio.to_thread(self.client.chat.completions.create,
                         model=model,
                         messages=messages,
-                        max_tokens=1500,
+                        max_tokens=2000,
                         stream=False,
                         web_search=False
                     )
@@ -175,11 +159,12 @@ class BotClient:
                     break
                 except Exception as e:
                     logger.error(f"Ошибка с моделью {model} (без веб-поиска): {e}")
-                    if i == len(self.models) - 1:
-                        return "**Ой!** *Что-то пошло не так.* Попробуй снова позже."
-                    await asyncio.sleep(1)
+                    if i < len(self.models) - 1:
+                        await asyncio.sleep(1.5)  # Увеличенная задержка
+                    else:
+                        logger.warning(f"Все модели без веб-поиска недоступны, переключаюсь на веб-поиск.")
 
-            if (needs_web_search or not response_text or "не уверен" in response_text.lower()):
+            if not response_text or needs_web_search:
                 for i, model in enumerate(self.models):
                     try:
                         response = await asyncio.to_thread(self.client.chat.completions.create,
@@ -196,9 +181,10 @@ class BotClient:
                         break
                     except Exception as e:
                         logger.error(f"Ошибка с моделью {model} (с веб-поиском): {e}")
-                        if i == len(self.models) - 1:
-                            return "**Ой!** *Что-то пошло не так.* Попробуй снова позже."
-                        await asyncio.sleep(1)
+                        if i < len(self.models) - 1:
+                            await asyncio.sleep(1.5)
+                        else:
+                            response_text = "**Ой!** *Не могу получить данные.* Попробуй позже."
 
             final_response = response_text or "**Ой!** *Не знаю, что сказать.* Чем могу помочь?"
             final_response = await self.format_links(final_response)
@@ -217,6 +203,7 @@ class BotClient:
 
         message_key = f"{message.id}-{message.channel.id}"
         if message_key in self.processed_messages:
+            logger.debug(f"Сообщение {message_key} уже обработано, пропускаем.")
             return
 
         should_respond = (
@@ -226,8 +213,10 @@ class BotClient:
         )
 
         if not should_respond:
+            logger.debug(f"Сообщение {message_key} не требует ответа.")
             return
 
+        logger.info(f"Обрабатываю сообщение {message_key} от {message.author}: {message.content}")
         self.processed_messages.add(message_key)
 
         async with message.channel.typing():

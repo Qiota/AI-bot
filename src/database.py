@@ -32,10 +32,8 @@ class Database:
                 logger.info("Firebase успешно инициализирован.")
             else:
                 self.use_firebase = False
-                logger.warning("FIREBASE_CRED_PATH не указан. Используется локальное хранилище.")
         except Exception as e:
             self.use_firebase = False
-            logger.warning(f"Ошибка инициализации Firebase: {e}. Используется локальное хранилище.")
             logger.info("Локальное хранилище инициализировано с лимитом 5 сообщений.")
 
     async def add_message(self, user_id: str, message_id: str, role: str, content: str) -> None:
