@@ -160,7 +160,7 @@ class BotClient:
                 except Exception as e:
                     logger.error(f"Ошибка с моделью {model} (без веб-поиска): {e}")
                     if i < len(self.models) - 1:
-                        await asyncio.sleep(1.5)  # Увеличенная задержка
+                        await asyncio.sleep(1.5)
                     else:
                         logger.warning(f"Все модели без веб-поиска недоступны, переключаюсь на веб-поиск.")
 
@@ -194,7 +194,6 @@ class BotClient:
 
         except Exception as e:
             logger.error(f"Ошибка генерации ответа: {e}")
-            return "**Упс!** *Произошла ошибка.* Попробуй снова!"
 
     async def on_message(self, message: discord.Message) -> None:
         """Обрабатывает входящие сообщения."""
