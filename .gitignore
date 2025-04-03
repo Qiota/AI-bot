@@ -1,4 +1,6 @@
-# Файл .gitignore
+# Кэш
+har_and_cookies/
+*.cache
 
 # Файлы Python
 __pycache__/
@@ -23,3 +25,7 @@ __pycache__/
 venv/
 env/
 virtualenv/
+
+# Файлы базы данных Firebase
+serviceAccountKey.json
+firebase-adminsdk.json

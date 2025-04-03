@@ -1,4 +1,6 @@
 discord.py
-huggingface_hub
+g4f
+firebase-admin
 python-dotenv
-flask
+aiohttp
+colorama
