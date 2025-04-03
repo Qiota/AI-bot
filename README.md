@@ -32,8 +32,8 @@
    FLASK_PORT=5000
    ```
    - `DISCORD_TOKEN`: Токен вашего Discord-бота (получите в Discord Developer Portal).
-   - `FIREBASE_CRED_PATH`: Путь к файлу JSON с учетными данными Firebase (например, `E:\projects\AI discord\src\serviceAccountKey.json`). Укажите полный путь к файлу.
-   - `DEVELOPER_ID`: Идентификатор разработчика (опционально, для отладки).
+   - `FIREBASE_CRED_PATH`: Путь к файлу JSON с учетными данными Firebase. Укажите полный путь к файлу.
+   - `DEVELOPER_ID`: ID вашего discord аккаунта.
    - `FLASK_PORT`: Порт для локального сервера (если используется Flask, по умолчанию 5000).
 4. Запустите бота:
    ```bash
