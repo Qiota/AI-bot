@@ -10,53 +10,53 @@ from .config import BotConfig
 class Database:
     """Управление базой данных: Firebase Firestore или локальное хранилище."""
     def __init__(self):
-        self.use_firebase: bool = True
         self.local_memory: Dict[str, Dict] = {}
-        self.local_events: List[Dict] = []
+        self.local_limit: int = 5
 
         try:
             config = BotConfig()
-            cred = credentials.Certificate(config.FIREBASE_CRED_PATH)
-            firebase_admin.initialize_app(cred)
-            self.db = firestore.client()
-            self.collection = self.db.collection("bot_memory")
-            logger.info("Firebase успешно инициализирован.")
+            if config.FIREBASE_CRED_PATH:
+                cred = credentials.Certificate(config.FIREBASE_CRED_PATH)
+                firebase_admin.initialize_app(cred)
+                self.db = firestore.client()
+                self.collection = self.db.collection("bot_memory")
+                self.use_firebase = True
+                logger.info("Firebase успешно инициализирован.")
+            else:
+                self.use_firebase = False
+                logger.warning("FIREBASE_CRED_PATH не указан. Используется локальное хранилище.")
         except Exception as e:
-            logger.warning(f"Ошибка инициализации Firebase: {e}. Переход на локальное хранилище.")
             self.use_firebase = False
+            logger.warning(f"Ошибка инициализации Firebase: {e}. Используется локальное хранилище.")
+            logger.info("Локальное хранилище инициализировано с лимитом 5 сообщений.")
 
     async def add_message(self, user_id: str, message_id: str, role: str, content: str) -> None:
         """Добавляет сообщение в базу данных или локальное хранилище."""
+        message_data = {
+            "user_id": user_id,
+            "message_id": message_id,
+            "role": role,
+            "content": content,
+            "timestamp": time.time()
+        }
+
         if self.use_firebase:
             batch = self.db.batch()
             user_thread = self.collection.document(user_id).collection("threads").document(message_id)
-            batch.set(user_thread, {
-                "user_id": user_id,
-                "message_id": message_id,
-                "role": role,
-                "content": content,
-                "timestamp": time.time()
-            })
+            batch.set(user_thread, message_data)
             await asyncio.get_event_loop().run_in_executor(None, batch.commit)
             self.get_context.cache_clear()
         else:
             if user_id not in self.local_memory:
                 self.local_memory[user_id] = {"threads": []}
-            message_data = {
-                "user_id": user_id,
-                "message_id": message_id,
-                "role": role,
-                "content": content,
-                "timestamp": time.time()
-            }
             self.local_memory[user_id]["threads"].append(message_data)
-            if len(self.local_memory[user_id]["threads"]) > 10:
+            if len(self.local_memory[user_id]["threads"]) > self.local_limit:
                 self.local_memory[user_id]["threads"].pop(0)
             self.get_context.cache_clear()
 
     @lru_cache(maxsize=200)
-    async def get_context(self, user_id: str, limit: int = 10) -> List[Dict[str, str]]:
-        """Извлекает последние сообщения пользователя."""
+    async def get_context(self, user_id: str, limit: int = 5) -> List[Dict[str, str]]:
+        """Извлекает последние сообщения пользователя (максимум 5 при локальном хранилище)."""
         if self.use_firebase:
             user_thread = self.collection.document(user_id).collection("threads")
             query = user_thread.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
