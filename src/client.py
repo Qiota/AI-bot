@@ -34,7 +34,7 @@ class BotClient:
         self.intents.message_content = True
         self.bot = discord.Client(intents=self.intents)
         self.tree = app_commands.CommandTree(self.bot)
-        self.link_cache = {}
+        self.processed_messages = set()
 
     async def setup(self) -> None:
         """Настройка бота."""
@@ -83,19 +83,28 @@ class BotClient:
 
     async def check_link_validity(self, url: str) -> bool:
         """Проверяет валидность ссылки, возвращает True, если статус-код 200."""
+        if url in self.link_cache:
+            logger.debug(f"Использую кэшированный результат для {url}: {self.link_cache[url]}")
+            return self.link_cache[url]
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.head(url, timeout=5) as response:
-                    return response.status == 200
+                    is_valid = response.status == 200
+                    self.link_cache[url] = is_valid
+                    logger.debug(f"Проверка ссылки {url}: статус {response.status}, валидность: {is_valid}")
+                    return is_valid
         except Exception as e:
             logger.error(f"Ошибка проверки ссылки {url}: {e}")
+            self.link_cache[url] = False
             return False
 
     async def format_links(self, text: str) -> str:
         """Форматирует ссылки в тексте в формате [text](<ссылка>), зачеркивает текст невалидных ссылок."""
-        
         url_pattern = r'(?<!\]\()https?://[^\s<>\]\)]+[^\s<>\]\)\.,/A-Z0-9-]?[/)](?!\))?'
         urls = re.findall(url_pattern, text, re.IGNORECASE)
+
+        logger.debug(f"Найденные URL: {urls}")
 
         for url in urls:
             if not re.search(r'\[.*?\]\(<' + re.escape(url) + r'>\)', text):
@@ -107,7 +116,6 @@ class BotClient:
                     link_text = "Link"
 
                 clean_url = url.rstrip('/').rstrip(')')
-
                 is_valid = await self.check_link_validity(clean_url)
 
                 if is_valid:
@@ -158,7 +166,7 @@ class BotClient:
                     response = await asyncio.to_thread(self.client.chat.completions.create,
                         model=model,
                         messages=messages,
-                        max_tokens=2000,
+                        max_tokens=1500,
                         stream=False,
                         web_search=False
                     )
@@ -184,7 +192,7 @@ class BotClient:
                         response_text = response.choices[0].message.content.strip()
                         logger.debug(f"Ответ модели {model} (с веб-поиском): {response_text}")
                         if needs_web_search:
-                            response_text = f"\n{response_text}"
+                            response_text = f"*Проверяю актуальные данные...*\n{response_text}"
                         break
                     except Exception as e:
                         logger.error(f"Ошибка с моделью {model} (с веб-поиском): {e}")
@@ -193,9 +201,7 @@ class BotClient:
                         await asyncio.sleep(1)
 
             final_response = response_text or "**Ой!** *Не знаю, что сказать.* Чем могу помочь?"
-            
             final_response = await self.format_links(final_response)
-            
             await self.db.add_message(user_id, message_id, "user", text)
             await self.db.add_message(user_id, message_id, "assistant", final_response)
             return final_response
@@ -209,6 +215,10 @@ class BotClient:
         if message.author.bot:
             return
 
+        message_key = f"{message.id}-{message.channel.id}"
+        if message_key in self.processed_messages:
+            return
+
         should_respond = (
             self.bot.user in message.mentions or
             (message.reference and message.reference.resolved and message.reference.resolved.author == self.bot.user) or
@@ -217,6 +227,8 @@ class BotClient:
 
         if not should_respond:
             return
+
+        self.processed_messages.add(message_key)
 
         async with message.channel.typing():
             content = message.content.replace(f"<@{self.bot.user.id}>", "").strip()

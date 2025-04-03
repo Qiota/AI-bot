@@ -9,7 +9,15 @@ from .config import BotConfig
 
 class Database:
     """Управление базой данных: Firebase Firestore или локальное хранилище."""
-    def __init__(self):
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(Database, cls).__new__(cls)
+            cls._instance.__init_inner__()
+        return cls._instance
+
+    def __init_inner__(self):
         self.local_memory: Dict[str, Dict] = {}
         self.local_limit: int = 5
 
@@ -31,15 +39,7 @@ class Database:
             logger.info("Локальное хранилище инициализировано с лимитом 5 сообщений.")
 
     async def add_message(self, user_id: str, message_id: str, role: str, content: str) -> None:
-        """Добавляет сообщение в базу данных или локальное хранилище."""
-        message_data = {
-            "user_id": user_id,
-            "message_id": message_id,
-            "role": role,
-            "content": content,
-            "timestamp": time.time()
-        }
-
+        message_data = {"user_id": user_id, "message_id": message_id, "role": role, "content": content, "timestamp": time.time()}
         if self.use_firebase:
             batch = self.db.batch()
             user_thread = self.collection.document(user_id).collection("threads").document(message_id)
@@ -56,7 +56,6 @@ class Database:
 
     @lru_cache(maxsize=200)
     async def get_context(self, user_id: str, limit: int = 5) -> List[Dict[str, str]]:
-        """Извлекает последние сообщения пользователя (максимум 5 при локальном хранилище)."""
         if self.use_firebase:
             user_thread = self.collection.document(user_id).collection("threads")
             query = user_thread.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
@@ -69,7 +68,6 @@ class Database:
             return [{"role": doc["role"], "content": doc["content"]} for doc in reversed(threads)]
 
     async def clear_user_data(self, user_id: str) -> None:
-        """Удаляет все данные пользователя из базы данных или локального хранилища."""
         if self.use_firebase:
             try:
                 threads_ref = self.collection.document(user_id).collection("threads")
@@ -79,7 +77,6 @@ class Database:
                     for doc in threads_docs[i:i + 500]:
                         batch.delete(doc.reference)
                     await asyncio.get_event_loop().run_in_executor(None, batch.commit)
-
                 user_doc_ref = self.collection.document(user_id)
                 await asyncio.get_event_loop().run_in_executor(None, lambda: user_doc_ref.delete())
                 self.get_context.cache_clear()
