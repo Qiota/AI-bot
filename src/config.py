@@ -4,10 +4,14 @@ from .logging_config import logger
 
 class BotConfig:
     """Конфигурация бота с валидацией переменных окружения и .env файла."""
+    _instance = None
 
-    def __init__(self):
-        self._load_config()
-        self.validate()
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(BotConfig, cls).__new__(cls)
+            cls._instance._load_config()
+            cls._instance.validate()
+        return cls._instance
 
     def _load_config(self):
         """Загрузка конфигурационных переменных из .env файла."""
