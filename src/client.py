@@ -125,7 +125,7 @@ class BotClient:
         return text
 
     async def generate_response(self, user_id: str, message_id: str, text: str) -> str:
-        """Генерирует ответ на запрос пользователя."""
+        """Генерирует ответ на запрос пользователя с использованием одной модели."""
         try:
             context = await self.db.get_context(user_id)
             current_date = datetime.now().strftime("%Y-%m-%d")
@@ -144,47 +144,40 @@ class BotClient:
             keywords_requiring_web_search = ["сегодня", "сейчас", "новости", "события", "погода", "статистика"]
             needs_web_search = any(keyword in text.lower() for keyword in keywords_requiring_web_search)
 
-            response_text = None
-            for i, model in enumerate(self.models):
+            # Используем первую модель для без веб-поиска
+            model = self.models[0]
+            try:
+                logger.info(f"Попытка запроса к модели {model} без веб-поиска")
+                response = await asyncio.to_thread(self.client.chat.completions.create,
+                    model=model,
+                    messages=messages,
+                    max_tokens=2000,
+                    stream=False,
+                    web_search=False
+                )
+                response_text = response.choices[0].message.content.strip()
+                logger.debug(f"Ответ модели {model} (без веб-поиска): {response_text}")
+            except Exception as e:
+                logger.error(f"Ошибка с моделью {model} (без веб-поиска): {e}")
+                response_text = None
+
+            if not response_text or needs_web_search:
                 try:
+                    logger.info(f"Попытка запроса к модели {model} с веб-поиском")
                     response = await asyncio.to_thread(self.client.chat.completions.create,
                         model=model,
                         messages=messages,
-                        max_tokens=2000,
+                        max_tokens=700,
                         stream=False,
-                        web_search=False
+                        web_search=True
                     )
                     response_text = response.choices[0].message.content.strip()
-                    logger.debug(f"Ответ модели {model} (без веб-поиска): {response_text}")
-                    break
+                    logger.debug(f"Ответ модели {model} (с веб-поиском): {response_text}")
+                    if needs_web_search:
+                        response_text = f"*Проверяю актуальные данные...*\n{response_text}"
                 except Exception as e:
-                    logger.error(f"Ошибка с моделью {model} (без веб-поиска): {e}")
-                    if i < len(self.models) - 1:
-                        await asyncio.sleep(1.5)
-                    else:
-                        logger.warning(f"Все модели без веб-поиска недоступны, переключаюсь на веб-поиск.")
-
-            if not response_text or needs_web_search:
-                for i, model in enumerate(self.models):
-                    try:
-                        response = await asyncio.to_thread(self.client.chat.completions.create,
-                            model=model,
-                            messages=messages,
-                            max_tokens=700,
-                            stream=False,
-                            web_search=True
-                        )
-                        response_text = response.choices[0].message.content.strip()
-                        logger.debug(f"Ответ модели {model} (с веб-поиском): {response_text}")
-                        if needs_web_search:
-                            response_text = f"*Проверяю актуальные данные...*\n{response_text}"
-                        break
-                    except Exception as e:
-                        logger.error(f"Ошибка с моделью {model} (с веб-поиском): {e}")
-                        if i < len(self.models) - 1:
-                            await asyncio.sleep(1.5)
-                        else:
-                            response_text = "**Ой!** *Не могу получить данные.* Попробуй позже."
+                    logger.error(f"Ошибка с моделью {model} (с веб-поиском): {e}")
+                    response_text = "**Ой!** *Не могу получить данные.* Попробуй позже."
 
             final_response = response_text or "**Ой!** *Не знаю, что сказать.* Чем могу помочь?"
             final_response = await self.format_links(final_response)
@@ -194,6 +187,7 @@ class BotClient:
 
         except Exception as e:
             logger.error(f"Ошибка генерации ответа: {e}")
+            return "**Упс!** *Произошла ошибка.* Попробуй снова!"
 
     async def on_message(self, message: discord.Message) -> None:
         """Обрабатывает входящие сообщения."""
