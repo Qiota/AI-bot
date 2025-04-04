@@ -196,7 +196,6 @@ class BotClient:
 
         message_key = f"{message.id}-{message.channel.id}"
         if message_key in self.processed_messages:
-            logger.debug(f"Сообщение {message_key} уже обработано, пропускаем.")
             return
 
         should_respond = (
@@ -209,7 +208,6 @@ class BotClient:
             logger.debug(f"Сообщение {message_key} не требует ответа.")
             return
 
-        logger.info(f"Обрабатываю сообщение {message_key} от {message.author}: {message.content}")
         self.processed_messages.add(message_key)
 
         async with message.channel.typing():
@@ -217,8 +215,8 @@ class BotClient:
             response = await self.generate_response(str(message.author.id), str(message.id), content)
             parts = self.split_response(response)
 
-            for i, part in enumerate(parts):
-                if i == 0 and message.reference:
-                    await message.reply(part)
-                else:
-                    await message.channel.send(part)
+        for i, part in enumerate(parts):
+            if i == 0:
+                await message.reply(part)
+            else:
+                await message.channel.send(part)
