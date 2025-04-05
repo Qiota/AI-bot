@@ -1,22 +1,22 @@
 import discord
-from discord import app_commands
+from discord import app_commands, Forbidden, HTTPException
 import asyncio
 from typing import List, Dict
 from g4f.client import Client
 from g4f.Provider import PollinationsAI
 from .logging_config import logger
 from .database import Database
-from .command_registry import register_commands
+from .sharding import ShardedBotClient
 from datetime import datetime
 import re
 import aiohttp
+from collections import OrderedDict
 
 class BotClient:
     """Управление клиентом бота Discord."""
-    def __init__(self, config):
+    def __init__(self, config, shard_count: int = 2):
         self.config = config
         self.db = Database()
-        logger.info(f"Используется {'Firebase' if self.db.use_firebase else 'локальное хранилище'} для хранения данных.")
         self.client = Client(provider=PollinationsAI)
         self.models = [
             "gpt-4o-mini",
@@ -29,42 +29,24 @@ class BotClient:
             "deepseek-r1",
             "phi-4"
         ]
-        self.current_model_index = 0
         self.intents = discord.Intents.default()
         self.intents.message_content = True
-        self.bot = discord.Client(intents=self.intents)
+        self.intents.dm_messages = True
+        self.intents.members = True
+        self.bot = ShardedBotClient(shard_count=shard_count, intents=self.intents)
         self.tree = app_commands.CommandTree(self.bot)
         self.processed_messages = set()
-        self.link_cache = {}
-
-    async def setup(self) -> None:
-        """Настройка бота."""
-        self.config.validate()
-        self.bot.event(self.on_ready)
-        self.bot.event(self.on_message)
-        self.bot.event(self.on_message_edit)
-        register_commands(self.tree, self)
-        logger.info("Бот настроен.")
-
-    async def close(self) -> None:
-        """Закрытие бота."""
-        await self.bot.close()
-        logger.info("Бот закрыт.")
-
-    async def on_ready(self) -> None:
-        """Событие, когда бот готов."""
-        self.processed_messages.clear()
-        await self.tree.sync()
-        logger.info(f"Бот {self.bot.user.name} готов!")
+        self.link_cache = OrderedDict()
+        self.link_cache_max_size = 1000
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
-        """Обрабатывает редактирование сообщений, чтобы избежать дублирования."""
+        """Обрабатывает редактирование сообщений."""
         if before.content == after.content:
             return
         await self.on_message(after)
 
     def split_response(self, text: str, max_length: int = 2000) -> List[str]:
-        """Разделяет текст на части, если он превышает max_length."""
+        """Разделяет текст на части, если превышает max_length."""
         if len(text) <= max_length:
             return [text]
         parts = []
@@ -86,46 +68,90 @@ class BotClient:
         return parts
 
     async def check_link_validity(self, url: str) -> bool:
-        """Проверяет валидность ссылки, возвращает True, если статус-код 200."""
+        """Проверяет валидность ссылки (статус-код 200)."""
         if url in self.link_cache:
-            logger.debug(f"Использую кэшированный результат для {url}: {self.link_cache[url]}")
             return self.link_cache[url]
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.head(url, timeout=5, allow_redirects=True) as response:
                     is_valid = response.status == 200
                     self.link_cache[url] = is_valid
-                    logger.debug(f"Проверка ссылки {url}: статус {response.status}, валидность: {is_valid}")
+                    if len(self.link_cache) > self.link_cache_max_size:
+                        self.link_cache.popitem(last=False)
                     return is_valid
         except Exception as e:
-            logger.error(f"Ошибка проверки ссылки {url}: {e}")
+            logger.error(f"Ошибка проверки {url}: {e}")
             self.link_cache[url] = False
+            if len(self.link_cache) > self.link_cache_max_size:
+                self.link_cache.popitem(last=False)
             return False
 
     async def format_links(self, text: str) -> str:
-        """Форматирует ссылки в тексте в формате [text](<ссылка>), зачеркивает текст невалидных ссылок."""
+        """Форматирует ссылки в формате [text](<ссылка>), зачеркивает невалидные."""
         url_pattern = r'(?<!\]\()https?://[^\s<>\]\)]+[^\s<>\]\)\.,/A-Z0-9-]?[/)](?!\))?'
         urls = re.findall(url_pattern, text, re.IGNORECASE)
-        logger.debug(f"Найденные URL: {urls}")
-        for url in urls:
+        if urls:
+            validities = await asyncio.gather(*[self.check_link_validity(url) for url in urls])
+        else:
+            validities = []
+        for url, is_valid in zip(urls, validities):
             if not re.search(r'\[.*?\]\(<' + re.escape(url) + r'>\)', text):
                 match = re.search(r'([^\s\(]+)(?:\s*\(|\s+)' + re.escape(url), text)
-                if match:
-                    link_text = match.group(1).strip().rstrip(':').rstrip('.')
-                else:
-                    link_text = "Link"
+                link_text = match.group(1).strip().rstrip(':').rstrip('.') if match else "Link"
                 clean_url = url.rstrip('/').rstrip(')')
-                is_valid = await self.check_link_validity(clean_url)
                 formatted_link = f"[{link_text}](<{clean_url}>)" if is_valid else f"~~{link_text}~~"
                 if match:
                     text = text.replace(f"{match.group(1)} {url}", formatted_link).replace(f"{match.group(1)} ({url})", formatted_link)
                 else:
                     text = text.replace(url, formatted_link)
-                logger.debug(f"Форматированная ссылка: {formatted_link}, валидность: {is_valid}")
         return text
 
-    async def generate_response(self, user_id: str, message_id: str, text: str) -> str:
-        """Генерирует ответ на запрос пользователя с использованием одной модели."""
+    def determine_web_search_need(self, text: str, context: List[Dict]) -> bool:
+        """Определяет необходимость веб-поиска."""
+        keywords = [
+            "сегодня", "сейчас", "новости", "события", "погода", "статистика", "курс", "цена", "обновление",
+            "вчера", "завтра", "на этой неделе", "в этом месяце", "в этом году", "недавно", "только что",
+            "прямо сейчас", "в реальном времени", "актуально", "последний", "новый", "текущий", "происходит",
+            "результаты", "тренды", "прогноз", "расписание", "время", "дата", "сколько стоит", "где купить",
+            "обзор", "рейтинг", "отзывы", "информация", "данные", "факты", "ситуация", "кризис", "рынок",
+            "биржа", "котировки", "выборы", "спорт", "матч", "игра", "турнир", "кино", "фильм", "сериал",
+            "релиз", "премьера", "запуск", "анонс", "объявление"
+        ]
+        text_lower = text.lower()
+        if any(keyword in text_lower for keyword in keywords):
+            return True
+        for msg in context[-3:]:
+            if "user" in msg.get("role", "") and any(keyword in msg.get("content", "").lower() for keyword in keywords):
+                return True
+        if re.search(r"\b(что происходит|какая погода|какой курс|последние новости|что нового|кто выиграл|где сейчас|когда будет|сколько времени|какой счет)\b", text_lower):
+            return True
+        if re.search(r"\b(202[0-9]|сейчас|в этом году|на сегодня|на завтра|вчера|на этой неделе)\b", text_lower):
+            return True
+        return False
+
+    async def try_model(self, model: str, messages: List[Dict], max_tokens: int, web_search: bool) -> str | None:
+        """Пытается получить ответ от указанной модели."""
+        try:
+            response = await asyncio.to_thread(
+                self.client.chat.completions.create,
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                stream=False,
+                web_search=web_search
+            )
+            response_text = response.choices[0].message.content.strip()
+            if response_text:
+                return response_text
+        except Exception as e:
+            error_msg = str(e)
+            if "Response 400: Content policy violation detected" in error_msg:
+                return "content_policy_violation"
+            logger.error(f"Ошибка с {model} ({'с веб-поиском' if web_search else 'без веб-поиска'}): {e}")
+        return None
+
+    async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message) -> str:
+        """Генерирует ответ на запрос пользователя."""
         try:
             context = await self.db.get_context(user_id)
             current_date = datetime.now().strftime("%Y-%m-%d")
@@ -141,53 +167,62 @@ class BotClient:
             ).format(current_date=current_date, current_time=current_time)
 
             messages = context + [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
-            keywords_requiring_web_search = ["сегодня", "сейчас", "новости", "события", "погода", "статистика"]
-            needs_web_search = any(keyword in text.lower() for keyword in keywords_requiring_web_search)
+            needs_web_search = self.determine_web_search_need(text, context)
 
-            # Используем первую модель для без веб-поиска
-            model = self.models[0]
-            try:
-                logger.info(f"Попытка запроса к модели {model} без веб-поиска")
-                response = await asyncio.to_thread(self.client.chat.completions.create,
-                    model=model,
-                    messages=messages,
-                    max_tokens=2000,
-                    stream=False,
-                    web_search=False
-                )
-                response_text = response.choices[0].message.content.strip()
-                logger.debug(f"Ответ модели {model} (без веб-поиска): {response_text}")
-            except Exception as e:
-                logger.error(f"Ошибка с моделью {model} (без веб-поиска): {e}")
-                response_text = None
+            response_text = None
+            if not needs_web_search:
+                for model in self.models:
+                    response_text = await self.try_model(model, messages, max_tokens=2000, web_search=False)
+                    if response_text == "content_policy_violation":
+                        temp_message = await message.channel.send("Нарушение политики контента, запрос заблокирован! 🚫")
+                        await asyncio.sleep(5)
+                        try:
+                            await temp_message.delete()
+                            logger.info(f"Сообщение о нарушении политики удалено для пользователя {user_id}")
+                        except Exception as e:
+                            logger.error(f"Ошибка удаления сообщения о нарушении политики: {e}")
+                        return None
+                    if response_text:
+                        break
 
-            if not response_text or needs_web_search:
-                try:
-                    logger.info(f"Попытка запроса к модели {model} с веб-поиском")
-                    response = await asyncio.to_thread(self.client.chat.completions.create,
-                        model=model,
-                        messages=messages,
-                        max_tokens=700,
-                        stream=False,
-                        web_search=True
-                    )
-                    response_text = response.choices[0].message.content.strip()
-                    logger.debug(f"Ответ модели {model} (с веб-поиском): {response_text}")
-                    if needs_web_search:
-                        response_text = f"*Проверяю актуальные данные...*\n{response_text}"
-                except Exception as e:
-                    logger.error(f"Ошибка с моделью {model} (с веб-поиском): {e}")
-                    response_text = "**Ой!** *Не могу получить данные.* Попробуй позже."
+            if response_text is None or needs_web_search:
+                for model in self.models:
+                    response_text = await self.try_model(model, messages, max_tokens=700, web_search=True)
+                    if response_text == "content_policy_violation":
+                        temp_message = await message.channel.send("Нарушение политики контента, запрос заблокирован! 🚫")
+                        await asyncio.sleep(5)
+                        try:
+                            await temp_message.delete()
+                            logger.info(f"Сообщение о нарушении политики удалено для пользователя {user_id}")
+                        except Exception as e:
+                            logger.error(f"Ошибка удаления сообщения о нарушении политики: {e}")
+                        return None
+                    if response_text:
+                        if needs_web_search:
+                            response_text = f"{response_text}"
+                        break
+                else:
+                    response_text = "**Ой!** Не могу получить данные. Попробуй позже. 😓"
 
-            final_response = response_text or "**Ой!** *Не знаю, что сказать.* Чем могу помочь?"
-            final_response = await self.format_links(final_response)
+            if not response_text:
+                response_text = "**Ой!** Не знаю, что сказать... Чем могу помочь? 🤔"
+            final_response = await self.format_links(response_text)
             await self.db.add_message(user_id, message_id, "user", text)
             await self.db.add_message(user_id, message_id, "assistant", final_response)
+            logger.info(f"Ответ успешно сгенерирован для пользователя {user_id}")
             return final_response
 
         except Exception as e:
             logger.error(f"Ошибка генерации ответа: {e}")
-            return "**Упс!** *Произошла ошибка.* Попробуй снова!"
+            error_msg = "**Упс!** Произошла ошибка. Попробуй снова! 😅"
+            temp_message = await message.channel.send(error_msg)
+            await asyncio.sleep(5)
+            try:
+                await temp_message.delete()
+                logger.info(f"Сообщение об ошибке генерации удалено для пользователя {user_id}")
+            except Exception as e:
+                logger.error(f"Ошибка удаления сообщения об ошибке генерации: {e}")
+            return None
 
     async def on_message(self, message: discord.Message) -> None:
         """Обрабатывает входящие сообщения."""
@@ -205,18 +240,66 @@ class BotClient:
         )
 
         if not should_respond:
-            logger.debug(f"Сообщение {message_key} не требует ответа.")
             return
 
         self.processed_messages.add(message_key)
 
         async with message.channel.typing():
             content = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
-            response = await self.generate_response(str(message.author.id), str(message.id), content)
+            response = await self.generate_response(str(message.author.id), str(message.id), content, message)
+            if response is None:
+                return
             parts = self.split_response(response)
 
         for i, part in enumerate(parts):
-            if i == 0:
-                await message.reply(part)
-            else:
-                await message.channel.send(part)
+            try:
+                if i == 0:
+                    await message.reply(part)
+                else:
+                    await message.channel.send(part)
+            except Forbidden:
+                error_msg = (
+                    "Не удалось отправить сообщение. 😓\n"
+                    "Проверьте, есть ли у меня права на отправку сообщений в этом канале, "
+                    "или разрешите мне отправлять вам личные сообщения в настройках приватности."
+                )
+                logger.error(f"Ошибка отправки сообщения пользователю {message.author.id}: отсутствуют права")
+                temp_message = await message.channel.send(error_msg)
+                await asyncio.sleep(5)
+                try:
+                    await temp_message.delete()
+                    logger.info(f"Сообщение об ошибке прав удалено для пользователя {message.author.id}")
+                except Exception as e:
+                    logger.error(f"Ошибка удаления сообщения об ошибке прав: {e}")
+                if not isinstance(message.channel, discord.DMChannel):
+                    try:
+                        temp_dm = await message.author.send(error_msg)
+                        await asyncio.sleep(5)
+                        try:
+                            await temp_dm.delete()
+                            logger.info(f"DM об ошибке прав удалено для пользователя {message.author.id}")
+                        except Exception as e:
+                            logger.error(f"Ошибка удаления DM об ошибке прав: {e}")
+                    except Forbidden:
+                        logger.error(f"Не удалось отправить DM пользователю {message.author.id}: отсутствуют права")
+            except HTTPException as e:
+                logger.error(f"Ошибка HTTP при отправке сообщения: {e}")
+                error_msg = "**Упс!** *Не удалось отправить сообщение из-за ошибки Discord API.* Попробуй позже! 😅"
+                temp_message = await message.channel.send(error_msg)
+                await asyncio.sleep(5)
+                try:
+                    await temp_message.delete()
+                    logger.info(f"Сообщение об ошибке API удалено для пользователя {message.author.id}")
+                except Exception as e:
+                    logger.error(f"Ошибка удаления сообщения об ошибке API: {e}")
+                if not isinstance(message.channel, discord.DMChannel):
+                    try:
+                        temp_dm = await message.author.send(error_msg)
+                        await asyncio.sleep(5)
+                        try:
+                            await temp_dm.delete()
+                            logger.info(f"DM об ошибке API удалено для пользователя {message.author.id}")
+                        except Exception as e:
+                            logger.error(f"Ошибка удаления DM об ошибке API: {e}")
+                    except Forbidden:
+                        logger.error(f"Не удалось отправить DM пользователю {message.author.id}: отсутствуют права")
