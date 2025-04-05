@@ -1,4 +1,4 @@
-from src.client_runner import start_bot
+from src.start import start_bot
 from src.config import logger
 
 if __name__ == "__main__":

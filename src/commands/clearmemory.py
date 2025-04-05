@@ -1,14 +1,12 @@
 import discord
-from typing import TYPE_CHECKING
-from ..logging_config import logger
-
-if TYPE_CHECKING:
-    from ..client import BotClient
+from discord import app_commands
+from ..config import logger
 
 SUCCESS_MESSAGE = "Память вашего разговора успешно удалена!"
 ERROR_MESSAGE = "Ошибка при очистке памяти. Попробуйте позже."
+description = "Очищает контекст и историю"
 
-async def clearmemory(interaction: discord.Interaction, bot_client: "BotClient") -> None:
+async def clearmemory(interaction: discord.Interaction, bot_client) -> None:
     """Команда /clearmemory: Очищает контекст и историю."""
     await interaction.response.defer(ephemeral=True)
 
@@ -20,3 +18,9 @@ async def clearmemory(interaction: discord.Interaction, bot_client: "BotClient")
     except Exception as e:
         logger.error(f"Ошибка очистки памяти {interaction.user.id}: {e}")
         await interaction.followup.send(ERROR_MESSAGE, ephemeral=True)
+
+def create_command(bot_client):
+    @app_commands.command(name="clearmemory", description=description)
+    async def wrapper(interaction: discord.Interaction) -> None:
+        await clearmemory(interaction, bot_client)
+    return wrapper

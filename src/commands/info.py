@@ -1,32 +1,37 @@
 import discord
-from typing import TYPE_CHECKING
+from discord import app_commands, Embed
+from ..config import logger
 
-if TYPE_CHECKING:
-    from ..client import BotClient
+description = "Информация о боте"
 
-# Константы
-INFO = "Информация"
-BOT_DESCRIPTION = "Бот на базе gpt-4o-mini."
-MODELS = "gpt-4o-mini (резерв: gpt-4o, qwen-2.5-coder-32b и другие.)"
-EMBED_COLOR = discord.Color.blue()
+async def info(interaction: discord.Interaction, bot_client) -> None:
+    """Команда /info: Показывает информацию о боте в виде Embed."""
+    await interaction.response.defer(ephemeral=True)
 
-async def info(interaction: discord.Interaction, bot_client: "BotClient") -> None:
-    """Команда /info: отображает информацию о боте."""
-    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        embed = Embed(
+            title="Информация о боте",
+            color=discord.Color.blue(),
+            description="Основные данные о боте:"
+        )
+        
+        embed.add_field(name="Бот", value=bot_client.bot.user.name, inline=True)
+        embed.add_field(name="ID", value=str(bot_client.bot.user.id), inline=True)
+        embed.add_field(name="Серверов", value=str(len(bot_client.bot.guilds)), inline=True)
+        embed.add_field(name="Задержка", value=f"{round(bot_client.bot.latency * 1000)} мс", inline=True)
 
-    embed = discord.Embed(
-        title=INFO,
-        description=BOT_DESCRIPTION,
-        color=EMBED_COLOR,
-        timestamp=discord.utils.utcnow()
-    )
+        if bot_client.bot.user.avatar:
+            embed.set_thumbnail(url=bot_client.bot.user.avatar.url)
 
-    embed.set_thumbnail(url=bot_client.bot.user.avatar.url if bot_client.bot.user.avatar else discord.Embed.Empty)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        logger.info(f"Команда /info выполнена для {interaction.user.id}")
 
-    embed.add_field(name="Имя", value=bot_client.bot.user.name, inline=True)
-    embed.add_field(name="ID", value=str(bot_client.bot.user.id), inline=True)
-    embed.add_field(name="Модель", value=MODELS, inline=True)
-    embed.add_field(name="Пинг", value=f"{round(bot_client.bot.latency * 1000)}мс", inline=True)
-    embed.add_field(name="Серверы", value=str(len(bot_client.bot.guilds)), inline=True)
+    except Exception as e:
+        logger.error(f"Ошибка команды /info для {interaction.user.id}: {e}")
+        await interaction.followup.send("Ошибка при получении информации.", ephemeral=True)
 
-    await interaction.followup.send(embed=embed)
+def create_command(bot_client):
+    @app_commands.command(name="info", description=description)
+    async def wrapper(interaction: discord.Interaction) -> None:
+        await info(interaction, bot_client)
+    return wrapper
