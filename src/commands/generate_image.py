@@ -19,15 +19,31 @@ ASPECT_RATIOS = {
     "3:4": (512, 672), "3:2": (768, 512), "2:3": (512, 768)
 }
 
+FORBIDDEN_WORDS = ["loli"]
+
 async def generate_image(interaction: discord.Interaction, prompt: str, bot_client, aspect_ratio: tuple[int, int]) -> None:
     global last_execution
-    await interaction.response.defer(ephemeral=True)
+    deferred = True
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except discord.errors.InteractionResponded:
+        deferred = False
 
     async with command_lock:
         if (delay := COOLDOWN - (time() - last_execution)) > 0:
-            await interaction.followup.send(f"Подождите {delay:.1f} сек.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send(f"Подождите {delay:.1f} сек.", ephemeral=True)
+            else:
+                await interaction.followup.send(f"{interaction.user.mention}, подождите {delay:.1f} сек.", ephemeral=True)
             return
         last_execution = time()
+
+    if any(word in prompt.lower() for word in FORBIDDEN_WORDS):
+        if deferred:
+            await interaction.followup.send(f"Этот запрос противоречит нашему TOS!", ephemeral=True)
+        else:
+            await interaction.followup.send(f"{interaction.user.mention}, этот запрос противоречит нашему TOS!", ephemeral=True)
+        return
 
     try:
         response = await AsyncClient(provider=ImageLabs).images.async_generate(
@@ -41,13 +57,22 @@ async def generate_image(interaction: discord.Interaction, prompt: str, bot_clie
         async with aiohttp.ClientSession() as session, session.get(image_url) as resp:
             if resp.status != 200:
                 raise Exception(f"Ошибка: {resp.status}")
-            image_file = File(BytesIO(await resp.read()), filename="generated_image.png")
+            image_file = File(BytesIO(await resp.read()), filename="image.png")
 
-        await interaction.followup.send("Сгенерировано:", file=image_file, ephemeral=True)
+        try:
+            if deferred:
+                await interaction.followup.send("Сгенерировано:", file=image_file, ephemeral=True)
+            else:
+                await interaction.followup.send(f"{interaction.user.mention}, сгенерировано:", file=image_file, ephemeral=True)
+        except discord.errors.HTTPException as e:
+            await interaction.followup.send(f"{interaction.user.mention}, изображение сгенерировано, но не удалось отправить: {e}", ephemeral=True)
         logger.info(f"Изображение для {interaction.user.id}: {prompt}, {aspect_ratio}")
 
     except Exception as e:
-        await interaction.followup.send(f"Ошибка: {e}", ephemeral=True)
+        if deferred:
+            await interaction.followup.send(f"Ошибка: {e}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"{interaction.user.mention}, ошибка: {e}", ephemeral=True)
         logger.error(f"Ошибка для {interaction.user.id}: {e}")
 
 def create_command(bot_client):
