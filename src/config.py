@@ -60,15 +60,16 @@ class BotConfig:
             raise ValueError("DISCORD_TOKEN обязателен")
 
         if self.FIREBASE_CRED_PATH:
-            if not Path(self.FIREBASE_CRED_PATH).is_file():
+            cred_path = Path(self.FIREBASE_CRED_PATH)
+            if not cred_path.is_file():
                 logger.warning(f"Файл Firebase не найден: {self.FIREBASE_CRED_PATH}. Поиск в проекте...")
                 self.FIREBASE_CRED_PATH = self._find_firebase_credentials()
-            elif not self.FIREBASE_CRED_PATH.endswith(".json"):
+            elif not cred_path.suffix == ".json":
                 logger.warning(f"Файл Firebase должен быть JSON: {self.FIREBASE_CRED_PATH}. Поиск в проекте...")
                 self.FIREBASE_CRED_PATH = self._find_firebase_credentials()
             else:
                 try:
-                    with open(self.FIREBASE_CRED_PATH, 'r') as f:
+                    with cred_path.open('r') as f:
                         json.load(f)
                 except json.JSONDecodeError:
                     logger.warning(f"Некорректный JSON файл Firebase: {self.FIREBASE_CRED_PATH}. Поиск в проекте...")
@@ -92,15 +93,16 @@ class BotConfig:
                     self.firebase_initialized = True
                     logger.info("Firebase успешно инициализирован")
                 else:
-                    logger.debug("Firebase уже инициализирован")
                     self.firebase_initialized = True
+                    logger.debug("Firebase уже инициализирован другим процессом")
             except Exception as e:
-                logger.error(f"Ошибка Firebase: {e}")
+                logger.error(f"Ошибка инициализации Firebase: {e}")
                 self.firebase_initialized = False
         else:
             logger.info("Firebase не используется: отсутствует файл учетных данных")
+            self.firebase_initialized = False
 
     @property
-    def use_firebase(self):
+    def use_firebase(self) -> bool:
         """Проверка использования Firebase."""
-        return self.FIREBASE_CRED_PATH is not None and getattr(self, 'firebase_initialized', False)
+        return self.firebase_initialized

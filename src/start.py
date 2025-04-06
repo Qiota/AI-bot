@@ -1,14 +1,12 @@
 import asyncio
 from threading import Thread
-import discord
 from discord import app_commands
-import os
 import importlib
 from pathlib import Path
 from .config import BotConfig, logger
 from .client import BotClient
 from .server import run_flask
-from .sharding import BotActivity  # Импортируем BotActivity
+from .sharding import BotActivity
 
 def register_commands(tree: app_commands.CommandTree, bot_client: BotClient) -> None:
     """Динамически регистрирует все команды из папки commands."""
@@ -44,7 +42,6 @@ def setup_sync(bot_client: BotClient, tree: app_commands.CommandTree) -> None:
             synced = await tree.sync(guild=None)
             logger.info(f"Глобально синхронизировано {len(synced)} команд")
             
-            # Устанавливаем активность бота с учётом шардирования
             await BotActivity.set_shard_activity(bot_client.bot)
             
             logger.info("Бот успешно запущен!")

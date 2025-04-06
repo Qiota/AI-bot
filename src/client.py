@@ -15,19 +15,13 @@ from collections import OrderedDict
 class BotClient:
     """Управление клиентом бота Discord."""
     def __init__(self, config, shard_count: int = 2):
+        logger.info("Создаётся новый экземпляр BotClient.")
         self.config = config
         self.db = Database()
         self.client = Client(provider=PollinationsAI)
         self.models = [
-            "gpt-4o-mini",
-            "gpt-4o",
-            "o1-mini",
-            "qwen-2.5-coder-32b",
-            "llama-3.3-70b",
-            "mistral-nemo",
-            "llama-3.1-8b",
-            "deepseek-r1",
-            "phi-4"
+            "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b",
+            "llama-3.3-70b", "mistral-nemo", "llama-3.1-8b", "deepseek-r1", "phi-4"
         ]
         self.intents = discord.Intents.default()
         self.intents.message_content = True
@@ -39,6 +33,11 @@ class BotClient:
         self.link_cache = OrderedDict()
         self.link_cache_max_size = 1000
 
+    async def on_ready(self):
+        """Событие при запуске бота."""
+        # Этот метод больше не нужен здесь, так как синхронизация команд происходит в start.py
+        pass
+
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
         """Обрабатывает редактирование сообщений."""
         if before.content == after.content:
@@ -49,14 +48,9 @@ class BotClient:
         """Разделяет текст на части, если превышает max_length."""
         if len(text) <= max_length:
             return [text]
-        parts = []
-        current_part = ""
-        sentences = text.split(". ")
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            sentence += ". "
+        parts, current_part = [], ""
+        for sentence in text.split(". "):
+            sentence = sentence.strip() + ". "
             if len(current_part) + len(sentence) <= max_length:
                 current_part += sentence
             else:
@@ -73,7 +67,7 @@ class BotClient:
             return self.link_cache[url]
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.head(url, timeout=5, allow_redirects=True) as response:
+                async with session.head(url, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as response:
                     is_valid = response.status == 200
                     self.link_cache[url] = is_valid
                     if len(self.link_cache) > self.link_cache_max_size:
@@ -90,20 +84,16 @@ class BotClient:
         """Форматирует ссылки в формате [text](<ссылка>), зачеркивает невалидные."""
         url_pattern = r'(?<!\]\()https?://[^\s<>\]\)]+[^\s<>\]\)\.,/A-Z0-9-]?[/)](?!\))?'
         urls = re.findall(url_pattern, text, re.IGNORECASE)
-        if urls:
-            validities = await asyncio.gather(*[self.check_link_validity(url) for url in urls])
-        else:
-            validities = []
+        if not urls:
+            return text
+        validities = await asyncio.gather(*[self.check_link_validity(url) for url in urls])
         for url, is_valid in zip(urls, validities):
             if not re.search(r'\[.*?\]\(<' + re.escape(url) + r'>\)', text):
                 match = re.search(r'([^\s\(]+)(?:\s*\(|\s+)' + re.escape(url), text)
                 link_text = match.group(1).strip().rstrip(':').rstrip('.') if match else "Link"
                 clean_url = url.rstrip('/').rstrip(')')
                 formatted_link = f"[{link_text}](<{clean_url}>)" if is_valid else f"~~{link_text}~~"
-                if match:
-                    text = text.replace(f"{match.group(1)} {url}", formatted_link).replace(f"{match.group(1)} ({url})", formatted_link)
-                else:
-                    text = text.replace(url, formatted_link)
+                text = text.replace(f"{match.group(1)} {url}", formatted_link) if match else text.replace(url, formatted_link)
         return text
 
     def determine_web_search_need(self, text: str, context: List[Dict]) -> bool:
@@ -115,19 +105,22 @@ class BotClient:
             "результаты", "тренды", "прогноз", "расписание", "время", "дата", "сколько стоит", "где купить",
             "обзор", "рейтинг", "отзывы", "информация", "данные", "факты", "ситуация", "кризис", "рынок",
             "биржа", "котировки", "выборы", "спорт", "матч", "игра", "турнир", "кино", "фильм", "сериал",
-            "релиз", "премьера", "запуск", "анонс", "объявление"
+            "релиз", "премьера", "запуск", "анонс", "объявление", "история", "кто такой", "что такое",
+            "где находится", "как добраться", "сколько времени", "какой счет", "кто выиграл", "что нового",
+            "праздник", "мероприятие", "концерт", "выставка", "фестиваль", "цена на", "стоимость",
+            "расположение", "адрес", "телефон", "контакты", "работает ли", "открыто ли", "закрыто ли",
+            "ранее", "будущее", "планы", "ожидания", "итоги", "анализ", "сравнение", "лучший", "худший",
+            "популярный", "известный", "скандал", "происшествие", "авария", "катастрофа", "технологии",
+            "наука", "исследования", "открытие", "изобретение", "патент", "компания", "бренд", "продукт",
+            "больше"
         ]
         text_lower = text.lower()
-        if any(keyword in text_lower for keyword in keywords):
-            return True
-        for msg in context[-3:]:
-            if "user" in msg.get("role", "") and any(keyword in msg.get("content", "").lower() for keyword in keywords):
-                return True
-        if re.search(r"\b(что происходит|какая погода|какой курс|последние новости|что нового|кто выиграл|где сейчас|когда будет|сколько времени|какой счет)\b", text_lower):
-            return True
-        if re.search(r"\b(202[0-9]|сейчас|в этом году|на сегодня|на завтра|вчера|на этой неделе)\b", text_lower):
-            return True
-        return False
+        return (
+            any(kw in text_lower for kw in keywords) or
+            any(kw in msg.get("content", "").lower() for msg in context[-3:] if "user" in msg.get("role", "") for kw in keywords) or
+            bool(re.search(r"\b(что происходит|какая погода|какой курс|последние новости|кто выиграл|где сейчас|когда будет|сколько времени|какой счет)\b", text_lower)) or
+            bool(re.search(r"\b(202[0-9]|сейчас|в этом году|на сегодня|на завтра|вчера|на этой неделе)\b", text_lower))
+        )
 
     async def try_model(self, model: str, messages: List[Dict], max_tokens: int, web_search: bool) -> str | None:
         """Пытается получить ответ от указанной модели."""
@@ -140,166 +133,115 @@ class BotClient:
                 stream=False,
                 web_search=web_search
             )
-            response_text = response.choices[0].message.content.strip()
-            if response_text:
-                return response_text
+            return response.choices[0].message.content.strip() or None
         except Exception as e:
-            error_msg = str(e)
-            if "Response 400: Content policy violation detected" in error_msg:
+            if "Content policy violation" in str(e):
                 return "content_policy_violation"
-            logger.error(f"Ошибка с {model} ({'с веб-поиском' if web_search else 'без веб-поиска'}): {e}")
-        return None
+            logger.error(f"Ошибка с {model} ({'с веб-поиском' if web_search else 'без'}): {e}")
+            return None
 
-    async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message) -> str:
+    async def get_thread_context(self, channel: discord.abc.Messageable) -> List[Dict]:
+        """Получает контекст из сообщений в ветке."""
+        if not isinstance(channel, discord.Thread):
+            return []
+        messages = []
+        async for msg in channel.history(limit=10):
+            if msg.author.bot and msg.author != self.bot.user:
+                continue
+            role = "assistant" if msg.author == self.bot.user else "user"
+            messages.append({"role": role, "content": msg.content})
+        return messages[::-1]  # Переворачиваем, чтобы сообщения шли в хронологическом порядке
+
+    async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message) -> str | None:
         """Генерирует ответ на запрос пользователя."""
         try:
-            context = await self.db.get_context(user_id)
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            current_time = datetime.now().strftime("%H:%M:%S")
+            # Получаем контекст из базы данных и ветки
+            db_context = await self.db.get_context(user_id)
+            thread_context = await self.get_thread_context(message.channel)
+            now = datetime.now()
             system_prompt = (
-                "Ты - дружелюбный чат-бот, созданный Qiota. Следуй этим правилам:\n"
-                "1. Отвечай **коротко и по делу**. Не добавляй лишнего.\n"
-                "2. Используй **дружелюбный тон**. Добавляй смайлики, если уместно.\n"
-                "3. Если не знаешь ответа, предложи альтернативу: 'Я не уверен, но могу помочь с...'\n"
-                "4. Текущая дата: {current_date}, время: {current_time}. Используй для актуализации.\n"
-                "5. Веб-поиск: сначала попробуй ответить без веб-поиска. Если ответ требует актуальных данных или ты не уверен, используй веб-поиск.\n"
-                "6. Форматируй ответы с использованием Discord Markdown.\n"
-            ).format(current_date=current_date, current_time=current_time)
-
-            messages = context + [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
-            needs_web_search = self.determine_web_search_need(text, context)
+                f"Ты - дружелюбный чат-бот, созданный Qiota. Отвечай коротко и по делу. "
+                f"Дата: {now:%Y-%m-%d}, время: {now:%H:%M:%S}. Используй для актуальности. "
+                f"Форматируй ответы в Discord Markdown."
+            )
+            messages = db_context + thread_context + [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
+            needs_web_search = self.determine_web_search_need(text, thread_context)
 
             response_text = None
-            if not needs_web_search:
-                for model in self.models:
-                    response_text = await self.try_model(model, messages, max_tokens=2000, web_search=False)
-                    if response_text == "content_policy_violation":
-                        temp_message = await message.channel.send("Нарушение политики контента, запрос заблокирован! 🚫")
-                        await asyncio.sleep(5)
-                        try:
-                            await temp_message.delete()
-                            logger.info(f"Сообщение о нарушении политики удалено для пользователя {user_id}")
-                        except Exception as e:
-                            logger.error(f"Ошибка удаления сообщения о нарушении политики: {e}")
-                        return None
-                    if response_text:
-                        break
+            for model in self.models:
+                response_text = await self.try_model(model, messages, 2000, False) if not needs_web_search else None
+                if response_text == "content_policy_violation":
+                    await self._handle_policy_violation(message, user_id)
+                    return None
+                if response_text:
+                    break
 
-            if response_text is None or needs_web_search:
+            if not response_text and needs_web_search:
                 for model in self.models:
-                    response_text = await self.try_model(model, messages, max_tokens=700, web_search=True)
+                    response_text = await self.try_model(model, messages, 700, True)
                     if response_text == "content_policy_violation":
-                        temp_message = await message.channel.send("Нарушение политики контента, запрос заблокирован! 🚫")
-                        await asyncio.sleep(5)
-                        try:
-                            await temp_message.delete()
-                            logger.info(f"Сообщение о нарушении политики удалено для пользователя {user_id}")
-                        except Exception as e:
-                            logger.error(f"Ошибка удаления сообщения о нарушении политики: {e}")
+                        await self._handle_policy_violation(message, user_id)
                         return None
                     if response_text:
-                        if needs_web_search:
-                            response_text = f"{response_text}"
                         break
                 else:
                     response_text = "**Ой!** Не могу получить данные. Попробуй позже. 😓"
 
-            if not response_text:
-                response_text = "**Ой!** Не знаю, что сказать... Чем могу помочь? 🤔"
+            response_text = response_text or "**Ой!** Не знаю, что сказать... Чем могу помочь? 🤔"
             final_response = await self.format_links(response_text)
-            await self.db.add_message(user_id, message_id, "user", text)
-            await self.db.add_message(user_id, message_id, "assistant", final_response)
-            logger.info(f"Ответ успешно сгенерирован для пользователя {user_id}")
+            await self.db.add_message(user_id, message_id, "user", text, message.author.name)
+            await self.db.add_message(user_id, message_id, "assistant", final_response, self.bot.user.name)
+            logger.info(f"Ответ сгенерирован для {user_id}")
             return final_response
 
         except Exception as e:
             logger.error(f"Ошибка генерации ответа: {e}")
-            error_msg = "**Упс!** Произошла ошибка. Попробуй снова! 😅"
-            temp_message = await message.channel.send(error_msg)
-            await asyncio.sleep(5)
-            try:
-                await temp_message.delete()
-                logger.info(f"Сообщение об ошибке генерации удалено для пользователя {user_id}")
-            except Exception as e:
-                logger.error(f"Ошибка удаления сообщения об ошибке генерации: {e}")
+            await self._send_temp_message(message.channel, "**Упс!** Ошибка. Попробуй снова! 😅", user_id)
             return None
 
-    async def on_message(self, message: discord.Message) -> None:
-        """Обрабатывает входящие сообщения."""
-        if message.author.bot:
-            return
+    async def _handle_policy_violation(self, message: discord.Message, user_id: str) -> None:
+        """Обрабатывает нарушение политики контента."""
+        await self._send_temp_message(message.channel, "Нарушение политики контента! 🚫", user_id)
 
-        message_key = f"{message.id}-{message.channel.id}"
-        if message_key in self.processed_messages:
+    async def _send_temp_message(self, channel, content: str, user_id: str) -> None:
+        """Отправляет временное сообщение с удалением через 5 секунд."""
+        try:
+            temp_message = await channel.send(content)
+            await asyncio.sleep(5)
+            await temp_message.delete()
+            logger.info(f"Временное сообщение удалено для {user_id}")
+        except Exception as e:
+            logger.error(f"Ошибка удаления временного сообщения: {e}")
+
+    async def on_message(self, message: discord.Message) -> None:
+        """Обрабатывает входящие сообщения, включая ветки."""
+        if message.author.bot or f"{message.id}-{message.channel.id}" in self.processed_messages:
             return
 
         should_respond = (
             self.bot.user in message.mentions or
             (message.reference and message.reference.resolved and message.reference.resolved.author == self.bot.user) or
-            isinstance(message.channel, discord.DMChannel)
+            isinstance(message.channel, discord.DMChannel) or
+            isinstance(message.channel, discord.Thread)  # Добавляем поддержку веток
         )
-
         if not should_respond:
             return
 
-        self.processed_messages.add(message_key)
-
+        self.processed_messages.add(f"{message.id}-{message.channel.id}")
         async with message.channel.typing():
             content = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
             response = await self.generate_response(str(message.author.id), str(message.id), content, message)
-            if response is None:
+            if not response:
                 return
-            parts = self.split_response(response)
-
-        for i, part in enumerate(parts):
-            try:
-                if i == 0:
-                    await message.reply(part)
-                else:
-                    await message.channel.send(part)
-            except Forbidden:
-                error_msg = (
-                    "Не удалось отправить сообщение. 😓\n"
-                    "Проверьте, есть ли у меня права на отправку сообщений в этом канале, "
-                    "или разрешите мне отправлять вам личные сообщения в настройках приватности."
-                )
-                logger.error(f"Ошибка отправки сообщения пользователю {message.author.id}: отсутствуют права")
-                temp_message = await message.channel.send(error_msg)
-                await asyncio.sleep(5)
+            for part in self.split_response(response):
                 try:
-                    await temp_message.delete()
-                    logger.info(f"Сообщение об ошибке прав удалено для пользователя {message.author.id}")
-                except Exception as e:
-                    logger.error(f"Ошибка удаления сообщения об ошибке прав: {e}")
-                if not isinstance(message.channel, discord.DMChannel):
-                    try:
-                        temp_dm = await message.author.send(error_msg)
-                        await asyncio.sleep(5)
-                        try:
-                            await temp_dm.delete()
-                            logger.info(f"DM об ошибке прав удалено для пользователя {message.author.id}")
-                        except Exception as e:
-                            logger.error(f"Ошибка удаления DM об ошибке прав: {e}")
-                    except Forbidden:
-                        logger.error(f"Не удалось отправить DM пользователю {message.author.id}: отсутствуют права")
-            except HTTPException as e:
-                logger.error(f"Ошибка HTTP при отправке сообщения: {e}")
-                error_msg = "**Упс!** *Не удалось отправить сообщение из-за ошибки Discord API.* Попробуй позже! 😅"
-                temp_message = await message.channel.send(error_msg)
-                await asyncio.sleep(5)
-                try:
-                    await temp_message.delete()
-                    logger.info(f"Сообщение об ошибке API удалено для пользователя {message.author.id}")
-                except Exception as e:
-                    logger.error(f"Ошибка удаления сообщения об ошибке API: {e}")
-                if not isinstance(message.channel, discord.DMChannel):
-                    try:
-                        temp_dm = await message.author.send(error_msg)
-                        await asyncio.sleep(5)
-                        try:
-                            await temp_dm.delete()
-                            logger.info(f"DM об ошибке API удалено для пользователя {message.author.id}")
-                        except Exception as e:
-                            logger.error(f"Ошибка удаления DM об ошибке API: {e}")
-                    except Forbidden:
-                        logger.error(f"Не удалось отправить DM пользователю {message.author.id}: отсутствуют права")
+                    await (message.reply if part == response else message.channel.send)(part)
+                except Forbidden:
+                    await self._send_temp_message(
+                        message.channel,
+                        "Нет прав на отправку. Проверь настройки! 😓",
+                        str(message.author.id)
+                    )
+                except HTTPException as e:
+                    logger.error(f"Ошибка HTTP: {e}")
+                    await self._send_temp_message(message.channel, "**Упс!** Ошибка API. Попробуй позже! 😅", str(message.author.id))
