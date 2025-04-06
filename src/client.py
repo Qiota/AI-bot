@@ -2,6 +2,7 @@ import discord
 from discord import app_commands, Forbidden, HTTPException
 import asyncio
 from typing import List, Dict
+import requests
 from g4f.client import Client
 from g4f.Provider import PollinationsAI
 from .logging_config import logger
@@ -11,7 +12,8 @@ from datetime import datetime
 import re
 import aiohttp
 from collections import OrderedDict
-import requests
+import json
+import os
 
 class BotClient:
     """Управление клиентом бота Discord."""
@@ -20,11 +22,10 @@ class BotClient:
         self.config = config
         self.db = Database()
         self.client = Client(provider=PollinationsAI)
-        self.text_models = [
-            "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b", "llama-3.3-70b",
-            "mistral-nemo", "llama-3.1-8b", "deepseek-r1", "phi-4", "qwq-32b", "deepseek-v3"
-        ]
-        self.vision_models = ["openai", "openai-large", "claude-hybridspace"]
+        self.text_models = []
+        self.vision_models = []
+        self.models_file = "models.json"
+        self.load_models_from_json()
         self.intents = discord.Intents.default()
         self.intents.message_content = True
         self.intents.dm_messages = True
@@ -35,13 +36,147 @@ class BotClient:
         self.link_cache = OrderedDict()
         self.link_cache_max_size = 1000
         self.vision_headers = {"Content-Type": "application/json"}
-        self.rate_limit_delay = 3.0
+        self.rate_limit_delay = 5.0
         self.max_retries = 3
-        self.retry_delay = 5.0
+        self.retry_delay_base = 10.0  # Базовая задержка для backoff
+        self.models_data = None
+        self.last_model_update = None
+        self.initialized = False
+        asyncio.ensure_future(self.update_models_periodically())
+
+    def load_models_from_json(self):
+        """Загружает последние успешные модели из JSON-файла."""
+        default_models = {
+            "text_models": ["gpt-4o-mini", "gpt-4o", "o1-mini"],
+            "vision_models": ["openai", "openai-large"],
+            "last_update": None
+        }
+        if os.path.exists(self.models_file):
+            try:
+                with open(self.models_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                self.text_models = data.get("text_models", default_models["text_models"])
+                self.vision_models = data.get("vision_models", default_models["vision_models"])
+                self.last_model_update = datetime.fromisoformat(data.get("last_update")) if data.get("last_update") else None
+                logger.info(f"Модели загружены из {self.models_file}: text_models={self.text_models}, vision_models={self.vision_models}")
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Ошибка чтения {self.models_file}: {e}")
+                self.text_models = default_models["text_models"]
+                self.vision_models = default_models["vision_models"]
+                self.last_model_update = None
+        else:
+            self.text_models = default_models["text_models"]
+            self.vision_models = default_models["vision_models"]
+            self.last_model_update = None
+            self.save_models_to_json()
+
+    def save_models_to_json(self):
+        """Сохраняет текущие модели в JSON-файл."""
+        data = {
+            "text_models": self.text_models,
+            "vision_models": self.vision_models,
+            "last_update": self.last_model_update.isoformat() if self.last_model_update else None
+        }
+        try:
+            with open(self.models_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            logger.info(f"Модели сохранены в {self.models_file}")
+        except Exception as e:
+            logger.error(f"Ошибка записи в {self.models_file}: {e}")
+
+    async def update_models_periodically(self):
+        """Периодически обновляет списки моделей каждые 30 минут после первой инициализации."""
+        if not self.initialized:
+            await self.fetch_available_models()
+            self.initialized = True
+        while True:
+            await asyncio.sleep(1800)  # 30 минут
+            await self.fetch_available_models()
+
+    async def fetch_available_models(self):
+        """Получает актуальный список моделей с API PollinationsAI и проверяет их доступность."""
+        url = "https://text.pollinations.ai/models"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    response.raise_for_status()
+                    self.models_data = await response.json()
+                    self.last_model_update = datetime.now()
+
+                    new_text_models = []
+                    new_vision_models = []
+
+                    if isinstance(self.models_data, list):
+                        new_text_models = [m.get('id') for m in self.models_data if m.get('id') and not m.get('supports_vision', False)]
+                        new_vision_models = [m.get('id') for m in self.models_data if m.get('id') and m.get('supports_vision', False)]
+                    elif isinstance(self.models_data, dict):
+                        new_text_models = self.models_data.get('text_models', [])
+                        new_vision_models = self.models_data.get('vision_models', [])
+
+                    valid_text_models = []
+                    for model in new_text_models:
+                        if await self.check_model_availability(model, is_vision=False):
+                            valid_text_models.append(model)
+                        else:
+                            logger.warning(f"Модель {model} недоступна и исключена из списка текстовых моделей.")
+
+                    valid_vision_models = []
+                    for model in new_vision_models:
+                        if await self.check_model_availability(model, is_vision=True):
+                            valid_vision_models.append(model)
+                        else:
+                            logger.warning(f"Модель {model} недоступна и исключена из списка vision моделей.")
+
+                    if valid_text_models:
+                        self.text_models = valid_text_models
+                    else:
+                        logger.warning("Список текстовых моделей пуст, используются последние успешные значения из JSON.")
+
+                    if valid_vision_models:
+                        self.vision_models = valid_vision_models
+                    else:
+                        logger.warning("Список vision моделей пуст, используются последние успешные значения из JSON.")
+
+                    self.save_models_to_json()
+                    logger.info(f"Обновлены модели: text_models={self.text_models}, vision_models={self.vision_models}")
+        except Exception as e:
+            logger.error(f"Ошибка при получении моделей: {e}")
+            logger.warning(f"Используются последние успешные модели из JSON: text_models={self.text_models}, vision_models={self.vision_models}")
+
+    async def check_model_availability(self, model: str, is_vision: bool = False) -> bool:
+        """Проверяет доступность модели."""
+        try:
+            if is_vision:
+                url = f"https://text.pollinations.ai/{model}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.head(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                        return response.status == 200
+            else:
+                response = await asyncio.to_thread(
+                    self.client.chat.completions.create,
+                    model=model,
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=1
+                )
+                return response.choices[0].message.content is not None
+        except Exception as e:
+            logger.error(f"Модель {model} недоступна: {e}")
+            return False
+
+    async def get_models_list(self) -> str:
+        """Возвращает список доступных моделей и голосов в формате JSON."""
+        await self.fetch_available_models()
+        if not self.models_data:
+            return "```json\n{\"error\": \"Не удалось получить данные о моделях.\"}\n```"
+        formatted_data = json.dumps(self.models_data, indent=2, ensure_ascii=False)
+        return f"```json\n{formatted_data}\n```"
 
     async def on_ready(self):
         """Событие при запуске бота."""
-        pass
+        if not self.initialized:
+            await self.fetch_available_models()
+            self.initialized = True
+        logger.info(f"Бот {self.bot.user} готов к работе.")
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
         """Обрабатывает редактирование сообщений."""
@@ -130,7 +265,7 @@ class BotClient:
         )
 
     async def try_text_model(self, model: str, messages: List[Dict], max_tokens: int, web_search: bool = False) -> str | None:
-        """Пытается получить ответ от текстовой модели g4f с обработкой 429."""
+        """Пытается получить ответ от текстовой модели g4f с обработкой 429 с экспоненциальным backoff."""
         for attempt in range(self.max_retries):
             try:
                 response = await asyncio.to_thread(
@@ -143,8 +278,9 @@ class BotClient:
                 return response.choices[0].message.content
             except Exception as e:
                 if "429" in str(e):
-                    logger.warning(f"Слишком много запросов для модели {model} (попытка {attempt + 1}/{self.max_retries}). Ожидание {self.retry_delay} секунд...")
-                    await asyncio.sleep(self.retry_delay)
+                    delay = self.retry_delay_base * (2 ** attempt)  # Экспоненциальный backoff: 10, 20, 40 сек
+                    logger.warning(f"Слишком много запросов для модели {model} (попытка {attempt + 1}/{self.max_retries}). Ожидание {delay} секунд...")
+                    await asyncio.sleep(delay)
                     continue
                 logger.error(f"Ошибка текстовой модели {model}: {e}")
                 return None
@@ -152,7 +288,7 @@ class BotClient:
         return None
 
     async def try_vision_model(self, model: str, messages: List[Dict], max_tokens: int, web_search: bool = False) -> str | None:
-        """Пытается получить ответ от модели PollinationsAI."""
+        """Пытается получить ответ от модели PollinationsAI с обработкой 429 и 502 с экспоненциальным backoff."""
         vision_url = f"https://text.pollinations.ai/{model}"
         payload = {
             "messages": messages,
@@ -172,9 +308,10 @@ class BotClient:
                 await asyncio.sleep(self.rate_limit_delay)
                 return result['choices'][0]['message']['content']
             except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 429:
-                    logger.warning(f"Слишком много запросов для модели {model} (попытка {attempt + 1}/{self.max_retries}).")
-                    await asyncio.sleep(self.retry_delay)
+                if e.response.status_code in (429, 502):
+                    delay = self.retry_delay_base * (2 ** attempt)  # Экспоненциальный backoff: 10, 20, 40 сек
+                    logger.warning(f"Ошибка {e.response.status_code} для модели {model} (попытка {attempt + 1}/{self.max_retries}). Ожидание {delay} секунд...")
+                    await asyncio.sleep(delay)
                     continue
                 logger.error(f"Ошибка с моделью {model}: {e}")
                 return None
@@ -202,7 +339,7 @@ class BotClient:
         return messages[::-1]
 
     async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message) -> str | None:
-        """Генерирует ответ, комбинируя текстовые и PollinationsAI модели."""
+        """Генерирует ответ с использованием интернета для описания изображений и генерации текста."""
         try:
             db_context = await self.db.get_context(user_id)
             thread_context = await self.get_thread_context(message.channel)
@@ -210,6 +347,7 @@ class BotClient:
             system_prompt = (
                 f"Ты - дружелюбный чат-бот, созданный Qiota. Отвечай коротко и по делу. "
                 f"Дата: {now:%Y-%m-%d}, время: {now:%H:%M:%S}. Используй для актуальности. "
+                f"При необходимости используй интернет для получения свежих данных. "
                 f"Форматируй ответы в Discord Markdown."
             )
 
@@ -228,45 +366,50 @@ class BotClient:
 
             response_text = None
             needs_web_search = self.determine_web_search_need(text, thread_context)
-            for model in self.text_models:
-                response_text = await self.try_text_model(model, messages, 2000, web_search=needs_web_search and not has_image)
-                if response_text:
-                    break
 
-            if has_image or (not response_text and needs_web_search):
-                if has_image:
-                    image_description = None
-                    for model in self.vision_models:
-                        image_description = await self.try_vision_model(model, messages, 300, web_search=False)
-                        if image_description:
-                            break
-                    if not image_description:
-                        return "**Ой!** Не удалось описать изображение."
+            # Пробуем текстовые модели с веб-поиском, если требуется актуальность
+            if not has_image or needs_web_search:
+                for model in self.text_models:
+                    response_text = await self.try_text_model(model, messages, 2000, web_search=True)
+                    if response_text:
+                        break
 
-                    search_query = f"На изображении: {image_description}. {text if text else 'Расскажи подробнее.'}"
-                    search_messages = db_context + thread_context + [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": [{"type": "text", "text": search_query}]}
-                    ]
-                    for model in self.vision_models:
-                        vision_response = await self.try_vision_model(model, search_messages, 700, web_search=True)
-                        if vision_response == "content_policy_violation":
-                            await self._handle_policy_violation(message, user_id)
-                            return None
-                        if vision_response:
-                            response_text = vision_response
-                            break
-                    if not vision_response:
-                        response_text = f"На изображении: {image_description}. Не удалось найти информацию."
-                else:  # Только веб-поиск без изображения
-                    for model in self.vision_models:
-                        vision_response = await self.try_vision_model(model, messages, 700, web_search=True)
-                        if vision_response == "content_policy_violation":
-                            await self._handle_policy_violation(message, user_id)
-                            return None
-                        if vision_response:
-                            response_text = vision_response
-                            break
+            # Если есть изображение, используем интернет для описания и ответа
+            if has_image:
+                image_description = None
+                for model in self.vision_models:
+                    # Используем веб-поиск для более точного описания изображения
+                    image_description = await self.try_vision_model(model, messages, 300, web_search=True)
+                    if image_description:
+                        break
+                if not image_description:
+                    return "**Ой!** Не удалось описать изображение."
+
+                # Формируем запрос с описанием изображения и текстом пользователя
+                search_query = f"На изображении: {image_description}. {text if text else 'Расскажи подробнее.'}"
+                search_messages = db_context + thread_context + [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": [{"type": "text", "text": search_query}]}
+                ]
+
+                # Генерируем ответ с использованием интернета
+                for model in self.vision_models:
+                    vision_response = await self.try_vision_model(model, search_messages, 700, web_search=True)
+                    if vision_response == "content_policy_violation":
+                        await self._handle_policy_violation(message, user_id)
+                        return None
+                    if vision_response:
+                        response_text = vision_response
+                        break
+                if not vision_response:
+                    response_text = f"На изображении: {image_description}. Не удалось найти дополнительную информацию."
+
+            # Если веб-поиск не нужен и нет изображения, пробуем без интернета
+            if not response_text and not needs_web_search and not has_image:
+                for model in self.text_models:
+                    response_text = await self.try_text_model(model, messages, 2000, web_search=False)
+                    if response_text:
+                        break
 
             if not response_text:
                 return "**Ой!** Не могу получить данные."
