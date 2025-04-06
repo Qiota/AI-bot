@@ -11,6 +11,7 @@ from datetime import datetime
 import re
 import aiohttp
 from collections import OrderedDict
+import requests
 
 class BotClient:
     """Управление клиентом бота Discord."""
@@ -19,10 +20,7 @@ class BotClient:
         self.config = config
         self.db = Database()
         self.client = Client(provider=PollinationsAI)
-        self.models = [
-            "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b",
-            "llama-3.3-70b", "mistral-nemo", "llama-3.1-8b", "deepseek-r1", "phi-4"
-        ]
+        self.models = ["openai", "openai-large", "claude-hybridspace"]
         self.intents = discord.Intents.default()
         self.intents.message_content = True
         self.intents.dm_messages = True
@@ -32,10 +30,14 @@ class BotClient:
         self.processed_messages = set()
         self.link_cache = OrderedDict()
         self.link_cache_max_size = 1000
+        self.vision_url = "https://text.pollinations.ai/openai"
+        self.vision_headers = {"Content-Type": "application/json"}
+        self.rate_limit_delay = 3.0
+        self.max_retries = 3
+        self.retry_delay = 5.0
 
     async def on_ready(self):
         """Событие при запуске бота."""
-        # Этот метод больше не нужен здесь, так как синхронизация команд происходит в start.py
         pass
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
@@ -122,23 +124,38 @@ class BotClient:
             bool(re.search(r"\b(202[0-9]|сейчас|в этом году|на сегодня|на завтра|вчера|на этой неделе)\b", text_lower))
         )
 
-    async def try_model(self, model: str, messages: List[Dict], max_tokens: int, web_search: bool) -> str | None:
-        """Пытается получить ответ от указанной модели."""
-        try:
-            response = await asyncio.to_thread(
-                self.client.chat.completions.create,
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                stream=False,
-                web_search=web_search
-            )
-            return response.choices[0].message.content.strip() or None
-        except Exception as e:
-            if "Content policy violation" in str(e):
-                return "content_policy_violation"
-            logger.error(f"Ошибка с {model} ({'с веб-поиском' if web_search else 'без'}): {e}")
-            return None
+    async def try_model(self, model: str, messages: List[Dict], max_tokens: int, web_search: bool = False) -> str | None:
+        """Пытается получить ответ от указанной модели (текст и/или изображение)."""
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": False
+        }
+        if web_search:
+            payload["web_search"] = True
+
+        for attempt in range(self.max_retries):
+            try:
+                response = await asyncio.to_thread(
+                    requests.post, self.vision_url, headers=self.vision_headers, json=payload
+                )
+                response.raise_for_status()
+                result = response.json()
+                await asyncio.sleep(self.rate_limit_delay)
+                return result['choices'][0]['message']['content']
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 429:
+                    logger.warning(f"Слишком много запросов для модели {model} (попытка {attempt + 1}/{self.max_retries}). Ожидание {self.retry_delay} секунд...")
+                    await asyncio.sleep(self.retry_delay)
+                    continue
+                logger.error(f"Ошибка с моделью {model}: {e}")
+                return None
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Ошибка с моделью {model}: {e}")
+                return None
+        logger.error(f"Не удалось получить ответ от модели {model} после {self.max_retries} попыток.")
+        return None
 
     async def get_thread_context(self, channel: discord.abc.Messageable) -> List[Dict]:
         """Получает контекст из сообщений в ветке."""
@@ -149,45 +166,80 @@ class BotClient:
             if msg.author.bot and msg.author != self.bot.user:
                 continue
             role = "assistant" if msg.author == self.bot.user else "user"
-            messages.append({"role": role, "content": msg.content})
-        return messages[::-1]  # Переворачиваем, чтобы сообщения шли в хронологическом порядке
+            content = [{"type": "text", "text": msg.content}]
+            if msg.attachments:
+                for attachment in msg.attachments:
+                    if attachment.content_type and attachment.content_type.startswith("image/"):
+                        content.append({"type": "image_url", "image_url": {"url": attachment.url}})
+            messages.append({"role": role, "content": content})
+        return messages[::-1]
 
     async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message) -> str | None:
-        """Генерирует ответ на запрос пользователя."""
+        """Генерирует ответ на запрос пользователя, с поддержкой текста, изображений и веб-поиска."""
         try:
-            # Получаем контекст из базы данных и ветки
             db_context = await self.db.get_context(user_id)
             thread_context = await self.get_thread_context(message.channel)
             now = datetime.now()
             system_prompt = (
                 f"Ты - дружелюбный чат-бот, созданный Qiota. Отвечай коротко и по делу. "
                 f"Дата: {now:%Y-%m-%d}, время: {now:%H:%M:%S}. Используй для актуальности. "
-                f"Форматируй ответы в Discord Markdown."
+                f"Форматируй ответы в Discord Markdown. Если в сообщении есть изображение, опиши его и найди информацию в интернете, "
+                f"чтобы дать точный и связный ответ без разделения на описание и веб-ответ."
             )
-            messages = db_context + thread_context + [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
-            needs_web_search = self.determine_web_search_need(text, thread_context)
 
-            response_text = None
-            for model in self.models:
-                response_text = await self.try_model(model, messages, 2000, False) if not needs_web_search else None
-                if response_text == "content_policy_violation":
-                    await self._handle_policy_violation(message, user_id)
-                    return None
-                if response_text:
-                    break
+            user_content = [{"type": "text", "text": text}]
+            has_image = False
+            if message.attachments:
+                for attachment in message.attachments:
+                    if attachment.content_type and attachment.content_type.startswith("image/"):
+                        user_content.append({"type": "image_url", "image_url": {"url": attachment.url}})
+                        has_image = True
 
-            if not response_text and needs_web_search:
+            messages = db_context + thread_context + [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ]
+
+            image_description = None
+            if has_image:
                 for model in self.models:
-                    response_text = await self.try_model(model, messages, 700, True)
+                    image_description = await self.try_model(model, messages, 300, web_search=False)
+                    if image_description:
+                        break
+                if not image_description:
+                    return "**Ой!** Не удалось описать изображение. Попробуй снова! 😅"
+
+            needs_web_search = self.determine_web_search_need(text, thread_context) or has_image
+            max_tokens = 700 if needs_web_search else 2000
+
+            if has_image and image_description:
+                search_query = f"На изображении: {image_description}. {text if text else 'Расскажи подробнее.'}"
+                search_messages = db_context + thread_context + [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": [{"type": "text", "text": search_query}]}
+                ]
+                response_text = None
+                for model in self.models:
+                    response_text = await self.try_model(model, search_messages, max_tokens, web_search=True)
                     if response_text == "content_policy_violation":
                         await self._handle_policy_violation(message, user_id)
                         return None
                     if response_text:
                         break
-                else:
+                if not response_text:
+                    response_text = f"На изображении: {image_description}. Не удалось найти дополнительную информацию в интернете. 😓"
+            else:
+                response_text = None
+                for model in self.models:
+                    response_text = await self.try_model(model, messages, max_tokens, needs_web_search)
+                    if response_text == "content_policy_violation":
+                        await self._handle_policy_violation(message, user_id)
+                        return None
+                    if response_text:
+                        break
+                if not response_text:
                     response_text = "**Ой!** Не могу получить данные. Попробуй позже. 😓"
 
-            response_text = response_text or "**Ой!** Не знаю, что сказать... Чем могу помочь? 🤔"
             final_response = await self.format_links(response_text)
             await self.db.add_message(user_id, message_id, "user", text, message.author.name)
             await self.db.add_message(user_id, message_id, "assistant", final_response, self.bot.user.name)
@@ -222,7 +274,7 @@ class BotClient:
             self.bot.user in message.mentions or
             (message.reference and message.reference.resolved and message.reference.resolved.author == self.bot.user) or
             isinstance(message.channel, discord.DMChannel) or
-            isinstance(message.channel, discord.Thread)  # Добавляем поддержку веток
+            isinstance(message.channel, discord.Thread)
         )
         if not should_respond:
             return
