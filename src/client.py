@@ -20,7 +20,11 @@ class BotClient:
         self.config = config
         self.db = Database()
         self.client = Client(provider=PollinationsAI)
-        self.models = ["openai", "openai-large", "claude-hybridspace"]
+        self.text_models = [
+            "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b", "llama-3.3-70b",
+            "mistral-nemo", "llama-3.1-8b", "deepseek-r1", "phi-4", "qwq-32b", "deepseek-v3"
+        ]
+        self.vision_models = ["openai", "openai-large", "claude-hybridspace"]
         self.intents = discord.Intents.default()
         self.intents.message_content = True
         self.intents.dm_messages = True
@@ -30,7 +34,6 @@ class BotClient:
         self.processed_messages = set()
         self.link_cache = OrderedDict()
         self.link_cache_max_size = 1000
-        self.vision_url = "https://text.pollinations.ai/openai"
         self.vision_headers = {"Content-Type": "application/json"}
         self.rate_limit_delay = 3.0
         self.max_retries = 3
@@ -116,18 +119,42 @@ class BotClient:
             "наука", "исследования", "открытие", "изобретение", "патент", "компания", "бренд", "продукт",
             "больше"
         ]
+        if isinstance(text, list):
+            text = " ".join(str(item) for item in text)
         text_lower = text.lower()
         return (
             any(kw in text_lower for kw in keywords) or
-            any(kw in msg.get("content", "").lower() for msg in context[-3:] if "user" in msg.get("role", "") for kw in keywords) or
+            any(kw in str(msg.get("content", "")).lower() for msg in context[-3:] if "user" in msg.get("role", "") for kw in keywords) or
             bool(re.search(r"\b(что происходит|какая погода|какой курс|последние новости|кто выиграл|где сейчас|когда будет|сколько времени|какой счет)\b", text_lower)) or
             bool(re.search(r"\b(202[0-9]|сейчас|в этом году|на сегодня|на завтра|вчера|на этой неделе)\b", text_lower))
         )
 
-    async def try_model(self, model: str, messages: List[Dict], max_tokens: int, web_search: bool = False) -> str | None:
-        """Пытается получить ответ от указанной модели (текст и/или изображение)."""
+    async def try_text_model(self, model: str, messages: List[Dict], max_tokens: int, web_search: bool = False) -> str | None:
+        """Пытается получить ответ от текстовой модели g4f с обработкой 429."""
+        for attempt in range(self.max_retries):
+            try:
+                response = await asyncio.to_thread(
+                    self.client.chat.completions.create,
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    web_search=web_search
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                if "429" in str(e):
+                    logger.warning(f"Слишком много запросов для модели {model} (попытка {attempt + 1}/{self.max_retries}). Ожидание {self.retry_delay} секунд...")
+                    await asyncio.sleep(self.retry_delay)
+                    continue
+                logger.error(f"Ошибка текстовой модели {model}: {e}")
+                return None
+        logger.error(f"Не удалось получить ответ от модели {model} после {self.max_retries} попыток.")
+        return None
+
+    async def try_vision_model(self, model: str, messages: List[Dict], max_tokens: int, web_search: bool = False) -> str | None:
+        """Пытается получить ответ от модели PollinationsAI."""
+        vision_url = f"https://text.pollinations.ai/{model}"
         payload = {
-            "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
             "stream": False
@@ -138,7 +165,7 @@ class BotClient:
         for attempt in range(self.max_retries):
             try:
                 response = await asyncio.to_thread(
-                    requests.post, self.vision_url, headers=self.vision_headers, json=payload
+                    requests.post, vision_url, headers=self.vision_headers, json=payload
                 )
                 response.raise_for_status()
                 result = response.json()
@@ -146,7 +173,7 @@ class BotClient:
                 return result['choices'][0]['message']['content']
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 429:
-                    logger.warning(f"Слишком много запросов для модели {model} (попытка {attempt + 1}/{self.max_retries}). Ожидание {self.retry_delay} секунд...")
+                    logger.warning(f"Слишком много запросов для модели {model} (попытка {attempt + 1}/{self.max_retries}).")
                     await asyncio.sleep(self.retry_delay)
                     continue
                 logger.error(f"Ошибка с моделью {model}: {e}")
@@ -175,7 +202,7 @@ class BotClient:
         return messages[::-1]
 
     async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message) -> str | None:
-        """Генерирует ответ на запрос пользователя, с поддержкой текста, изображений и веб-поиска."""
+        """Генерирует ответ, комбинируя текстовые и PollinationsAI модели."""
         try:
             db_context = await self.db.get_context(user_id)
             thread_context = await self.get_thread_context(message.channel)
@@ -183,8 +210,7 @@ class BotClient:
             system_prompt = (
                 f"Ты - дружелюбный чат-бот, созданный Qiota. Отвечай коротко и по делу. "
                 f"Дата: {now:%Y-%m-%d}, время: {now:%H:%M:%S}. Используй для актуальности. "
-                f"Форматируй ответы в Discord Markdown. Если в сообщении есть изображение, опиши его и найди информацию в интернете, "
-                f"чтобы дать точный и связный ответ без разделения на описание и веб-ответ."
+                f"Форматируй ответы в Discord Markdown."
             )
 
             user_content = [{"type": "text", "text": text}]
@@ -200,45 +226,50 @@ class BotClient:
                 {"role": "user", "content": user_content}
             ]
 
-            image_description = None
-            if has_image:
-                for model in self.models:
-                    image_description = await self.try_model(model, messages, 300, web_search=False)
-                    if image_description:
-                        break
-                if not image_description:
-                    return "**Ой!** Не удалось описать изображение. Попробуй снова! 😅"
+            response_text = None
+            needs_web_search = self.determine_web_search_need(text, thread_context)
+            for model in self.text_models:
+                response_text = await self.try_text_model(model, messages, 2000, web_search=needs_web_search and not has_image)
+                if response_text:
+                    break
 
-            needs_web_search = self.determine_web_search_need(text, thread_context) or has_image
-            max_tokens = 700 if needs_web_search else 2000
+            if has_image or (not response_text and needs_web_search):
+                if has_image:
+                    image_description = None
+                    for model in self.vision_models:
+                        image_description = await self.try_vision_model(model, messages, 300, web_search=False)
+                        if image_description:
+                            break
+                    if not image_description:
+                        return "**Ой!** Не удалось описать изображение."
 
-            if has_image and image_description:
-                search_query = f"На изображении: {image_description}. {text if text else 'Расскажи подробнее.'}"
-                search_messages = db_context + thread_context + [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": [{"type": "text", "text": search_query}]}
-                ]
-                response_text = None
-                for model in self.models:
-                    response_text = await self.try_model(model, search_messages, max_tokens, web_search=True)
-                    if response_text == "content_policy_violation":
-                        await self._handle_policy_violation(message, user_id)
-                        return None
-                    if response_text:
-                        break
-                if not response_text:
-                    response_text = f"На изображении: {image_description}. Не удалось найти дополнительную информацию в интернете. 😓"
-            else:
-                response_text = None
-                for model in self.models:
-                    response_text = await self.try_model(model, messages, max_tokens, needs_web_search)
-                    if response_text == "content_policy_violation":
-                        await self._handle_policy_violation(message, user_id)
-                        return None
-                    if response_text:
-                        break
-                if not response_text:
-                    response_text = "**Ой!** Не могу получить данные. Попробуй позже. 😓"
+                    search_query = f"На изображении: {image_description}. {text if text else 'Расскажи подробнее.'}"
+                    search_messages = db_context + thread_context + [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": [{"type": "text", "text": search_query}]}
+                    ]
+                    for model in self.vision_models:
+                        vision_response = await self.try_vision_model(model, search_messages, 700, web_search=True)
+                        if vision_response == "content_policy_violation":
+                            await self._handle_policy_violation(message, user_id)
+                            return None
+                        if vision_response:
+                            response_text = vision_response
+                            break
+                    if not vision_response:
+                        response_text = f"На изображении: {image_description}. Не удалось найти информацию."
+                else:  # Только веб-поиск без изображения
+                    for model in self.vision_models:
+                        vision_response = await self.try_vision_model(model, messages, 700, web_search=True)
+                        if vision_response == "content_policy_violation":
+                            await self._handle_policy_violation(message, user_id)
+                            return None
+                        if vision_response:
+                            response_text = vision_response
+                            break
+
+            if not response_text:
+                return "**Ой!** Не могу получить данные."
 
             final_response = await self.format_links(response_text)
             await self.db.add_message(user_id, message_id, "user", text, message.author.name)
@@ -248,7 +279,7 @@ class BotClient:
 
         except Exception as e:
             logger.error(f"Ошибка генерации ответа: {e}")
-            await self._send_temp_message(message.channel, "**Упс!** Ошибка. Попробуй снова! 😅", user_id)
+            await self._send_temp_message(message.channel, "**Упс!** Ошибка.", user_id)
             return None
 
     async def _handle_policy_violation(self, message: discord.Message, user_id: str) -> None:
@@ -266,7 +297,7 @@ class BotClient:
             logger.error(f"Ошибка удаления временного сообщения: {e}")
 
     async def on_message(self, message: discord.Message) -> None:
-        """Обрабатывает входящие сообщения, включая ветки."""
+        """Обрабатывает входящие сообщения."""
         if message.author.bot or f"{message.id}-{message.channel.id}" in self.processed_messages:
             return
 
@@ -289,11 +320,7 @@ class BotClient:
                 try:
                     await (message.reply if part == response else message.channel.send)(part)
                 except Forbidden:
-                    await self._send_temp_message(
-                        message.channel,
-                        "Нет прав на отправку. Проверь настройки! 😓",
-                        str(message.author.id)
-                    )
+                    await self._send_temp_message(message.channel, "Нет прав на отправку.", str(message.author.id))
                 except HTTPException as e:
                     logger.error(f"Ошибка HTTP: {e}")
-                    await self._send_temp_message(message.channel, "**Упс!** Ошибка API. Попробуй позже! 😅", str(message.author.id))
+                    await self._send_temp_message(message.channel, "**Упс!** Ошибка API.", str(message.author.id))
