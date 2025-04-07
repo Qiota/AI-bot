@@ -6,6 +6,10 @@ description = "Создаёт новую приватную ветку для о
 
 async def newthread(interaction: discord.Interaction, name: str, bot_client) -> None:
     """Команда /newthread: Создаёт новую приватную ветку для обсуждения."""
+    if isinstance(interaction.channel, discord.DMChannel):
+        await interaction.response.send_message("Команда недоступна в личных сообщениях.", ephemeral=True)
+        return
+
     if not interaction.channel.permissions_for(interaction.guild.me).create_private_threads:
         await interaction.response.send_message("Отсутствуют права на создание приватных веток.", ephemeral=True)
         logger.warning(f"Бот не имеет прав на создание приватных веток в канале {interaction.channel.id} для команды /newthread.")
@@ -13,7 +17,6 @@ async def newthread(interaction: discord.Interaction, name: str, bot_client) -> 
 
     if len(name) > 100:
         await interaction.response.send_message("Имя ветки превышает 100 символов.", ephemeral=True)
-        logger.warning(f"Пользователь {interaction.user.id} указал имя ветки длиной {len(name)} символов: {name}")
         return
 
     try:
@@ -24,7 +27,6 @@ async def newthread(interaction: discord.Interaction, name: str, bot_client) -> 
         )
         await interaction.response.send_message(f"Приватная ветка {thread.mention} создана.", ephemeral=True)
         await thread.send(f"Приватная ветка {name} создана для обсуждения.")
-        logger.info(f"Команда /newthread выполнена пользователем {interaction.user.id}: создана приватная ветка '{name}' (ID: {thread.id}).")
     except discord.HTTPException as e:
         await interaction.response.send_message(f"Ошибка создания ветки: {e}", ephemeral=True)
         logger.error(f"Ошибка HTTP в /newthread для пользователя {interaction.user.id}: {e}")
