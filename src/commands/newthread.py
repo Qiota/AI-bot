@@ -10,11 +10,6 @@ async def newthread(interaction: discord.Interaction, name: str, bot_client) -> 
         await interaction.response.send_message("Команда недоступна в личных сообщениях.", ephemeral=True)
         return
 
-    if not interaction.channel.permissions_for(interaction.guild.me).create_private_threads:
-        await interaction.response.send_message("Отсутствуют права на создание приватных веток.", ephemeral=True)
-        logger.warning(f"Бот не имеет прав на создание приватных веток в канале {interaction.channel.id} для команды /newthread.")
-        return
-
     if len(name) > 100:
         await interaction.response.send_message("Имя ветки превышает 100 символов.", ephemeral=True)
         return

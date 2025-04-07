@@ -6,23 +6,13 @@ description = "Закрывает текущую приватную ветку"
 
 async def closethread(interaction: discord.Interaction, bot_client) -> None:
     """Команда /closethread: Закрывает текущую приватную ветку."""
-    if isinstance(interaction.channel, discord.DMChannel):
-        await interaction.response.send_message("Команда недоступна в личных сообщениях.", ephemeral=True)
-        return
-
-    if not isinstance(interaction.channel, discord.Thread):
-        await interaction.response.send_message("Команда доступна только в ветках.", ephemeral=True)
-        return
-
-    if not interaction.channel.permissions_for(interaction.guild.me).manage_threads:
-        await interaction.response.send_message("Отсутствуют права на закрытие веток.", ephemeral=True)
-        logger.warning(f"Бот не имеет прав на закрытие веток в канале {interaction.channel.id} для команды /closethread.")
+    if not isinstance(interaction.channel, discord.Thread) or interaction.channel.type != discord.ChannelType.private_thread:
+        await interaction.response.send_message("Команда доступна только в приватных ветках.", ephemeral=True)
         return
 
     try:
-        await interaction.response.send_message("Закрытие ветки.", ephemeral=True)
         await interaction.channel.edit(archived=True, locked=True)
-        await interaction.channel.send("Приватная ветка закрыта.")
+        await interaction.response.send_message("Приватная ветка закрыта.", ephemeral=True)
     except discord.HTTPException as e:
         await interaction.response.send_message(f"Ошибка закрытия ветки: {e}", ephemeral=True)
         logger.error(f"Ошибка HTTP в /closethread для пользователя {interaction.user.id}: {e}")
