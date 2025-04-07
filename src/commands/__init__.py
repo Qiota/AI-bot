@@ -1,5 +1,8 @@
 from .info import info
 from .say import say
-from .clearmemory import clearmemory
+from .newthread import newthread
+from .closethread import closethread
+from .img import img
 
-__all__ = ["info", "say", "clearmemory"]
+
+__all__ = ["info", "say", "newthread", "closethread", "img"]

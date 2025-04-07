@@ -4,12 +4,11 @@ from discord import app_commands
 import importlib
 from pathlib import Path
 from .config import BotConfig, logger
-from .client import BotClient
+from .aichat import BotClient
 from .server import run_flask
 from .sharding import BotActivity
 
 def register_commands(tree: app_commands.CommandTree, bot_client: BotClient) -> None:
-    """Динамически регистрирует все команды из папки commands."""
     commands_dir = Path(__file__).parent / "commands"
     
     for file in commands_dir.glob("*.py"):
@@ -34,24 +33,33 @@ def register_commands(tree: app_commands.CommandTree, bot_client: BotClient) -> 
             continue
 
 def setup_sync(bot_client: BotClient, tree: app_commands.CommandTree) -> None:
-    """Настраивает глобальную синхронизацию команд и активность бота."""
     @bot_client.bot.event
-    async def on_ready() -> None:  # type: ignore
+    async def on_ready() -> None:
         try:
             await bot_client.bot.wait_until_ready()
+            if not tree.get_commands():
+                logger.warning("Нет команд для синхронизации")
+                return
+
             synced = await tree.sync(guild=None)
-            logger.info(f"Глобально синхронизировано {len(synced)} команд")
-            
+            if synced is not None:
+                logger.info(f"Глобально синхронизировано {len(synced)} команд")
+            else:
+                logger.warning("Синхронизация команд не вернула результат (возможно, недостаточно прав)")
+
             await BotActivity.set_shard_activity(bot_client.bot)
+            
+            if hasattr(bot_client, 'on_ready'):
+                await bot_client.on_ready()
             
             logger.info("Бот успешно запущен!")
         except Exception as e:
             logger.error(f"Ошибка глобальной синхронизации: {e}")
+            raise
 
 async def run_bot():
-    """Запускает бота и Flask-сервер."""
     config = BotConfig()
-    bot_client = BotClient(config, shard_count=config.get("SHARD_COUNT", 2))
+    bot_client = BotClient(config)
     
     try:
         config.validate()
@@ -68,11 +76,11 @@ async def run_bot():
         logger.error(f"Ошибка запуска: {e}")
         raise
     finally:
-        await bot_client.bot.close()
+        if not bot_client.bot.is_closed():
+            await bot_client.bot.close()
         logger.info("Бот закрыт")
 
 def start_bot():
-    """Запускает бота в асинхронном режиме."""
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:
