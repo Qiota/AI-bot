@@ -11,8 +11,8 @@ async def closethread(interaction: discord.Interaction, bot_client) -> None:
         return
 
     try:
-        await interaction.channel.edit(archived=True, locked=True)
         await interaction.response.send_message("Ветка закрыта.", ephemeral=True)
+        await interaction.channel.edit(archived=True, locked=True)
     except discord.HTTPException as e:
         if "403 Forbidden (error code: 50001): Missing Access" in str(e):
             await interaction.response.send_message("Ошибка: Боту не хватает прав доступа для закрытия ветки.", ephemeral=True)
