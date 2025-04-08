@@ -2,12 +2,17 @@ import discord
 from discord import app_commands
 from ..config import logger
 
-description = "Закрывает текущую ветку"
+description = "Закрывает текущую ветку."
 
 async def closethread(interaction: discord.Interaction, bot_client) -> None:
     """Команда /closethread: Закрывает текущую ветку."""
     if not isinstance(interaction.channel, discord.Thread):
         await interaction.response.send_message("Команда доступна только в ветках.", ephemeral=True)
+        return
+
+    creator_id = getattr(interaction.channel, 'creator_id', None)
+    if creator_id is None or creator_id != interaction.user.id:
+        await interaction.response.send_message("Только создатель ветки может её закрыть.", ephemeral=True)
         return
 
     try:

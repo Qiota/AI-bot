@@ -2,7 +2,7 @@ import discord
 from discord import app_commands
 from ..config import logger
 
-description = "Создаёт новую ветку для обсуждения (по умолчанию публичную)"
+description = "Создаёт новую ветку для обсуждения."
 
 async def newthread(interaction: discord.Interaction, name: str, bot_client, private: bool = False) -> None:
     """Команда /newthread: Создаёт новую ветку для обсуждения."""
@@ -23,8 +23,10 @@ async def newthread(interaction: discord.Interaction, name: str, bot_client, pri
             type=thread_type,
             auto_archive_duration=60
         )
+
+        await thread.edit(creator_id=interaction.user.id)
         await interaction.response.send_message(f"{thread_type_str.capitalize()} ветка {thread.mention} создана.", ephemeral=True)
-        await thread.send(f"{thread_type_str.capitalize()} ветка {name} создана для обсуждения.")
+        await thread.send(f"{thread_type_str.capitalize()} ветка {name} создана для обсуждения пользователем {interaction.user.mention}.")
     except discord.HTTPException as e:
         if "403 Forbidden (error code: 50001): Missing Access" in str(e):
             await interaction.response.send_message("Ошибка: Боту не хватает прав доступа для создания ветки.", ephemeral=True)
