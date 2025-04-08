@@ -27,7 +27,7 @@ class BotClient:
         self.processed_messages = set()
         self.link_cache = OrderedDict()
         self.chat_memory = defaultdict(lambda: OrderedDict()) 
-        self.cache_limits = {"links": 10, "messages": 10}
+        self.cache_limits = {"links": 10, "messages": 20}
         self.request_settings = {
             "vision_headers": {"Content-Type": "application/json"},
             "rate_limit_delay": 5.0,
@@ -35,7 +35,7 @@ class BotClient:
             "retry_delay_base": 10.0
         }
         self.models = {"text": [], "vision": [], "data": None, "last_update": None}
-        self.user_settings = defaultdict(lambda: {"max_response_length": 2000})  # Убрано поле language
+        self.user_settings = defaultdict(lambda: {"max_response_length": 2000})
         self.load_models_from_json()
         self.initialized = False
         asyncio.ensure_future(self.update_models_periodically())
@@ -246,7 +246,7 @@ class BotClient:
             context = await self.get_context(user_id, message.channel)
             now = datetime.now()
             system_prompt = f"Ты - дружелюбный чат-бот от Qiota. Отвечай кратко. " \
-                          f"Дата: {now:%Y-%m-%d}, время: {now:%H:%M:%S}. Используй интернет при необходимости. Формат: Discord Markdown."
+                          f"Дата: {now:%Y-%m-%d}, время: {now:%H:%M:%S}. Используй интернет при необходимости. Формат: Discord Markdown. Всегда указываей точные данные."
             user_content = [{"type": "text", "text": text}]
             image_url = None
             if message.attachments:
@@ -259,12 +259,12 @@ class BotClient:
             has_image = bool(image_url)
             max_length = self.user_settings[user_id]["max_response_length"]
 
-            response_text = await self._try_generate_response(messages, needs_web, has_image, max_tokens=2000)
+            response_text = await self._try_generate_response(messages, needs_web, has_image, max_tokens=4000)
             if not response_text:
                 return "**Ой!** Нет данных."
 
             if has_image:
-                image_description = await self._try_generate_response(messages, True, True, max_tokens=300)
+                image_description = await self._try_generate_response(messages, True, True, max_tokens=700)
                 if not image_description:
                     return "**Ой!** Не удалось описать изображение."
                 if image_description == "content_policy_violation":
