@@ -1,12 +1,1 @@
-{
-  "text_models": [
-    "gpt-4o-mini",
-    "gpt-4o",
-    "o1-mini"
-  ],
-  "vision_models": [
-    "openai",
-    "openai-large"
-  ],
-  "last_update": "2025-04-07T21:01:01.498019"
-}
+{"text_models": ["gpt-4o-mini", "gpt-4o", "o1-mini"], "vision_models": ["openai", "openai-large"], "last_update": "2025-04-09T19:25:16.639213"}

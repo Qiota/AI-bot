@@ -11,51 +11,33 @@ from .sharding import BotActivity
 def register_commands(tree: app_commands.CommandTree, bot_client: BotClient) -> None:
     commands_dir = Path(__file__).parent / "commands"
     
-    for file in commands_dir.glob("*.py"):
-        if file.stem == "__init__":
-            continue
-        
-        try:
-            module_name = f".commands.{file.stem}"
-            module = importlib.import_module(module_name, package=__package__)
-            
-            create_command = getattr(module, "create_command", None)
-            if not create_command:
-                logger.warning(f"Функция create_command не найдена в модуле {module_name}")
-                continue
+    def load_commands(directory: Path) -> None:
+        for item in directory.iterdir():
+            if item.is_dir():
+                load_commands(item)
+            elif item.suffix == '.py' and item.stem != "__init__":
+                try:
+                    relative_path = item.relative_to(commands_dir)
+                    module_name = f"src.commands.{str(relative_path.with_suffix('')).replace('/', '.').replace('\\', '.')}"
+                    module = importlib.import_module(module_name)
+                    module = importlib.reload(module)
+                    
+                    create_command = getattr(module, "create_command", None)
+                    if not create_command:
+                        logger.warning(f"create_command не найден в {module_name}")
+                        continue
 
-            command = create_command(bot_client)
-            tree.add_command(command)
-            logger.info(f"Команда /{file.stem} успешно зарегистрирована")
+                    command = create_command(bot_client)
+                    tree.add_command(command)
+                    logger.info(f"Команда /{item.stem} зарегистрирована")
 
-        except Exception as e:
-            logger.error(f"Ошибка регистрации команды {file.stem}: {e}")
-            continue
+                except ImportError as e:
+                    logger.error(f"Ошибка импорта {item.stem}: {e}")
+                except Exception as e:
+                    logger.error(f"Ошибка регистрации {item.stem}: {e}")
 
-def setup_sync(bot_client: BotClient, tree: app_commands.CommandTree) -> None:
-    @bot_client.bot.event
-    async def on_ready() -> None:
-        try:
-            await bot_client.bot.wait_until_ready()
-            if not tree.get_commands():
-                logger.warning("Нет команд для синхронизации")
-                return
-
-            synced = await tree.sync(guild=None)
-            if synced is not None:
-                logger.info(f"Глобально синхронизировано {len(synced)} команд")
-            else:
-                logger.warning("Синхронизация команд не вернула результат (возможно, недостаточно прав)")
-
-            await BotActivity.set_shard_activity(bot_client.bot)
-            
-            if hasattr(bot_client, 'on_ready'):
-                await bot_client.on_ready()
-            
-            logger.info("Бот успешно запущен!")
-        except Exception as e:
-            logger.error(f"Ошибка глобальной синхронизации: {e}")
-            raise
+    tree.clear_commands(guild=None)
+    load_commands(commands_dir)
 
 async def run_bot():
     config = BotConfig()
@@ -66,15 +48,23 @@ async def run_bot():
         bot_client.bot.event(bot_client.on_message)
         bot_client.bot.event(bot_client.on_message_edit)
         
-        register_commands(bot_client.tree, bot_client)
-        setup_sync(bot_client, bot_client.tree)
+        @bot_client.bot.event
+        async def on_ready():
+            await bot_client.bot.wait_until_ready()
+            register_commands(bot_client.tree, bot_client)
+            synced = await bot_client.tree.sync(guild=None)
+            logger.info(f"Синхронизировано {len(synced)} команд при запуске")
+            
+            await BotActivity.set_shard_activity(bot_client.bot, bot_client.bot.deploy_time)
+            if hasattr(bot_client, 'on_ready'):
+                await bot_client.on_ready()
+            logger.info("Бот запущен!")
 
         Thread(target=run_flask, daemon=True).start()
         await bot_client.bot.start(config.TOKEN)
 
     except Exception as e:
         logger.error(f"Ошибка запуска: {e}")
-        raise
     finally:
         if not bot_client.bot.is_closed():
             await bot_client.bot.close()

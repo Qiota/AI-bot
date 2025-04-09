@@ -1,6 +1,5 @@
 discord.py
 g4f
-firebase-admin
 python-decouple
 aiohttp
 colorama
