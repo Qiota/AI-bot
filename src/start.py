@@ -6,7 +6,6 @@ from pathlib import Path
 from .config import BotConfig, logger
 from .aichat import BotClient
 from .server import run_flask
-from .sharding import BotActivity
 from .commands.giveaway import resume_giveaways
 import time
 
@@ -69,8 +68,7 @@ async def run_bot():
                 synced = await bot_client.tree.sync(guild=None)
                 logger.info(f"Синхронизировано {len(synced)} команд при запуске")
                 
-                await resume_giveaways(bot_client)  # Восстановить розыгрыши
-                await BotActivity.set_shard_activity(bot_client.bot, bot_client.bot.deploy_time)
+                await resume_giveaways(bot_client)
                 if hasattr(bot_client, 'on_ready'):
                     await bot_client.on_ready()
                 logger.info("Бот запущен!")
