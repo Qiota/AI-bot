@@ -7,6 +7,7 @@ from .config import BotConfig, logger
 from .aichat import BotClient
 from .server import run_flask
 from .commands.giveaway import resume_giveaways
+from .ready import set_activity
 import time
 
 def register_commands(tree: app_commands.CommandTree, bot_client: BotClient) -> None:
@@ -62,18 +63,13 @@ async def run_bot():
         
         @bot_client.bot.event
         async def on_ready():
-            try:
-                await bot_client.bot.wait_until_ready()
-                register_commands(bot_client.tree, bot_client)
-                synced = await bot_client.tree.sync(guild=None)
-                logger.info(f"Синхронизировано {len(synced)} команд при запуске")
-                
-                await resume_giveaways(bot_client)
-                if hasattr(bot_client, 'on_ready'):
-                    await bot_client.on_ready()
-                logger.info("Бот запущен!")
-            except Exception as e:
-                logger.error(f"Ошибка в on_ready: {e}")
+            await bot_client.bot.wait_until_ready()
+            register_commands(bot_client.tree, bot_client)
+            synced = await bot_client.tree.sync(guild=None)
+            logger.info(f"Синхронизировано {len(synced)} команд при запуске")
+            await resume_giveaways(bot_client)
+            await set_activity(bot_client.bot)
+            logger.info("Бот запущен!")
 
         Thread(target=run_flask, daemon=True).start()
         await bot_client.bot.start(config.TOKEN)

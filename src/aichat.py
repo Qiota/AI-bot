@@ -6,7 +6,6 @@ import aiohttp
 from g4f.client import Client
 from g4f.Provider import PollinationsAI
 from .logging_config import logger
-from .sharding import ShardedBotClient
 from datetime import datetime, timedelta
 import re
 from collections import OrderedDict, defaultdict
@@ -14,14 +13,14 @@ import json
 import os
 
 class BotClient:
-    def __init__(self, config, shard_count: int = 2):
+    def __init__(self, config):
         logger.info("Создание BotClient")
         self.config = config
         self.client = Client(provider=PollinationsAI)
         self.models_file = "models.json"
         intents = discord.Intents.default()
         intents.message_content = intents.dm_messages = intents.members = True
-        self.bot = ShardedBotClient(shard_count=shard_count, intents=intents)
+        self.bot = discord.Client(intents=intents)
         self.tree = app_commands.CommandTree(self.bot)
         self.processed_messages = set()
         self.message_to_response = {}

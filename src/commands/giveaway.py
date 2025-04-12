@@ -8,13 +8,13 @@ import aiofiles
 import json
 import os
 import string
-from datetime import datetime, timedelta
+from datetime import datetime
 
 description = "Создать розыгрыш через слеш-команду с кнопкой участия"
 
 GIVEAWAYS_FILE = "giveaways.json"
 COMPLETED_GIVEAWAYS_FILE = "completed_giveaways.json"
-COMPLETED_GIVEAWAY_RETENTION = 7 * 24 * 60 * 60  # 7 days in seconds
+COMPLETED_GIVEAWAY_RETENTION = 7 * 24 * 60 * 60
 MAX_PRIZE_LENGTH = 100
 MAX_DESC_LENGTH = 500
 MIN_DURATION = 1
