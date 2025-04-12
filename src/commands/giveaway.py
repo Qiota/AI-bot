@@ -222,6 +222,11 @@ def generate_custom_id():
     return random_part
 
 async def start_giveaway(interaction, prize, duration_str, custom_id, description, bot_client):
+    if interaction.guild is None:
+        embed = discord.Embed(description="Эту команду нельзя использовать в личных сообщениях.", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
     user_id = str(interaction.user.id)
     developer_ids = bot_client.config.DEVELOPER_ID
     if not isinstance(developer_ids, list):
@@ -352,6 +357,11 @@ async def end_giveaway(bot_client, giveaway):
         await save_giveaways(bot_client.giveaways)
 
 async def reroll_giveaway(interaction, custom_id, bot_client):
+    if interaction.guild is None:
+        embed = discord.Embed(description="Эту команду нельзя использовать в личных сообщениях.", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
     if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild):
         embed = discord.Embed(description="Требуются права администратора или модератора.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -404,6 +414,11 @@ async def reroll_giveaway(interaction, custom_id, bot_client):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def edit_giveaway(interaction, custom_id, prize, duration_str, description, bot_client):
+    if interaction.guild is None:
+        embed = discord.Embed(description="Эту команду нельзя использовать в личных сообщениях.", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
     if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild):
         embed = discord.Embed(description="Требуются права администратора или модератора.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
