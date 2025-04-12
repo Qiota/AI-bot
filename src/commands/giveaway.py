@@ -1,6 +1,5 @@
 import discord
 from discord import app_commands, ui
-from discord.ui import Button
 from ..config import logger
 import random
 import time
@@ -28,35 +27,32 @@ def format_end_time(end_time):
     return dt.strftime("%d.%m.%Y в %H:%M")
 
 def parse_duration(duration_str):
-    """Парсит строку длительности в формате 'd-дни m-минуты s-секунды' и возвращает минуты"""
+    """Парсит строку длительности в формате 'd-дни m-минуты' и возвращает минуты"""
     if not duration_str:
         raise ValueError("Длительность не указана")
 
-    total_seconds = 0
+    total_minutes = 0
     parts = duration_str.lower().replace(" ", "").replace("-", "")
     
     current_number = ""
     for char in parts:
         if char.isdigit():
             current_number += char
-        elif char in "dms":
+        elif char in "dm":
             if not current_number:
-                raise ValueError("Неверный формат длительности. Используйте d-дни m-минуты s-секунды")
+                raise ValueError("Неверный формат длительности. Используйте d-дни m-минуты")
             value = int(current_number)
             if char == "d":
-                total_seconds += value * 24 * 60 * 60  # дни в секунды
+                total_minutes += value * 24 * 60  # дни в минуты
             elif char == "m":
-                total_seconds += value * 60  # минуты в секунды
-            elif char == "s":
-                total_seconds += value  # секунды
+                total_minutes += value  # минуты
             current_number = ""
         else:
-            raise ValueError("Неверный формат длительности. Используйте d-дни m-минуты s-секунды")
+            raise ValueError("Неверный формат длительности. Используйте d-дни m-минуты")
 
     if current_number:
-        raise ValueError("Неверный формат длительности. Используйте d-дни m-минуты s-секунды")
+        raise ValueError("Неверный формат длительности. Используйте d-дни m-минуты")
 
-    total_minutes = total_seconds // 60
     if total_minutes < MIN_DURATION or total_minutes > MAX_DURATION:
         raise ValueError(f"Длительность должна быть от {MIN_DURATION} до {MAX_DURATION} минут")
     return total_minutes
@@ -69,21 +65,22 @@ class GiveawayView(ui.View):
 
     @ui.button(label="Участвовать", style=discord.ButtonStyle.green, emoji="🎉")
     async def participate(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
         giveaway = self.bot_client.giveaways.get(self.custom_id)
         if not giveaway:
             embed = discord.Embed(description="Розыгрыш завершён или не существует.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         current_time = int(time.time())
         if current_time >= giveaway.end_time:
             embed = discord.Embed(description="Розыгрыш уже завершён!", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         if interaction.user in giveaway.participants:
             embed = discord.Embed(description="Вы уже участвуете!", color=discord.Color.orange())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         giveaway.participants.add(interaction.user)
@@ -104,11 +101,11 @@ class GiveawayView(ui.View):
         except Exception as e:
             logger.error(f"Ошибка при участии в розыгрыше {self.custom_id}: {e}")
             embed = discord.Embed(description="Ошибка при записи участия.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         embed = discord.Embed(description="Вы успешно участвуете в розыгрыше!", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"Пользователь {interaction.user.id} участвует в розыгрыше {self.custom_id}")
 
 class Giveaway:
@@ -222,9 +219,12 @@ def generate_custom_id():
     return random_part
 
 async def start_giveaway(interaction, prize, duration_str, custom_id, description, bot_client):
+    await interaction.response.defer(ephemeral=True)
+
     if interaction.guild is None:
         embed = discord.Embed(description="Эту команду нельзя использовать в личных сообщениях.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        logger.warning(f"Пользователь {interaction.user.id} попытался вызвать команду в DM")
         return
 
     user_id = str(interaction.user.id)
@@ -240,7 +240,7 @@ async def start_giveaway(interaction, prize, duration_str, custom_id, descriptio
 
     if not (is_developer or is_admin or is_moderator):
         embed = discord.Embed(description="Требуются права разработчика, администратора или модератора.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.warning(f"Пользователь {user_id} попытался создать розыгрыш без прав")
         return
 
@@ -248,16 +248,16 @@ async def start_giveaway(interaction, prize, duration_str, custom_id, descriptio
         duration = parse_duration(duration_str)
     except ValueError as e:
         embed = discord.Embed(description=str(e), color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     if len(prize) > MAX_PRIZE_LENGTH:
         embed = discord.Embed(description=f"Приз не должен превышать {MAX_PRIZE_LENGTH} символов.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
     if description and len(description) > MAX_DESC_LENGTH:
         embed = discord.Embed(description=f"Описание не должно превышать {MAX_DESC_LENGTH} символов.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     final_custom_id = custom_id or generate_custom_id()
@@ -293,11 +293,11 @@ async def start_giveaway(interaction, prize, duration_str, custom_id, descriptio
     except discord.HTTPException as e:
         logger.error(f"Ошибка отправки сообщения розыгрыша {final_custom_id}: {e}")
         embed = discord.Embed(description="Ошибка при создания розыгрыша.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     embed = discord.Embed(description=f"Розыгрыш `{final_custom_id}` начат!", color=discord.Color.green())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
     logger.info(f"Розыгрыш {final_custom_id} начат пользователем {interaction.user.id}: {prize}")
 
     asyncio.create_task(run_giveaway_timer(bot_client, giveaway, duration * 60))
@@ -357,26 +357,29 @@ async def end_giveaway(bot_client, giveaway):
         await save_giveaways(bot_client.giveaways)
 
 async def reroll_giveaway(interaction, custom_id, bot_client):
+    await interaction.response.defer(ephemeral=True)
+
     if interaction.guild is None:
         embed = discord.Embed(description="Эту команду нельзя использовать в личных сообщениях.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        logger.warning(f"Пользователь {interaction.user.id} попытался вызвать команду в DM")
         return
 
     if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild):
         embed = discord.Embed(description="Требуются права администратора или модератора.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.warning(f"Пользователь {interaction.user.id} попытался реролл без прав")
         return
 
     giveaway = bot_client.giveaways.get(custom_id)
     if not giveaway:
         embed = discord.Embed(description="Розыгрыш не найден или завершён.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     if not giveaway.participants:
         embed = discord.Embed(description="Нет участников для реролла.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     try:
@@ -402,7 +405,7 @@ async def reroll_giveaway(interaction, custom_id, bot_client):
         embed.set_footer(text=f"ID ивента: {custom_id} | Участвовали: {len(giveaway.participants)}")
         host_mention = giveaway.host.mention if giveaway.host else "Организатор"
         winner_mention = giveaway.winner.mention if giveaway.winner else "Победитель"
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"{host_mention} {winner_mention}\n"
             f"Реролл! Новый победитель для **{giveaway.prize}** (`{custom_id}`)!",
             embed=embed
@@ -411,40 +414,43 @@ async def reroll_giveaway(interaction, custom_id, bot_client):
     except Exception as e:
         logger.error(f"Ошибка реролла розыгрыша {custom_id}: {e}")
         embed = discord.Embed(description="Ошибка при реролле.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 async def edit_giveaway(interaction, custom_id, prize, duration_str, description, bot_client):
+    await interaction.response.defer(ephemeral=True)
+
     if interaction.guild is None:
         embed = discord.Embed(description="Эту команду нельзя использовать в личных сообщениях.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        logger.warning(f"Пользователь {interaction.user.id} попытался вызвать команду в DM")
         return
 
     if not (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild):
         embed = discord.Embed(description="Требуются права администратора или модератора.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.warning(f"Пользователь {interaction.user.id} попытался редактировать без прав")
         return
 
     giveaway = bot_client.giveaways.get(custom_id)
     if not giveaway:
         embed = discord.Embed(description="Розыгрыш не найден или завершён.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     try:
         duration = parse_duration(duration_str)
     except ValueError as e:
         embed = discord.Embed(description=str(e), color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     if len(prize) > MAX_PRIZE_LENGTH:
         embed = discord.Embed(description=f"Приз не должен превышать {MAX_PRIZE_LENGTH} символов.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
     if description and len(description) > MAX_DESC_LENGTH:
         embed = discord.Embed(description=f"Описание не должно превышать {MAX_DESC_LENGTH} символов.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     try:
@@ -469,22 +475,22 @@ async def edit_giveaway(interaction, custom_id, prize, duration_str, description
 
         await save_giveaways(bot_client.giveaways)
         embed = discord.Embed(description=f"Розыгрыш `{custom_id}` обновлён!", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"Розыгрыш {custom_id} обновлён пользователем {interaction.user.id}")
     except discord.NotFound:
         logger.error(f"Сообщение розыгрыша {giveaway.message_id} не найдено")
         embed = discord.Embed(description="Сообщение розыгрыша не найдено.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
         logger.error(f"Ошибка редактирования розыгрыша {custom_id}: {e}")
         embed = discord.Embed(description="Ошибка при редактировании.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 def create_command(bot_client):
     @app_commands.command(name="giveaway", description="Создать новый розыгрыш")
     @app_commands.describe(
         prize="Приз розыгрыша",
-        duration="Длительность (d-дни m-минуты s-секунды, например: 1d 30m 15s)",
+        duration="Длительность (d-дни m-минуты, например: 1d 30m)",
         custom_id="Уникальный ID ивента (опционально)",
         description="Описание розыгрыша (опционально)"
     )
@@ -500,7 +506,7 @@ def create_command(bot_client):
     @app_commands.describe(
         custom_id="Кастомный ID ивента",
         prize="Новый приз",
-        duration="Новая длительность (d-дни m-минуты s-секунды, например: 1d 30m 15s)",
+        duration="Новая длительность (d-дни m-минуты, например: 1d 30m)",
         description="Новое описание (опционально)"
     )
     async def edit(interaction: discord.Interaction, custom_id: str, prize: str, duration: str, description: str = None):
