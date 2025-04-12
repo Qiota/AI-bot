@@ -7,8 +7,11 @@ from .config import BotConfig, logger
 from .aichat import BotClient
 from .server import run_flask
 from .sharding import BotActivity
+from .commands.giveaway import resume_giveaways
+import time
 
 def register_commands(tree: app_commands.CommandTree, bot_client: BotClient) -> None:
+    """Регистрирует команды из папки commands."""
     commands_dir = Path(__file__).parent / "commands"
     
     def load_commands(directory: Path) -> None:
@@ -27,21 +30,31 @@ def register_commands(tree: app_commands.CommandTree, bot_client: BotClient) -> 
                         logger.warning(f"create_command не найден в {module_name}")
                         continue
 
-                    command = create_command(bot_client)
-                    tree.add_command(command)
-                    logger.info(f"Команда /{item.stem} зарегистрирована")
+                    commands = create_command(bot_client)
+                    if isinstance(commands, tuple):
+                        for command in commands:
+                            tree.add_command(command)
+                            logger.info(f"Команда /{command.name} зарегистрирована")
+                    else:
+                        tree.add_command(commands)
+                        logger.info(f"Команда /{commands.name} зарегистрирована")
 
                 except ImportError as e:
                     logger.error(f"Ошибка импорта {item.stem}: {e}")
                 except Exception as e:
                     logger.error(f"Ошибка регистрации {item.stem}: {e}")
 
-    tree.clear_commands(guild=None)
-    load_commands(commands_dir)
+    try:
+        tree.clear_commands(guild=None)
+        load_commands(commands_dir)
+    except Exception as e:
+        logger.error(f"Ошибка при регистрации команд: {e}")
 
 async def run_bot():
+    """Запускает бота."""
     config = BotConfig()
     bot_client = BotClient(config)
+    bot_client.start_time = time.time()
     
     try:
         config.validate()
@@ -50,27 +63,35 @@ async def run_bot():
         
         @bot_client.bot.event
         async def on_ready():
-            await bot_client.bot.wait_until_ready()
-            register_commands(bot_client.tree, bot_client)
-            synced = await bot_client.tree.sync(guild=None)
-            logger.info(f"Синхронизировано {len(synced)} команд при запуске")
-            
-            await BotActivity.set_shard_activity(bot_client.bot, bot_client.bot.deploy_time)
-            if hasattr(bot_client, 'on_ready'):
-                await bot_client.on_ready()
-            logger.info("Бот запущен!")
+            try:
+                await bot_client.bot.wait_until_ready()
+                register_commands(bot_client.tree, bot_client)
+                synced = await bot_client.tree.sync(guild=None)
+                logger.info(f"Синхронизировано {len(synced)} команд при запуске")
+                
+                await resume_giveaways(bot_client)  # Восстановить розыгрыши
+                await BotActivity.set_shard_activity(bot_client.bot, bot_client.bot.deploy_time)
+                if hasattr(bot_client, 'on_ready'):
+                    await bot_client.on_ready()
+                logger.info("Бот запущен!")
+            except Exception as e:
+                logger.error(f"Ошибка в on_ready: {e}")
 
         Thread(target=run_flask, daemon=True).start()
         await bot_client.bot.start(config.TOKEN)
 
     except Exception as e:
-        logger.error(f"Ошибка запуска: {e}")
+        logger.error(f"Ошибка запуска бота: {e}")
     finally:
         if not bot_client.bot.is_closed():
-            await bot_client.bot.close()
-        logger.info("Бот закрыт")
+            try:
+                await bot_client.bot.close()
+                logger.info("Бот закрыт")
+            except Exception as e:
+                logger.error(f"Ошибка при закрытии бота: {e}")
 
 def start_bot():
+    """Инициирует запуск бота."""
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:
