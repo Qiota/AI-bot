@@ -29,4 +29,4 @@ virtualenv/
 # Файлы базы данных и прочее
 serviceAccountKey.json
 firebase-adminsdk.json
-models.json
+.models.json
