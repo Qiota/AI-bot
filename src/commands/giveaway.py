@@ -546,6 +546,10 @@ async def reroll_giveaway(interaction, custom_id, bot_client):
 
 async def edit_giveaway(interaction, custom_id, prize, duration_str, description, bot_client, giveaway_image=None, winner_image=None):
     await interaction.response.defer(ephemeral=True)
+    if not custom_id:
+        embed = discord.Embed(description="Кастомный ID ивента обязателен. Укажите `custom_id`.", color=discord.Color.red())
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
     if interaction.guild is None:
         await interaction.followup.send("Команда не работает в ЛС.", ephemeral=True)
         logger.warning(f"Пользователь {interaction.user.id} попытался вызвать команду в DM")

@@ -111,6 +111,7 @@ class SelectView(BaseView):
                 for channel in self.guild.text_channels
             ]
             self.placeholder = "Выберите каналы для доступа бота"
+            self.selected_values = config.get(guild_id, {}).get("bot_allowed_channels", [])
         else:
             current_users = config.get(guild_id, {}).get("restricted_users", [])
             members = [
@@ -125,6 +126,7 @@ class SelectView(BaseView):
                 for member in members
             ]
             self.placeholder = "Выберите пользователей для " + ("ограничения" if self.action == "restrict_users" else "разблокировки")
+            self.selected_values = current_users
 
     def get_paginated_items(self):
         items = self.all_items
@@ -210,12 +212,25 @@ class SelectView(BaseView):
             "restrict_users": "Выберите пользователей для ограничения доступа (текущие отмечены).",
             "unrestrict_users": "Выберите пользователей для снятия ограничений (текущие отмечены)."
         }[self.action]
+
+        if self.selected_values:
+            if self.action == "bot_access":
+                selected_channels = [
+                    item["label"] for item in self.all_items if item["value"] in self.selected_values
+                ]
+                description += "\n\n**Выбранные каналы:**\n" + "\n".join(f"- {channel}" for channel in selected_channels) if selected_channels else "\n\n**Выбранные каналы:**\n- Нет выбранных каналов."
+            else:
+                description += "\n\n**Выбранные пользователи:**\n" + "\n".join(f"<@{value}>" for value in self.selected_values) if self.selected_values else "\n\n**Выбранные пользователи:**\n- Нет выбранных пользователей."
+        else:
+            description += "\n\n**Выбранные элементы:**\n- Нет выбранных элементов."
+
         if self.search_queries and self.action != "bot_access":
             paginated_items = self.get_paginated_items()
             if paginated_items:
-                description += "\nНайденные пользователи:\n" + "\n".join(f"<@{item['value']}>" for item in paginated_items)
+                description += "\n\n**Найденные пользователи на текущей странице:**\n" + "\n".join(f"<@{item['value']}>" for item in paginated_items)
             else:
-                description += "\nПользователи не найдены."
+                description += "\n\n**Найденные пользователи:**\n- Пользователи не найдены."
+
         await interaction.response.edit_message(
             embed=discord.Embed(
                 title=title,
@@ -230,7 +245,7 @@ class SelectView(BaseView):
             return
         self.selected_values = self.children[0].values
         logger.debug(f"SelectView: {self.action}, выбрано {len(self.selected_values)} элементов пользователем {self.user_id}")
-        await interaction.response.defer()
+        await self.update_view(interaction)
 
     async def prev_page(self, interaction: discord.Interaction):
         if await self.restrict_interaction(interaction):
@@ -258,8 +273,9 @@ class SelectView(BaseView):
             return
         logger.debug(f"SelectView: Подтверждение {self.action} для {len(self.selected_values)} элементов")
 
-        self.children[-1].label = "Loading..."
+        self.children[-1].label = "⏳"
         self.children[-1].style = discord.ButtonStyle.blurple
+        self.children[-1].disabled = True
         await interaction.response.edit_message(view=self)
 
         config = ConfigManager.load()
@@ -491,6 +507,14 @@ async def handle_mention(message: discord.Message, bot_client):
             allowed_channels = config.get(guild_id, {}).get("bot_allowed_channels", [])
             channel_id = str(message.channel.id)
 
+            if message.reference:
+                try:
+                    replied_message = await message.channel.fetch_message(message.reference.message_id)
+                    if replied_message.author == bot_client.user and "настройте каналы через /restrict" in replied_message.content:
+                        return True
+                except discord.errors.NotFound:
+                    pass
+
             if not allowed_channels:
                 msg = await message.channel.send(
                     f"{message.author.mention}, настройте каналы через /restrict.",
@@ -513,6 +537,7 @@ async def handle_mention(message: discord.Message, bot_client):
                 except discord.errors.NotFound:
                     pass
                 return False
+            return True
         return True
     return False
 
