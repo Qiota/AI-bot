@@ -7,3 +7,4 @@ flask
 asyncio
 aiofiles
 Pillow
+firebase_admin
