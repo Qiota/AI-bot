@@ -38,7 +38,7 @@ async def audio(interaction: discord.Interaction, request: str, voice: str) -> N
             audio_size = len(audio_data)
 
             if audio_size > FILE_SIZE_LIMIT:
-                raise ValueError(f"Аудиофайл слишком большой ({audio_size / 1024 / 1024:.2f} МБ). Максимум: 8 МБ.", ephemeral=True)
+                raise ValueError(f"Аудиофайл слишком большой ({audio_size / 1024 / 1024:.2f} МБ). Максимум: 8 МБ.")
 
             audio_buffer = io.BytesIO(audio_data)
             await interaction.followup.send(
@@ -49,7 +49,7 @@ async def audio(interaction: discord.Interaction, request: str, voice: str) -> N
             raise ValueError("Получен некорректный тип ответа, ожидался audio/mpeg")
     except Exception as e:
         logger.error(f"Ошибка команды /audio для {interaction.user.id}: {e}")
-        await interaction.followup.send(f"Ошибка: {str(e)}")
+        await interaction.followup.send(f"Ошибка: {str(e)}", ephemeral=True)
 
 def create_command(bot_client):
     @app_commands.command(name="audio", description=description)
@@ -60,4 +60,5 @@ def create_command(bot_client):
     @app_commands.choices(voice=VoiceChoices.VOICES)
     async def wrapper(interaction: discord.Interaction, request: str, voice: str = "alloy") -> None:
         await audio(interaction, request, voice)
+    wrapper.dm_only = False
     return wrapper

@@ -5,8 +5,7 @@ from typing import List, Dict, Optional
 import aiohttp
 from g4f.client import Client
 from g4f.Provider import PollinationsAI
-from .logging_config import logger 
-from .cooldown_manager import CooldownManager
+from .logging_config import logger
 import time
 import re
 from collections import OrderedDict, defaultdict
@@ -38,25 +37,13 @@ class BotClient:
         }
         self.models = {"text": [], "vision": [], "last_update": None}
         self.user_settings = defaultdict(lambda: {"max_response_length": 2000})
-        self.cooldown_manager = CooldownManager()
         self.ignored_settings = {"ignored_users": [], "ignored_channels": []}
+        self.giveaways = {}
+        self.completed_giveaways = {}
         self.load_models()
         self.load_ignored_settings()
         asyncio.create_task(self.update_models_periodically())
         asyncio.create_task(self.auto_trim_memory())
-        from .commands.set_prompt import create_command, load_user_prompt
-        self.load_user_prompt = load_user_prompt
-        self.tree.add_command(create_command(self))
-        from .commands.img import create_command as create_img_command
-        self.tree.add_command(create_img_command(self))
-        from .commands.restrict import create_command as create_restrict_command
-        self.tree.add_command(create_restrict_command(self))
-        from .commands.giveaway import create_command as create_giveaway_command
-        self.giveaways = {}
-        self.completed_giveaways = {}
-        self.tree.add_command(create_giveaway_command(self)[0])
-        self.tree.add_command(create_giveaway_command(self)[1])
-        self.tree.add_command(create_giveaway_command(self)[2])
 
     def load_models(self):
         default = {"text": ["gpt-4o-mini", "gpt-4o", "o1-mini"], "vision": ["openai", "openai-large"], "last_update": None}
@@ -297,6 +284,10 @@ class BotClient:
                 self.link_cache[url] = False
                 return False
 
+    async def load_user_prompt(self, user_id: str, guild_id: str) -> str:
+        """Загружает пользовательский промпт."""
+        return self.user_settings[user_id].get("prompt", "Ты дружелюбный AI-ассистент.")
+
     def needs_web_search(self, text: str, context: List[Dict], is_vision: bool = False) -> bool:
         if is_vision:
             return True
@@ -314,68 +305,85 @@ class BotClient:
                 bool(re.search(question_phrases, text_lower)))
 
     async def on_message(self, message: discord.Message):
+        from .commands.restrict import check_user_restriction, check_bot_access, handle_mention
         msg_key = f"{message.id}-{message.channel.id}"
         if message.author.bot or msg_key in self.processed_messages:
             return
-        
-        if self.ignored_settings.get("ignored_users") and str(message.author.id) in self.ignored_settings["ignored_users"]:
-            logger.info(f"Сообщение от {message.author.id} проигнорировано (пользователь в списке игнора)")
-            return
-        if self.ignored_settings.get("ignored_channels") and str(message.channel.id) in self.ignored_settings["ignored_channels"] and not isinstance(message.channel, discord.DMChannel):
-            logger.info(f"Сообщение в канале {message.channel.id} проигнорировано (канал в списке игнора)")
-            return
-        
+
         self.processed_messages.add(msg_key)
-        async with message.channel.typing():
-            text = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
-            response = await self.generate_response(str(message.author.id), str(message.id), text, message)
-            if response:
-                await self._send_split_message(message, response)
+
+        # ЛС: обработка без ограничений по каналам, но с учетом blacklist
+        if isinstance(message.channel, discord.DMChannel):
+            if not await check_user_restriction(message):
+                return
+            async with message.channel.typing():
+                text = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+                response = await self.generate_response(str(message.author.id), str(message.id), text, message)
+                if response:
+                    await self._send_split_message(message, response)
+        # Сервер: проверка разрешённых каналов и пользователей
+        else:
+            if not await check_bot_access(message):
+                return
+            if not await check_user_restriction(message):
+                return
+            if await handle_mention(message, self):
+                async with message.channel.typing():
+                    text = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+                    response = await self.generate_response(str(message.author.id), str(message.id), text, message)
+                    if response:
+                        await self._send_split_message(message, response)
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        from .commands.restrict import check_user_restriction, check_bot_access
         msg_key = f"{after.id}-{after.channel.id}"
         if before.content == after.content or after.author.bot or msg_key not in self.processed_messages:
             return
-        
-        if self.ignored_settings.get("ignored_users") and str(after.author.id) in self.ignored_settings["ignored_users"]:
-            logger.info(f"Редактирование сообщения от {after.author.id} проигнорировано (пользователь в списке игнора)")
-            return
-        if self.ignored_settings.get("ignored_channels") and str(after.channel.id) in self.ignored_settings["ignored_channels"] and not isinstance(after.channel, discord.DMChannel):
-            logger.info(f"Редактирование сообщения в канале {after.channel.id} проигнорировано (канал в списке игнора)")
-            return
-        
-        async with after.channel.typing():
-            text = after.content.replace(f"<@{self.bot.user.id}>", "").strip()
-            response = await self.generate_response(str(after.author.id), str(after.id), text, after, is_edit=True)
-            if response and after.id in self.message_to_response:
-                try:
-                    response_msg = await after.channel.fetch_message(self.message_to_response[after.id])
-                    if response_msg.author == self.bot.user:
-                        await response_msg.edit(content=response)
-                    else:
+
+        # ЛС: обработка без ограничений по каналам, но с учетом blacklist
+        if isinstance(after.channel, discord.DMChannel):
+            if not await check_user_restriction(after):
+                return
+            async with after.channel.typing():
+                text = after.content.replace(f"<@{self.bot.user.id}>", "").strip()
+                response = await self.generate_response(str(after.author.id), str(after.id), text, after, is_edit=True)
+                if response and after.id in self.message_to_response:
+                    try:
+                        response_msg = await after.channel.fetch_message(self.message_to_response[after.id])
+                        if response_msg.author == self.bot.user:
+                            await response_msg.edit(content=response)
+                        else:
+                            sent_msg = await after.reply(response)
+                            self.message_to_response[after.id] = sent_msg.id
+                    except discord.NotFound:
                         sent_msg = await after.reply(response)
                         self.message_to_response[after.id] = sent_msg.id
-                except discord.NotFound:
+                elif response:
                     sent_msg = await after.reply(response)
                     self.message_to_response[after.id] = sent_msg.id
-            elif response:
-                sent_msg = await after.reply(response)
-                self.message_to_response[after.id] = sent_msg.id
-
-    def setup_events(self):
-        @self.bot.event
-        async def on_ready(self):
-            from .commands.giveaway import resume_giveaways
-            await resume_giveaways(self)
-            logger.success(f"Бот {self.bot.user} готов")
-
-        @self.bot.event
-        async def on_message(message):
-            await self.on_message(message)
-
-        @self.bot.event
-        async def on_message_edit(before, after):
-            await self.on_message_edit(before, after)
+        # Сервер: проверка разрешённых каналов и пользователей
+        else:
+            if not await check_bot_access(after):
+                return
+            if not await check_user_restriction(after):
+                return
+            async with after.channel.typing():
+                text = after.content.replace(f"<@{self.bot.user.id}>", "").strip()
+                response = await self.generate_response(str(after.author.id), str(after.id), text, after, is_edit=True)
+                if response and after.id in self.message_to_response:
+                    try:
+                        response_msg = await after.channel.fetch_message(self.message_to_response[after.id])
+                        if response_msg.author == self.bot.user:
+                            await response_msg.edit(content=response)
+                        else:
+                            sent_msg = await after.reply(response)
+                            self.message_to_response[after.id] = sent_msg.id
+                    except discord.NotFound:
+                        sent_msg = await after.reply(response)
+                        self.message_to_response[after.id] = sent_msg.id
+                elif response:
+                    sent_msg = await after.reply(response)
+                    self.message_to_response[after.id] = sent_msg.id
 
     async def _send_split_message(self, message: discord.Message, response: str):
         max_length = 2000
@@ -419,7 +427,7 @@ class BotClient:
 
 Давай начнём! 🎨
 """.format(time.strftime("%Y-%m-%d", time.localtime(now)))
-            system_prompt = f"{self.load_user_prompt(user_id, guild_id)}\n📅 Дата: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}. Формат: Discord Markdown."
+            system_prompt = f"{await self.load_user_prompt(user_id, guild_id)}\n📅 Дата: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}. Формат: Discord Markdown."
             if message.attachments:
                 system_prompt += f"\n{vision_prompt}"
             user_content = [{"type": "text", "text": text}] if text else []

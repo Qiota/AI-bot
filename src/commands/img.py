@@ -337,23 +337,6 @@ class SettingsView(View):
         self.generate_button.label = "Загрузка изображения..."
         await interaction.response.edit_message(view=self)
 
-        if not hasattr(self.bot_client, 'cooldown_manager'):
-            embed = Embed(title="❌ Ошибка", description="Система кулдаунов недоступна.", color=0xE74C3C)
-            self.generate_button.disabled = False
-            self.generate_button.label = "Генерировать"
-            await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
-            await interaction.followup.edit_message(interaction.message.id, view=self)
-            return
-
-        remaining = self.bot_client.cooldown_manager.check_cooldown("img", interaction.user.id, COOLDOWN)
-        if remaining > 0:
-            embed = Embed(title="⏰ Ожидание", description=f"Подождите {remaining:.1f} секунд.", color=0xE74C3C)
-            self.generate_button.disabled = False
-            self.generate_button.label = "Генерировать"
-            await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
-            await interaction.followup.edit_message(interaction.message.id, view=self)
-            return
-
         if any(word in self.prompt.lower() for word in FORBIDDEN_WORDS) or \
            (self.negative_prompt and any(word in self.negative_prompt.lower() for word in FORBIDDEN_WORDS)):
             embed = Embed(title="❌ Ошибка", description="Запрос содержит запрещённые слова.", color=0xE74C3C)
@@ -403,6 +386,7 @@ class SettingsView(View):
 
 def create_command(bot_client):
     group = app_commands.Group(name="image", description="Работа с изображениями")
+    group.dm_only = False
 
     @group.command(name="generate", description="Создаёт изображение с настройками")
     @app_commands.describe(ephemeral="Скрыть сообщения (True/False)")

@@ -634,11 +634,13 @@ def create_command(bot_client):
     )
     async def giveaway(interaction: discord.Interaction, prize: str, duration: str, description: str = None, giveaway_image: str = None, winner_image: str = None):
         await start_giveaway(interaction, prize, duration, description, bot_client, giveaway_image, winner_image)
+    giveaway.guild_only = True
 
     @app_commands.command(name="reroll", description="Перевыбрать победителя розыгрыша")
     @app_commands.describe(custom_id="Кастомный ID ивента")
     async def reroll(interaction: discord.Interaction, custom_id: str):
         await reroll_giveaway(interaction, custom_id, bot_client)
+    reroll.guild_only = True
 
     @app_commands.command(name="edit_giveaway", description="Редактировать розыгрыш")
     @app_commands.describe(
@@ -651,5 +653,6 @@ def create_command(bot_client):
     )
     async def edit(interaction: discord.Interaction, custom_id: str, prize: str = None, duration: str = None, description: str = None, giveaway_image: str = None, winner_image: str = None):
         await edit_giveaway(interaction, custom_id, prize, duration, description, bot_client, giveaway_image, winner_image)
+    edit.guild_only = True
 
     return giveaway, reroll, edit
