@@ -3,7 +3,7 @@ from discord import app_commands
 import io
 import requests
 import urllib.parse
-from ..logging_config import logger
+from ..systemLog import logger
 
 description = "Сгенерировать аудио-ответ из запроса"
 

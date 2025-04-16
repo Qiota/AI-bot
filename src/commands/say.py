@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from ..logging_config import logger
+from ..systemLog import logger
 
 description = "Сказать что-то от имени бота"
 

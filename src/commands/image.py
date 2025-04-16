@@ -2,7 +2,7 @@ import discord
 from discord import app_commands, File, ButtonStyle, Embed
 from discord.ui import Modal, TextInput, Select, Button, View
 from g4f.client import AsyncClient
-from g4f.Provider import ImageLabs, PollinationsAI
+from g4f.Provider import ImageLabs, Websim
 from io import BytesIO
 import aiohttp
 from asyncio import Lock
@@ -12,7 +12,7 @@ import PIL.ImageEnhance
 import io
 import os
 import re
-from ..logging_config import logger
+from ..systemLog import logger
 
 description = "Генерирует изображение, вдохновлённое editor.imagelabs.net"
 command_lock = Lock()
@@ -49,54 +49,53 @@ MODELS = {
 
 FORBIDDEN_WORDS = ["loli"]
 
-async def improve_prompt(prompt: str) -> str:
+async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
     logger.info(f"Эмуляция ImageLabs 'aiImprove': '{prompt[:50]}...'")
-    client = AsyncClient(provider=PollinationsAI)
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are replicating the 'aiImprove' feature from ImageLabs Editor (https://editor.imagelabs.net). "
-                        "Your task is to enhance the given prompt for image generation by adding vivid, specific details. "
-                        "Focus on colors, lighting, textures, environmental elements, and emotional atmosphere to make the scene immersive. "
-                        "Ensure the description is clear, visually rich, and optimized for high-quality image generation. "
-                        "Do not apply NSFW filters unless explicitly requested; allow mature themes if present in the prompt. "
-                        "Return only the improved prompt as plain text, no Markdown, no images, no extra formatting."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Enhance this prompt for image generation with detailed visual descriptions: {prompt}. "
-                        "Add specific details about the scene's colors, lighting (e.g., golden hour, soft moonlight), textures (e.g., rough, silky), "
-                        "environmental elements (e.g., misty air, scattered leaves), and emotional tone (e.g., serene, dramatic). "
-                        "Keep the description concise but highly visual, suitable for generating a high-quality image."
-                    )
-                }
-            ]
-        )
-        if not response or not response.choices or not response.choices[0].message.content:
-            logger.warning("PollinationsAI вернул пустой ответ.")
-            return prompt
+    client = AsyncClient(provider=Websim)
+    for model in ["gemini-1.5-pro", "gemini-1.5-flash"]:
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Replicate the 'aiImprove' feature from ImageLabs Editor (https://editor.imagelabs.net). "
+                            "Enhance the given prompt for image generation with vivid details: colors (e.g., crimson sunset), "
+                            "lighting (e.g., golden hour), textures (e.g., silky fabric), environmental elements (e.g., misty air), "
+                            "and emotional tone (e.g., serene). "
+                            f"{'Allow tasteful NSFW content if present, keeping it artistic.' if nsfw_allowed else 'Avoid NSFW content.'} "
+                            "Return only the improved prompt as plain text, max 200 characters, no Markdown, no explanations."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Enhance this prompt: {prompt}. Add colors, lighting, textures, environment, and tone. Keep it concise."
+                    }
+                ],
+                max_tokens=100,
+                temperature=0.7
+            )
+            if not response or not response.choices or not response.choices[0].message.content:
+                logger.warning(f"Websim ({model}) вернул пустой ответ.")
+                continue
 
-        improved = response.choices[0].message.content
-        if not isinstance(improved, str):
-            logger.error(f"Улучшенный промпт не строка: {type(improved)}")
-            return prompt
+            improved = response.choices[0].message.content.strip()
+            if not isinstance(improved, str) or not improved:
+                logger.error(f"Улучшенный промпт некорректен: {type(improved)}")
+                continue
 
-        cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', improved).strip()
-        if not cleaned:
-            logger.warning("Улучшенный промпт после очистки пустой.")
-            return prompt
+            cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', improved).strip()[:200]
+            if not cleaned:
+                logger.warning("Улучшенный промпт после очистки пустой.")
+                continue
 
-        logger.info(f"Улучшенный промпт (ImageLabs стиль): '{cleaned[:50]}...'")
-        return cleaned
-    except Exception as e:
-        logger.error(f"Ошибка улучшения (ImageLabs стиль): {e}")
-        return prompt
+            logger.info(f"Улучшенный промпт: '{cleaned[:50]}...'")
+            return cleaned
+        except Exception as e:
+            logger.error(f"Ошибка улучшения с {model}: {e}")
+    logger.warning("Все модели Websim не сработали.")
+    return prompt
 
 async def generate_image(
     interaction: discord.Interaction,
@@ -114,7 +113,7 @@ async def generate_image(
         original_prompt = prompt
         final_prompt = prompt
         if improve_prompt_flag:
-            final_prompt = await improve_prompt(prompt)
+            final_prompt = await improve_prompt(prompt, nsfw_allowed=True)
             if not final_prompt or not isinstance(final_prompt, str):
                 logger.warning("Улучшенный промпт некорректный.")
                 final_prompt = prompt
@@ -170,10 +169,10 @@ async def generate_image(
         embed = Embed(title="🎨 Изображение готово!", color=0x1ABC9C)
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/3659/3659898.png")
         if improve_prompt_flag and final_prompt != original_prompt:
-            embed.add_field(name="📝 Исходный промпт", value=f"```{original_prompt[:1018]}[...]```" if len(original_prompt) > 1018 else f"```{original_prompt}```", inline=False)
-            embed.add_field(name="✨ Улучшенный промпт", value=f"```{final_prompt[:1018]}[...]```" if len(final_prompt) > 1018 else f"```{final_prompt}```", inline=False)
+            embed.add_field(name="📝 Исходный промпт", value=f"```{original_prompt[:1000]}[...]```" if len(original_prompt) > 1000 else f"```{original_prompt}```", inline=False)
+            embed.add_field(name="✨ Улучшенный промпт", value=f"```{final_prompt[:1000]}[...]```" if len(final_prompt) > 1000 else f"```{final_prompt}```", inline=False)
         else:
-            embed.add_field(name="📝 Промпт", value=f"```{final_prompt[:1018]}[...]```" if len(final_prompt) > 1018 else f"```{final_prompt}```", inline=False)
+            embed.add_field(name="📝 Промпт", value=f"```{final_prompt[:1000]}[...]```" if len(final_prompt) > 1000 else f"```{final_prompt}```", inline=False)
         embed.add_field(name="🤖 Модель", value=f"**{MODELS[model]}**", inline=True)
         embed.add_field(name="📏 Размеры", value=f"**{aspect_ratio[0]}x{aspect_ratio[1]}**", inline=True)
         embed.add_field(name="🔄 Шаги", value=f"**{steps}**", inline=True)
@@ -182,13 +181,13 @@ async def generate_image(
         await interaction.followup.send(embed=embed, file=file, ephemeral=ephemeral)
 
         logger.info(
-            f"Команда /img выполнена: user={interaction.user.id}, "
+            f"Команда /image выполнена: user={interaction.user.id}, "
             f"model={model}, size={aspect_ratio}, steps={steps}, cfg={cfg_scale}"
         )
     except Exception as e:
         embed = Embed(title="❌ Ошибка генерации", description=str(e), color=0xE74C3C)
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
-        logger.error(f"Ошибка /img для {interaction.user.id}: {e}")
+        logger.error(f"Ошибка /image для {interaction.user.id}: {e}")
 
 class SettingsModal(Modal):
     def __init__(self, bot_client, view: 'SettingsView'):
@@ -241,7 +240,7 @@ class SettingsModal(Modal):
             await interaction.followup.send(embed=embed, ephemeral=self.view.ephemeral)
             return
         embed = Embed(title="⚙️ Текущие настройки", color=0x3498DB)
-        embed.add_field(name="📝 Промпт", value=f"```{self.view.prompt[:1018]}[...]```" if len(self.view.prompt) > 1018 else f"```{self.view.prompt}```", inline=False)
+        embed.add_field(name="📝 Промпт", value=f"```{self.view.prompt[:1000]}[...]```" if len(self.view.prompt) > 1000 else f"```{self.view.prompt}```", inline=False)
         embed.add_field(name="🤖 Модель", value=f"> `{MODELS[self.view.model]}`", inline=True)
         embed.add_field(name="📏 Соотношение сторон", value=f"> `{self.view.aspect_ratio} ({ASPECT_RATIOS[self.view.aspect_ratio][0]}x{ASPECT_RATIOS[self.view.aspect_ratio][1]})`", inline=True)
         embed.add_field(name="🔄 Шаги", value=f"> `{self.view.steps}`", inline=True)
@@ -294,7 +293,7 @@ class SettingsView(View):
     async def model_select_callback(self, interaction: discord.Interaction):
         self.model = self.model_select.values[0]
         embed = Embed(title="⚙️ Текущие настройки", color=0x3498DB)
-        embed.add_field(name="📝 Промпт", value=f"```{self.prompt[:1018]}[...]```" if len(self.prompt) > 1018 else f"```{self.prompt}```", inline=False)
+        embed.add_field(name="📝 Промпт", value=f"```{self.prompt[:1000]}[...]```" if len(self.prompt) > 1000 else f"```{self.prompt}```", inline=False)
         embed.add_field(name="🤖 Модель", value=f"> `{MODELS[self.model]}`", inline=True)
         embed.add_field(name="📏 Соотношение сторон", value=f"> `{self.aspect_ratio} ({ASPECT_RATIOS[self.aspect_ratio][0]}x{ASPECT_RATIOS[self.aspect_ratio][1]})`", inline=True)
         embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
@@ -304,7 +303,7 @@ class SettingsView(View):
     async def aspect_ratio_select_callback(self, interaction: discord.Interaction):
         self.aspect_ratio = self.aspect_ratio_select.values[0]
         embed = Embed(title="⚙️ Текущие настройки", color=0x3498DB)
-        embed.add_field(name="📝 Промпт", value=f"```{self.prompt[:1018]}[...]```" if len(self.prompt) > 1018 else f"```{self.prompt}```", inline=False)
+        embed.add_field(name="📝 Промпт", value=f"```{self.prompt[:1000]}[...]```" if len(self.prompt) > 1000 else f"```{self.prompt}```", inline=False)
         embed.add_field(name="🤖 Модель", value=f"> `{MODELS[self.model]}`", inline=True)
         embed.add_field(name="📏 Соотношение сторон", value=f"> `{self.aspect_ratio} ({ASPECT_RATIOS[self.aspect_ratio][0]}x{ASPECT_RATIOS[self.aspect_ratio][1]})`", inline=True)
         embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
@@ -320,10 +319,10 @@ class SettingsView(View):
         self.improve_prompt_button.disabled = True
         self.improve_prompt_button.label = "Улучшение..."
         await interaction.response.edit_message(view=self)
-        improved = await improve_prompt(self.prompt)
+        improved = await improve_prompt(self.prompt, nsfw_allowed=True)
         self.prompt = improved
         embed = Embed(title="⚙️ Текущие настройки", color=0x3498DB)
-        embed.add_field(name="📝 Промпт", value=f"```{self.prompt[:1018]}[...]```" if len(self.prompt) > 1018 else f"```{self.prompt}```", inline=False)
+        embed.add_field(name="📝 Промпт", value=f"```{self.prompt[:1000]}[...]```" if len(self.prompt) > 1000 else f"```{self.prompt}```", inline=False)
         embed.add_field(name="🤖 Модель", value=f"> `{MODELS[self.model]}`", inline=True)
         embed.add_field(name="📏 Соотношение сторон", value=f"> `{self.aspect_ratio} ({ASPECT_RATIOS[self.aspect_ratio][0]}x{ASPECT_RATIOS[self.aspect_ratio][1]})`", inline=True)
         embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
@@ -391,13 +390,14 @@ def create_command(bot_client):
     @group.command(name="generate", description="Создаёт изображение с настройками")
     @app_commands.describe(ephemeral="Скрыть сообщения (True/False)")
     async def generate(interaction: discord.Interaction, ephemeral: bool = False):
+        await interaction.response.defer(ephemeral=ephemeral)
         view = SettingsView(bot_client, ephemeral)
         embed = Embed(title="⚙️ Текущие настройки", color=0x3498DB)
-        embed.add_field(name="📝 Промпт", value=f"```{view.prompt[:1018]}[...]```" if len(view.prompt) > 1018 else f"```{view.prompt}```", inline=False)
+        embed.add_field(name="📝 Промпт", value=f"```{view.prompt[:1000]}[...]```" if len(view.prompt) > 1000 else f"```{view.prompt}```", inline=False)
         embed.add_field(name="🤖 Модель", value=f"> `{MODELS[view.model]}`", inline=True)
         embed.add_field(name="📏 Соотношение сторон", value=f"> `{view.aspect_ratio} ({ASPECT_RATIOS[view.aspect_ratio][0]}x{ASPECT_RATIOS[view.aspect_ratio][1]})`", inline=True)
         embed.add_field(name="🔄 Шаги", value=f"> `{view.steps}`", inline=True)
         embed.add_field(name="⚖️ CFG Scale", value=f"> `{view.cfg_scale}`", inline=True)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=ephemeral)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral)
 
     return group

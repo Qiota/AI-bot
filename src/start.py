@@ -6,91 +6,44 @@ import discord
 from discord import app_commands
 from .config import BotConfig
 from .aichat import BotClient
-from .logging_config import logger
+from .systemLog import logger
 from .server import run_flask
 from .commands.restrict import check_bot_access, check_user_restriction
+from .events.activity import set_bot_activity
 import time
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Union
 
-def create_command_wrapper(
-    command: app_commands.Command | app_commands.Group | Callable,
-    bot_client: BotClient
-) -> app_commands.Command | app_commands.Group:
-    """Создаёт обёртку для команды или группы команд."""
+async def apply_command_checks(interaction: discord.Interaction, command_name: str) -> bool:
+    """Проверяет доступ к команде."""
+    if command_name == "restrict" and not interaction.guild:
+        await interaction.response.send_message("Команда только для серверов!", ephemeral=True)
+        return False
+    if interaction.guild and command_name != "restrict":
+        if not await check_bot_access(interaction):
+            await interaction.response.send_message("Бот не имеет доступа на этом сервере!", ephemeral=True)
+            return False
+        if not await check_user_restriction(interaction):
+            await interaction.response.send_message("У вас нет доступа к этой команде!", ephemeral=True)
+            return False
+    return True
+
+def add_checks_to_command(command: Union[app_commands.Command, app_commands.Group], bot_client: BotClient) -> None:
+    """Добавляет проверки к команде или группе."""
     if isinstance(command, app_commands.Group):
-        wrapped_group = app_commands.Group(
-            name=command.name,
-            description=command.description or "Группа команд"
-        )
         for subcommand in command.commands:
-            wrapped_subcommand = create_command_wrapper(subcommand, bot_client)
-            wrapped_group.add_command(wrapped_subcommand)
-        return wrapped_group
+            add_checks_to_command(subcommand, bot_client)
+    else:
+        async def check(interaction: discord.Interaction) -> bool:
+            return await apply_command_checks(interaction, command.name)
+        command.add_check(check)
 
-    # Если команда уже является app_commands.Command (например, через декоратор)
-    if isinstance(command, app_commands.Command):
-        async def command_wrapper(interaction: discord.Interaction) -> None:
-            """Обёртка для выполнения команды с проверками."""
-            if command.name == "restrict" and not interaction.guild:
-                await interaction.response.send_message("Команда только для серверов!", ephemeral=True)
-                return
-
-            if interaction.guild and command.name != "restrict":
-                if not await check_bot_access(interaction):
-                    return
-                if not await check_user_restriction(interaction):
-                    return
-
-            try:
-                await command.callback(interaction)
-            except Exception as e:
-                logger.error(f"Ошибка в команде {command.name}: {e}")
-                await interaction.response.send_message("Ошибка выполнения команды!", ephemeral=True)
-
-        return app_commands.Command(
-            name=command.name,
-            description=command.description or "Команда бота",
-            callback=command_wrapper
-        )
-
-    # Если команда - это callable (функция, ещё не обёрнутая)
-    async def command_wrapper(interaction: discord.Interaction) -> None:
-        """Обёртка для выполнения команды с проверками."""
-        command_name = command.__name__
-        if command_name == "restrict" and not interaction.guild:
-            await interaction.response.send_message("Команда только для серверов!", ephemeral=True)
-            return
-
-        if interaction.guild and command_name != "restrict":
-            if not await check_bot_access(interaction):
-                return
-            if not await check_user_restriction(interaction):
-                return
-
-        try:
-            await command(interaction, bot_client)
-        except Exception as e:
-            logger.error(f"Ошибка в команде {command_name}: {e}")
-            await interaction.response.send_message("Ошибка выполнения команды!", ephemeral=True)
-
-    return app_commands.Command(
-        name=command.__name__,
-        description=getattr(command, "description", "Команда бота"),
-        callback=command_wrapper
-    )
-
-def load_command_module(
-    file_path: Path,
-    commands_dir: Path,
-    bot_client: BotClient
-) -> Optional[list[tuple[app_commands.Command | app_commands.Group, str]]]:
-    """Загружает модуль команды из файла."""
+def load_command_module(file_path: Path, commands_dir: Path, bot_client: BotClient) -> Optional[list[tuple[Union[app_commands.Command, app_commands.Group], str]]]:
+    """Загружает модуль команды."""
     try:
         relative_path = file_path.relative_to(commands_dir)
         module_name = f"src.commands.{str(relative_path.with_suffix('')).replace('/', '.').replace('\\', '.')}"
         module = importlib.import_module(module_name)
-
-        create_command: Optional[Callable[[BotClient], Any]] = getattr(module, "create_command", None)
+        create_command = getattr(module, "create_command", None)
         if not create_command:
             logger.warning(f"create_command не найден в {module_name}")
             return None
@@ -98,49 +51,43 @@ def load_command_module(
         command = create_command(bot_client)
         commands = command if isinstance(command, tuple) else (command,)
         result = []
+        loaded_commands = []
 
         for cmd in commands:
             dm_only = getattr(cmd, "dm_only", False)
             guild_only = getattr(cmd, "guild_only", False)
             if dm_only and guild_only:
-                logger.warning(f"Команда {getattr(cmd, 'name', cmd.__name__)} не может быть dm_only и guild_only")
+                logger.warning(f"Команда {cmd.name} не может быть dm_only и guild_only")
                 continue
 
-            wrapped_command = create_command_wrapper(cmd, bot_client)
+            add_checks_to_command(cmd, bot_client)
             context = f"[{'ЛС' if dm_only else 'серверов' if guild_only else 'ЛС и серверов'}]"
-            settings = {
-                "name": wrapped_command.name,
-                "type": "group" if isinstance(wrapped_command, app_commands.Group) else "command",
-                "dm_only": dm_only,
-                "guild_only": guild_only
-            }
+            settings = {"name": cmd.name, "type": "group" if isinstance(cmd, app_commands.Group) else "command", "dm_only": dm_only, "guild_only": guild_only}
             if settings["type"] == "group":
-                settings["subcommands"] = [sub.name for sub in wrapped_command.commands]
+                settings["subcommands"] = [sub.name for sub in cmd.commands]
+            loaded_commands.append(f"/{cmd.name} ({settings['type']}{', подкоманды: ' + ', '.join(settings['subcommands']) if settings['type'] == 'group' else ''}) для {context}")
+            result.append((cmd, context))
 
-            logger.info(f"Загружается команда/группа: {settings}")
-            result.append((wrapped_command, context))
-
+        if loaded_commands:
+            logger.info(f"Загружены команды: {', '.join(loaded_commands)}")
         return result
-
     except ImportError as e:
         logger.error(f"Ошибка импорта {file_path.stem}: {e}")
         return None
 
 async def register_commands(tree: app_commands.CommandTree, bot_client: BotClient) -> None:
-    """Регистрирует команды из папки commands с рекурсивным сканированием."""
+    """Регистрирует команды из папки commands."""
     commands_dir = Path(__file__).parent / "commands"
-
     def scan_commands(directory: Path) -> None:
-        """Рекурсивно сканирует папку для поиска команд."""
+        """Рекурсивно сканирует команды."""
         for item in directory.iterdir():
             if item.is_dir():
                 scan_commands(item)
             elif item.suffix == ".py" and item.stem != "__init__":
                 commands = load_command_module(item, commands_dir, bot_client)
                 if commands:
-                    for command, context in commands:
+                    for command, _ in commands:
                         tree.add_command(command)
-                        logger.success(f"Команда/группа /{command.name} зарегистрирована для {context}")
 
     try:
         tree.clear_commands(guild=None)
@@ -165,6 +112,7 @@ async def run_bot() -> None:
         @bot_client.bot.event
         async def on_ready():
             await bot_client.bot.wait_until_ready()
+            await set_bot_activity(bot_client.bot)
             await register_commands(bot_client.tree, bot_client)
             logger.success("Бот запущен!")
 
@@ -173,11 +121,19 @@ async def run_bot() -> None:
     except Exception as e:
         logger.error(f"Ошибка запуска бота: {e}")
         raise
+    finally:
+        if hasattr(bot_client, 'client') and hasattr(bot_client.client, '_session'):
+            await bot_client.client._session.close()
+        await bot_client.bot.close()
 
 def start_bot() -> None:
     """Инициирует запуск бота."""
     try:
-        asyncio.run(run_bot())
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(run_bot())
+        else:
+            loop.run_until_complete(run_bot())
     except KeyboardInterrupt:
         logger.info("Остановка бота пользователем")
     except Exception as e:

@@ -1,6 +1,6 @@
 from flask import Flask
 from .config import BotConfig
-from .logging_config import logger
+from .systemLog import logger
 
 app = Flask(__name__)
 

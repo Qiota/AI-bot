@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands, Embed
 from datetime import datetime
-from ..logging_config import logger
+from ..systemLog import logger
 
 description = "Отображает информацию о боте"
 

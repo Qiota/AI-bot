@@ -1,5 +1,5 @@
 from decouple import config, UndefinedValueError
-from .logging_config import logger
+from .systemLog import logger
 
 class BotConfig:
     """Конфигурация бота с валидацией переменных окружения."""
