@@ -1,6 +1,6 @@
-import os
 from flask import Flask
-from .config import BotConfig, logger
+from .config import BotConfig
+from .logging_config import logger
 
 app = Flask(__name__)
 
@@ -11,6 +11,10 @@ def home():
 def run_flask():
     """Запуск Flask-сервера."""
     config = BotConfig()
-    host = '127.0.0.1' if os.getenv('FLASK_ENV') == 'production' else '0.0.0.0'
-    logger.info(f"Запуск Flask на порту {config.FLASK_PORT} (host: {host})")
-    app.run(host=host, port=config.FLASK_PORT, debug=False, use_reloader=False)
+    host = config.FLASK_HOST or ('127.0.0.1' if config.ENV == 'production' else '0.0.0.0')
+    try:
+        logger.info(f"Запуск Flask на {host}:{config.FLASK_PORT}")
+        app.run(host=host, port=config.FLASK_PORT, debug=False, use_reloader=False)
+    except Exception as e:
+        logger.error(f"Ошибка запуска Flask: {e}")
+        raise

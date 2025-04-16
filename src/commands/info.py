@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands, Embed
 from datetime import datetime
-from ..config import logger
+from ..logging_config import logger
 
 description = "Отображает информацию о боте"
 
@@ -49,7 +49,6 @@ async def info(interaction: discord.Interaction, bot_client) -> None:
         embed.set_footer(text=f"Запрос от {interaction.user.name} (ID: {interaction.user.id})")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
-        logger.info(f"Команда /info выполнена для пользователя {interaction.user.id} (сервер: {interaction.guild.id if interaction.guild else 'DM'})")
 
     except Exception as e:
         logger.error(f"Ошибка команды /info для пользователя {interaction.user.id}: {e}")

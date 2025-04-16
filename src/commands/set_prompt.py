@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from ..aichat import BotClient
-from ..config import logger
+from ..logging_config import logger
 import os
 import json
 
@@ -12,7 +12,7 @@ os.makedirs(BASE_DIR, exist_ok=True)
 
 def load_user_prompt(user_id: str, guild_id: str) -> str:
     """Загружает промпт пользователя из JSON-файла или возвращает стандартный."""
-    default_prompt = "Ты - дружелюбный чат-бот от Qiota. Отвечай кратко и точно. Формат: Discord Markdown."
+    default_prompt = "Ответь на запрос максимально точно, полно и развернуто. Используй четкую структуру, включай все релевантные детали, примеры и пояснения. Если есть неоднозначности, уточни их и предложи несколько вариантов интерпретации. Обеспечь логичность и последовательность изложения, избегая лишних отступлений. Формат: Discord Markdown."
     file_path = os.path.join(BASE_DIR, f"{guild_id}_{user_id}.json")
     try:
         if os.path.exists(file_path):

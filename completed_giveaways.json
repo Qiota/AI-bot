@@ -1,1 +1,53 @@
-{}
+{
+  "ecdwr": {
+    "prize": "ass",
+    "duration": 1,
+    "host_id": 1297639749162635358,
+    "channel_id": 1357415140500439291,
+    "custom_id": "ecdwr",
+    "description": "Нажмите на кнопку ниже, чтобы принять участие в розыгрыше!",
+    "message_id": 1361672711713063025,
+    "end_time": 1744718615,
+    "participant_ids": [
+      1297639749162635358
+    ],
+    "winner_id": 1297639749162635358,
+    "completed_at": 1744719412,
+    "giveaway_image": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTBkJigufyq00dk5hZq_acK0ix6Gq5LMj59Kg&s",
+    "winner_image": "https://vitoff.net/images/3d-stereo/stereogram-11.jpg"
+  },
+  "5hq3u": {
+    "prize": "123",
+    "duration": 1,
+    "host_id": 1297639749162635358,
+    "channel_id": 1357415140500439291,
+    "custom_id": "5hq3u",
+    "description": "Нажмите на кнопку ниже, чтобы принять участие в розыгрыше!",
+    "message_id": 1361677385853960193,
+    "end_time": 1744719645,
+    "participant_ids": [
+      1297639749162635358
+    ],
+    "winner_id": 1297639749162635358,
+    "completed_at": 1744719649,
+    "giveaway_image": null,
+    "winner_image": null
+  },
+  "2vnvq": {
+    "prize": "123",
+    "duration": 1,
+    "host_id": 1297639749162635358,
+    "channel_id": 1357415192740499787,
+    "custom_id": "2vnvq",
+    "description": "Нажмите на кнопку ниже, чтобы принять участие в розыгрыше!",
+    "message_id": 1361704219911917700,
+    "end_time": 1744726043,
+    "participant_ids": [
+      1297639749162635358
+    ],
+    "winner_id": 1297639749162635358,
+    "completed_at": 1744726044,
+    "giveaway_image": null,
+    "winner_image": null
+  }
+}

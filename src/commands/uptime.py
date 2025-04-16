@@ -1,6 +1,5 @@
 import discord
 from discord import app_commands
-from ..config import logger
 import time
 
 description = "Показать время работы бота"
