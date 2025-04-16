@@ -156,7 +156,11 @@ class SelectView(BaseView):
             custom_id=f"{self.action}_select",
             placeholder=f"{self.placeholder} (Страница {self.current_page + 1}/{total_pages})",
             options=[
-                discord.SelectOption(label=item["label"], value=item["value"], default=item["default"])
+                discord.SelectOption(
+                    label=item["label"],
+                    value=item["value"],
+                    default=item["value"] in self.selected_values
+                )
                 for item in paginated_items
             ],
             min_values=0,
@@ -243,7 +247,15 @@ class SelectView(BaseView):
     async def select_callback(self, interaction: discord.Interaction):
         if await self.restrict_interaction(interaction):
             return
-        self.selected_values = self.children[0].values
+        paginated_items = self.get_paginated_items()
+        current_page_values = {item["value"] for item in paginated_items}
+
+        preserved_values = [value for value in self.selected_values if value not in current_page_values]
+
+        new_values = self.children[0].values
+
+        self.selected_values = list(set(preserved_values + new_values))
+
         logger.debug(f"SelectView: {self.action}, выбрано {len(self.selected_values)} элементов пользователем {self.user_id}")
         await self.update_view(interaction)
 
@@ -273,6 +285,7 @@ class SelectView(BaseView):
             return
         logger.debug(f"SelectView: Подтверждение {self.action} для {len(self.selected_values)} элементов")
 
+        # Заменяем кнопку на состояние загрузки (эмодзи ⏳ и отключение кнопки)
         self.children[-1].label = "⏳"
         self.children[-1].style = discord.ButtonStyle.blurple
         self.children[-1].disabled = True
@@ -430,6 +443,20 @@ class ActionSelectView(BaseView):
     async def unrestrict_users(self, interaction: discord.Interaction, button: Button):
         await self.handle_action(interaction, "unrestrict_users")
 
+async def notify_restricted_channel(message: discord.Message, reason: str = "бот не работает в этом канале"):
+    try:
+        msg = await message.channel.send(
+            f"{message.author.mention}, {reason}. Настройте каналы через /restrict.",
+            reference=message
+        )
+        await asyncio.sleep(5)
+        try:
+            await msg.delete()
+        except discord.errors.NotFound:
+            pass
+    except discord.errors.Forbidden:
+        logger.warning(f"Нет прав для отправки сообщения в канале {message.channel.id}")
+
 async def check_channels_setup(obj):
     if isinstance(obj, discord.Message) and isinstance(obj.channel, discord.DMChannel):
         return True
@@ -447,15 +474,7 @@ async def check_channels_setup(obj):
                 "Сначала настройте каналы для бота через /restrict.", ephemeral=True
             )
         elif isinstance(obj, discord.Message):
-            msg = await obj.channel.send(
-                f"{obj.author.mention}, настройте каналы через /restrict.",
-                reference=obj
-            )
-            await asyncio.sleep(5)
-            try:
-                await msg.delete()
-            except discord.errors.NotFound:
-                pass
+            await notify_restricted_channel(obj, "каналы не настроены")
         return False
     return True
 
@@ -500,7 +519,7 @@ async def check_user_restriction(obj):
     return True
 
 async def handle_mention(message: discord.Message, bot_client):
-    if bot_client.user in message.mentions:
+    if bot_client.bot.user in message.mentions:
         config = ConfigManager.load()
         guild_id = str(message.guild.id) if message.guild else None
         if guild_id:
@@ -510,32 +529,16 @@ async def handle_mention(message: discord.Message, bot_client):
             if message.reference:
                 try:
                     replied_message = await message.channel.fetch_message(message.reference.message_id)
-                    if replied_message.author == bot_client.user and "настройте каналы через /restrict" in replied_message.content:
+                    if replied_message.author == bot_client.bot.user and "настройте каналы через /restrict" in replied_message.content:
                         return True
                 except discord.errors.NotFound:
                     pass
 
             if not allowed_channels:
-                msg = await message.channel.send(
-                    f"{message.author.mention}, настройте каналы через /restrict.",
-                    reference=message
-                )
-                await asyncio.sleep(5)
-                try:
-                    await msg.delete()
-                except discord.errors.NotFound:
-                    pass
+                await notify_restricted_channel(message, "каналы не настроены")
                 return False
             if channel_id not in allowed_channels:
-                msg = await message.channel.send(
-                    f"{message.author.mention}, бот не работает в этом канале.",
-                    reference=message
-                )
-                await asyncio.sleep(5)
-                try:
-                    await msg.delete()
-                except discord.errors.NotFound:
-                    pass
+                await notify_restricted_channel(message, "бот не работает в этом канале")
                 return False
             return True
         return True

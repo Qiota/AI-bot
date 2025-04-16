@@ -9,7 +9,7 @@ from .logging_config import logger
 from .server import run_flask
 from .commands.giveaway import resume_giveaways
 from .ready import set_activity
-from .commands.restrict import check_bot_access, check_user_restriction
+from .commands.restrict import check_bot_access, check_user_restriction, handle_mention
 import time
 
 def create_command_wrapper(command, bot_client):
@@ -111,7 +111,16 @@ async def run_bot():
         config.validate()
         bot_client.bot.event(bot_client.on_message)
         bot_client.bot.event(bot_client.on_message_edit)
-        
+
+        @bot_client.bot.event
+        async def on_message(message: discord.Message):
+            if message.author == bot_client.bot.user:
+                return
+            can_respond = await handle_mention(message, bot_client)
+            if not can_respond:
+                return
+            await bot_client.on_message(message)
+
         @bot_client.bot.event
         async def on_ready():
             await bot_client.bot.wait_until_ready()

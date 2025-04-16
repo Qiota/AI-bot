@@ -12,7 +12,6 @@ import re
 from collections import OrderedDict, defaultdict
 import json
 import os
-from .commands.restrict import check_bot_access, check_user_restriction
 
 class BotClient:
     def __init__(self, config):
@@ -84,11 +83,9 @@ class BotClient:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                # Собираем всех restricted_users из всех гильдий
                 for guild_id, settings in data.items():
                     if isinstance(settings, dict) and "restricted_users" in settings:
                         self.ignored_settings["ignored_users"].extend(settings["restricted_users"])
-                # Удаляем дубликаты
                 self.ignored_settings["ignored_users"] = list(set(self.ignored_settings["ignored_users"]))
                 logger.info(f"Настройки игнорирования загружены: {self.ignored_settings}")
         except Exception as e:
@@ -185,7 +182,7 @@ class BotClient:
             elif "актер" in keywords or "персонаж" in keywords:
                 context += "Сфокусируемся на людях и их ролях. "
             elif "место" in keywords or "локация" in keywords:
-                context += "Давай разберем локации и фон. "
+                context += "Давай разберём локации и фон. "
             return context + "Я использую текущую дату и детали изображения, чтобы дать точный ответ. 🖼️"
         except Exception as e:
             logger.error(f"Ошибка анализа контекста: {e}")
@@ -196,10 +193,10 @@ class BotClient:
         if model_type == "vision":
             try:
                 context = await self.analyze_image_context(messages, text)
-                messages[-1]["content"].append({"type": "text", "text": context or "Контекст изображения не определен, но я попробую помочь!"})
+                messages[-1]["content"].append({"type": "text", "text": context or "Контекст изображения не определён, но я попробую помочь!"})
             except Exception as e:
                 logger.error(f"Ошибка дополнения контекста: {e}")
-                messages[-1]["content"].append({"type": "text", "text": "Контекст изображения не определен, но я попробую помочь!"})
+                messages[-1]["content"].append({"type": "text", "text": "Контекст изображения не определён, но я попробую помочь!"})
         payload = {
             "messages": messages,
             "max_tokens": max_tokens,
@@ -316,43 +313,16 @@ class BotClient:
                 bool(re.search(time_phrases, text_lower)) or
                 bool(re.search(question_phrases, text_lower)))
 
-    async def check_restrictions(self, message: discord.Message) -> bool:
-        """
-        Проверяет ограничения для сообщений в гильдиях.
-        Возвращает True, если сообщение разрешено обрабатывать, иначе False.
-        Для ЛС ограничения не применяются.
-        """
-        # Если сообщение в ЛС, пропускаем все проверки
-        if isinstance(message.channel, discord.DMChannel):
-            return True
-        
-        # Проверка ограничений пользователя
-        if not await check_user_restriction(message):
-            return False
-        
-        # Проверка доступа бота к каналу
-        if not await check_bot_access(message):
-            return False
-        
-        return True
-
     async def on_message(self, message: discord.Message):
         msg_key = f"{message.id}-{message.channel.id}"
         if message.author.bot or msg_key in self.processed_messages:
             return
         
-        # Проверка ограничений (игнор, пользователь, канал)
         if self.ignored_settings.get("ignored_users") and str(message.author.id) in self.ignored_settings["ignored_users"]:
             logger.info(f"Сообщение от {message.author.id} проигнорировано (пользователь в списке игнора)")
             return
         if self.ignored_settings.get("ignored_channels") and str(message.channel.id) in self.ignored_settings["ignored_channels"] and not isinstance(message.channel, discord.DMChannel):
             logger.info(f"Сообщение в канале {message.channel.id} проигнорировано (канал в списке игнора)")
-            return
-        if not await self.check_restrictions(message):
-            return
-        
-        # Проверка упоминания бота (для гильдий)
-        if self.bot.user not in message.mentions and not isinstance(message.channel, discord.DMChannel):
             return
         
         self.processed_messages.add(msg_key)
@@ -367,14 +337,11 @@ class BotClient:
         if before.content == after.content or after.author.bot or msg_key not in self.processed_messages:
             return
         
-        # Проверка ограничений (игнор, пользователь, канал)
         if self.ignored_settings.get("ignored_users") and str(after.author.id) in self.ignored_settings["ignored_users"]:
             logger.info(f"Редактирование сообщения от {after.author.id} проигнорировано (пользователь в списке игнора)")
             return
         if self.ignored_settings.get("ignored_channels") and str(after.channel.id) in self.ignored_settings["ignored_channels"] and not isinstance(after.channel, discord.DMChannel):
             logger.info(f"Редактирование сообщения в канале {after.channel.id} проигнорировано (канал в списке игнора)")
-            return
-        if not await self.check_restrictions(after):
             return
         
         async with after.channel.typing():
@@ -450,7 +417,7 @@ class BotClient:
 - Если не совсем уверена, скажу: "Мне кажется (~80%)...".
 - Ответ будет в формате Discord Markdown, чтобы было удобно читать.
 
-Давай начнем! 🎨
+Давай начнём! 🎨
 """.format(time.strftime("%Y-%m-%d", time.localtime(now)))
             system_prompt = f"{self.load_user_prompt(user_id, guild_id)}\n📅 Дата: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}. Формат: Discord Markdown."
             if message.attachments:
@@ -461,14 +428,14 @@ class BotClient:
             messages = context + [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]
             response_text = await self._try_generate_response(messages, self.needs_web_search(text, context, bool(attachments)), bool(attachments), 6000, text)
             if not response_text:
-                return "Хм, не получилось найти ответ. Может, попробуем еще раз с другим изображением или запросом?"
+                return "Хм, не получилось найти ответ. Может, попробуем ещё раз с другим изображением или запросом?"
             final_response = response_text[:self.user_settings[user_id]["max_response_length"]]
             await self.add_to_memory(user_id, message_id, "user", text, message.author.name, attachments[0] if attachments else None)
             await self.add_to_memory(user_id, f"{message_id}_resp", "assistant", final_response, self.bot.user.name)
             return final_response
         except Exception as e:
             logger.error(f"Ошибка генерации для {user_id}: {e}")
-            await self._send_temp_message(message.channel, "Упс, что-то пошло не так. Давай попробуем еще раз?", user_id)
+            await self._send_temp_message(message.channel, "Упс, что-то пошло не так. Давай попробуем ещё раз?", user_id)
             return None
 
     async def _try_generate_response(self, messages: List[Dict], needs_web: bool, has_image: bool, max_tokens: int, text: str) -> Optional[str]:
