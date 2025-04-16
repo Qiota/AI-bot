@@ -111,7 +111,7 @@ class SelectView(BaseView):
                 for channel in self.guild.text_channels
             ]
             self.placeholder = "Выберите каналы для доступа бота"
-            self.selected_values = config.get(guild_id, {}).get("bot_allowed_channels", [])
+            self.selected_values = config.get(guild_id, {}).get("bot_allowed_channels", [])  # Инициализация выбранных каналов
         else:
             current_users = config.get(guild_id, {}).get("restricted_users", [])
             members = [
@@ -126,7 +126,7 @@ class SelectView(BaseView):
                 for member in members
             ]
             self.placeholder = "Выберите пользователей для " + ("ограничения" if self.action == "restrict_users" else "разблокировки")
-            self.selected_values = current_users
+            self.selected_values = current_users  # Инициализация выбранных пользователей
 
     def get_paginated_items(self):
         items = self.all_items
@@ -152,6 +152,7 @@ class SelectView(BaseView):
 
         total_pages = max(1, (len(self.all_items) + self.items_per_page - 1) // self.items_per_page)
 
+        # Устанавливаем default=True для элементов, которые уже выбраны в selected_values
         select = Select(
             custom_id=f"{self.action}_select",
             placeholder=f"{self.placeholder} (Страница {self.current_page + 1}/{total_pages})",
@@ -159,7 +160,7 @@ class SelectView(BaseView):
                 discord.SelectOption(
                     label=item["label"],
                     value=item["value"],
-                    default=item["value"] in self.selected_values
+                    default=item["value"] in self.selected_values  # Отражаем текущий выбор
                 )
                 for item in paginated_items
             ],
@@ -217,13 +218,16 @@ class SelectView(BaseView):
             "unrestrict_users": "Выберите пользователей для снятия ограничений (текущие отмечены)."
         }[self.action]
 
+        # Добавляем список всех выбранных элементов
         if self.selected_values:
             if self.action == "bot_access":
+                # Для каналов ищем их имена по ID
                 selected_channels = [
                     item["label"] for item in self.all_items if item["value"] in self.selected_values
                 ]
                 description += "\n\n**Выбранные каналы:**\n" + "\n".join(f"- {channel}" for channel in selected_channels) if selected_channels else "\n\n**Выбранные каналы:**\n- Нет выбранных каналов."
             else:
+                # Для пользователей показываем их упоминания
                 description += "\n\n**Выбранные пользователи:**\n" + "\n".join(f"<@{value}>" for value in self.selected_values) if self.selected_values else "\n\n**Выбранные пользователи:**\n- Нет выбранных пользователей."
         else:
             description += "\n\n**Выбранные элементы:**\n- Нет выбранных элементов."
@@ -247,17 +251,21 @@ class SelectView(BaseView):
     async def select_callback(self, interaction: discord.Interaction):
         if await self.restrict_interaction(interaction):
             return
+        # Получаем элементы текущей страницы
         paginated_items = self.get_paginated_items()
         current_page_values = {item["value"] for item in paginated_items}
 
+        # Сохраняем элементы, которые не находятся на текущей странице
         preserved_values = [value for value in self.selected_values if value not in current_page_values]
 
+        # Получаем новые выбранные элементы с текущей страницы
         new_values = self.children[0].values
 
+        # Объединяем сохранённые и новые значения, убирая дубликаты
         self.selected_values = list(set(preserved_values + new_values))
 
         logger.debug(f"SelectView: {self.action}, выбрано {len(self.selected_values)} элементов пользователем {self.user_id}")
-        await self.update_view(interaction)
+        await self.update_view(interaction)  # Обновляем вид после изменения выбора
 
     async def prev_page(self, interaction: discord.Interaction):
         if await self.restrict_interaction(interaction):
@@ -526,11 +534,12 @@ async def handle_mention(message: discord.Message, bot_client):
             allowed_channels = config.get(guild_id, {}).get("bot_allowed_channels", [])
             channel_id = str(message.channel.id)
 
+            # Проверка, связано ли сообщение с командой /restrict
             if message.reference:
                 try:
                     replied_message = await message.channel.fetch_message(message.reference.message_id)
                     if replied_message.author == bot_client.bot.user and "настройте каналы через /restrict" in replied_message.content:
-                        return True
+                        return True  # Игнорируем проверку каналов, так как это ответ на /restrict
                 except discord.errors.NotFound:
                     pass
 
@@ -540,7 +549,7 @@ async def handle_mention(message: discord.Message, bot_client):
             if channel_id not in allowed_channels:
                 await notify_restricted_channel(message, "бот не работает в этом канале")
                 return False
-            return True
+            return True  # Разрешаем ответ на упоминание
         return True
     return False
 
@@ -556,11 +565,14 @@ async def restrict(interaction: discord.Interaction, bot_client) -> None:
         await interaction.response.send_message(
             "У вас недостаточно прав для этой команды.", ephemeral=True
         )
-        logger.debug(f"restrict: Доступ запрещен для пользователя {interaction.user.id}")
+        logger.debug(f"restrict: Доступ запрещён для пользователя {interaction.user.id}")
         return
 
+    # Откладываем ответ, чтобы избежать ошибки Unknown Interaction
+    await interaction.response.defer(ephemeral=True)
+
     view = ActionSelectView(interaction.user.id, interaction.guild.id)
-    await interaction.response.send_message(
+    msg = await interaction.followup.send(
         embed=discord.Embed(
             title="Настройка доступа бота",
             description="Выберите действие:\n"
@@ -572,7 +584,7 @@ async def restrict(interaction: discord.Interaction, bot_client) -> None:
         view=view,
         ephemeral=True
     )
-    view.message = await interaction.original_response()
+    view.message = msg
     active_views[interaction.user.id] = view
     logger.debug(f"restrict: Меню открыто для пользователя {interaction.user.id}")
 
