@@ -6,4 +6,4 @@ colorama
 flask
 asyncio
 aiofiles
-PIL
+Pillow
