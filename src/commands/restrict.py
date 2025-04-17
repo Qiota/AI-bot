@@ -8,9 +8,7 @@ from ..firebase.firebase_manager import FirebaseManager
 
 DEVELOPER_ID = config("DEVELOPER_ID", cast=int)
 
-description = (
-    "Настройка бота: каналы (whitelist), пользователи (blacklist). Только для админов."
-)
+description = "Настройка бота: каналы (whitelist), пользователи (blacklist). Только для админов."
 
 active_views = {}
 
@@ -90,7 +88,7 @@ class SelectView(BaseView):
         self.action = action
         self.main_view = main_view
         self.bot_client = bot_client
-        self.config = FirebaseManager.initialize().load(str(guild_id))
+        self.config = FirebaseManager.initialize().load_guild_config(str(guild_id))
         self.selected_values = []
         self.current_page = 0
         self.items_per_page = 25
@@ -257,14 +255,12 @@ class SelectView(BaseView):
         await interaction.edit_original_response(view=self)
 
         try:
-            # Проверяем, что бот всё ещё на сервере
-            if self.guild.id not in [guild.id for guild in self.bot_client.guilds]:
+            if self.guild.id not in [guild.id for guild in self.bot_client.bot.guilds]:
                 logger.warning(f"Бот отсутствует на сервере {self.guild.id}, сохранение отменено")
                 await interaction.followup.send("❌ Бот отсутствует на сервере, настройки не сохранены.", ephemeral=True)
                 await self.return_to_main_menu(interaction)
                 return
 
-            # Формируем данные для обновления
             update_data = {}
             if self.action == "bot_access":
                 update_data["bot_allowed_channels"] = self.selected_values
@@ -278,8 +274,7 @@ class SelectView(BaseView):
                 ]
                 action_log = f"Снято ограничений: {len(self.selected_values)}"
 
-            # Обновляем только нужные поля
-            FirebaseManager.initialize().update_fields(str(self.guild.id), update_data)
+            FirebaseManager.initialize().update_guild_fields(str(self.guild.id), update_data)
             logger.info(f"Настройки сервера {self.guild.id}: {action_log}")
             await interaction.followup.send("✅ Настройки сохранены!", ephemeral=True)
         except Exception as e:
@@ -310,7 +305,7 @@ class SelectView(BaseView):
         try:
             await main_view.message.edit(embed=embed, view=main_view)
         except (discord.errors.NotFound, discord.errors.Forbidden):
-            new_main_view = ActionSelectView(self.user_id, self.guild_id)
+            new_main_view = ActionSelectView(self.user_id, self.guild_id, self.bot_client)
             msg = await interaction.followup.send(embed=embed, view=new_main_view, ephemeral=True)
             new_main_view.message = msg
             active_views[self.user_id] = new_main_view
@@ -322,8 +317,9 @@ class ActionSelectView(BaseView):
         "unrestrict_users": {"label": "Снять ограничения ✅", "description": "Верните доступ пользователям."}
     }
 
-    def __init__(self, user_id: int, guild_id: int):
+    def __init__(self, user_id: int, guild_id: int, bot_client):
         super().__init__(guild_id, user_id)
+        self.bot_client = bot_client
         self.setup_buttons()
 
     def setup_buttons(self):
@@ -340,7 +336,7 @@ class ActionSelectView(BaseView):
         if await self.restrict_interaction(interaction):
             return
         await interaction.response.defer(ephemeral=True)
-        view = SelectView(interaction.guild, self.user_id, self.guild_id, action, self, interaction.client)
+        view = SelectView(interaction.guild, self.user_id, self.guild_id, action, self, self.bot_client)
         if view.is_finished():
             await interaction.followup.send(
                 embed=discord.Embed(
@@ -375,76 +371,161 @@ async def notify_restricted_channel(message: discord.Message, reason: str = "б�
         logger.warning(f"Нет прав для отправки в канал {message.channel.id}")
 
 async def check_channels_setup(obj):
-    if isinstance(obj, discord.Message) and isinstance(obj.channel, discord.DMChannel):
-        return True
-    if isinstance(obj, discord.Interaction) and obj.guild is None:
-        return True
-    config = FirebaseManager.initialize().load(str(obj.guild.id))
-    allowed_channels = config.get("bot_allowed_channels", [])
-    if isinstance(obj, discord.Interaction) and obj.command.name == "restrict":
-        return True
-    if not allowed_channels:
-        if isinstance(obj, discord.Interaction) and not obj.response.is_done():
-            await obj.response.send_message("Настройте каналы через /restrict.", ephemeral=True)
-        elif isinstance(obj, discord.Message):
-            await notify_restricted_channel(obj, "каналы не настроены")
-        return False
-    return True
+    """Проверяет, настроены ли каналы в Firebase для гильдии."""
+    try:
+        if isinstance(obj, discord.Message) and isinstance(obj.channel, discord.DMChannel):
+            logger.debug("DM-канал, проверки каналов не требуются")
+            return True, None
+        if isinstance(obj, discord.Interaction) and obj.guild is None:
+            logger.debug("Интеракция в DM, проверки каналов не требуются")
+            return True, None
+        if isinstance(obj, discord.Interaction) and obj.command.name == "restrict":
+            logger.debug("Команда /restrict, пропуск проверки каналов")
+            return True, None
+
+        config = FirebaseManager.initialize().load_guild_config(str(obj.guild.id))
+        if config is None:
+            logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена в Firebase")
+            return False, "конфигурация сервера не найдена"
+
+        allowed_channels = config.get("bot_allowed_channels", [])
+        if not allowed_channels:
+            logger.debug(f"Каналы не настроены для гильдии {obj.guild.id}")
+            return False, "каналы не настроены"
+
+        return True, None
+    except Exception as e:
+        logger.error(f"Ошибка в check_channels_setup для гильдии {obj.guild.id if obj.guild else 'DM'}: {e}", exc_info=True)
+        return False, "ошибка при проверке конфигурации"
 
 async def check_bot_access(obj):
-    if isinstance(obj, discord.Message) and isinstance(obj.channel, discord.DMChannel):
-        return True
-    if isinstance(obj, discord.Interaction) and obj.guild is None:
-        return True
-    if not await check_channels_setup(obj):
-        return False
-    config = FirebaseManager.initialize().load(str(obj.guild.id))
-    allowed_channels = config.get("bot_allowed_channels", [])
-    channel_id = str(obj.channel_id if isinstance(obj, discord.Interaction) else obj.channel.id)
-    if channel_id not in allowed_channels:
-        if isinstance(obj, discord.Interaction) and not obj.response.is_done():
-            await obj.response.send_message("Бот не работает в этом канале.", ephemeral=True)
-        elif isinstance(obj, discord.Message):
-            await notify_restricted_channel(obj)
-        return False
-    return True
+    """Проверяет, имеет ли бот доступ к каналу на основе Firebase."""
+    try:
+        if isinstance(obj, discord.Message) and isinstance(obj.channel, discord.DMChannel):
+            logger.debug("DM-канал, доступ разрешён")
+            return True, None
+        if isinstance(obj, discord.Interaction) and obj.guild is None:
+            logger.debug("Интеракция в DM, доступ разрешён")
+            return True, None
+
+        result, reason = await check_channels_setup(obj)
+        if not result:
+            logger.debug(f"check_channels_setup вернул False: {reason}")
+            return False, reason
+
+        config = FirebaseManager.initialize().load_guild_config(str(obj.guild.id))
+        if config is None:
+            logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена в Firebase")
+            return False, "конфигурация сервера не найдена"
+
+        allowed_channels = config.get("bot_allowed_channels", [])
+        channel_id = str(obj.channel_id if isinstance(obj, discord.Interaction) else obj.channel.id)
+        if channel_id not in allowed_channels:
+            logger.debug(f"Канал {channel_id} не в списке разрешённых для гильдии {obj.guild.id}")
+            return False, "бот не работает в этом канале"
+
+        logger.debug(f"Доступ к каналу {channel_id} разрешён для гильдии {obj.guild.id}")
+        return True, None
+    except Exception as e:
+        logger.error(f"Ошибка в check_bot_access для гильдии {obj.guild.id if obj.guild else 'DM'}: {e}", exc_info=True)
+        return False, "ошибка при проверке доступа"
 
 async def check_user_restriction(obj):
-    if isinstance(obj, discord.Interaction) and obj.command.name == "restrict":
+    """Проверяет, ограничен ли пользователь в Firebase."""
+    try:
+        if isinstance(obj, discord.Interaction) and obj.command.name == "restrict":
+            logger.debug("Команда /restrict, пропуск проверки ограничений пользователя")
+            return True, None
+
+        guild_id = str(obj.guild.id) if obj.guild else "DM"
+        config = FirebaseManager.initialize().load_guild_config(guild_id)
+        if config is None and obj.guild:
+            logger.warning(f"Конфигурация для гильдии {guild_id} не найдена в Firebase")
+            return False, "конфигурация сервера не найдена"
+
+        restricted_users = config.get("restricted_users", []) if obj.guild else []
+        user_id = str(obj.user.id if isinstance(obj, discord.Interaction) else obj.author.id)
+        if user_id in restricted_users:
+            logger.debug(f"Пользователь {user_id} ограничен в гильдии {guild_id}")
+            return False, "ваш доступ ограничен"
+
+        logger.debug(f"Пользователь {user_id} не ограничен в гильдии {guild_id}")
+        return True, None
+    except Exception as e:
+        logger.error(f"Ошибка в check_user_restriction для гильдии {guild_id}: {e}", exc_info=True)
+        return False, "ошибка при проверке ограничений"
+
+async def restrict_command_execution(obj, bot_client) -> bool:
+    """Проверяет, может ли бот выполнить команду на сервере, читая Firebase."""
+    try:
+        if isinstance(obj, discord.Interaction) and obj.guild:
+            if not bot_client.bot.is_ready():
+                logger.debug("Бот не готов")
+                if not obj.response.is_done():
+                    await obj.response.send_message("Бот еще не готов. Пожалуйста, попробуйте позже.", ephemeral=True)
+                return False
+
+            config = FirebaseManager.initialize().load_guild_config(str(obj.guild.id))
+            if config is None:
+                logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена в Firebase")
+                if not obj.response.is_done():
+                    await obj.response.send_message("Конфигурация сервера не найдена!", ephemeral=True)
+                return False
+
+            guild_ids = [guild.id for guild in bot_client.bot.guilds]
+            if obj.guild.id not in guild_ids:
+                logger.warning(f"Гильдия {obj.guild.id} не найдена в списке гильдий бота")
+                if not obj.response.is_done():
+                    await obj.response.send_message("Бот отсутствует на этом сервере!", ephemeral=True)
+                return False
+
+        logger.debug(f"restrict_command_execution разрешил выполнение для гильдии {obj.guild.id if obj.guild else 'DM'}")
         return True
-    config = FirebaseManager.initialize().load(str(obj.guild.id) if obj.guild else "DM")
-    restricted_users = config.get("restricted_users", []) if obj.guild else []
-    user_id = str(obj.user.id if isinstance(obj, discord.Interaction) else obj.author.id)
-    if user_id in restricted_users:
-        if isinstance(obj, discord.Interaction) and not obj.response.is_done():
-            await obj.response.send_message("Ваш доступ ограничен.", ephemeral=True)
-        elif isinstance(obj, discord.Message):
-            await notify_restricted_channel(obj, "ваш доступ ограничен")
+    except Exception as e:
+        logger.error(f"Ошибка в restrict_command_execution: {e}", exc_info=True)
+        if not obj.response.is_done() and isinstance(obj, discord.Interaction):
+            await obj.response.send_message("Произошла ошибка при проверке доступа.", ephemeral=True)
         return False
-    return True
 
 async def handle_mention(message: discord.Message, bot_client):
-    if bot_client.bot.user in message.mentions and not isinstance(message.channel, discord.DMChannel):
-        config = FirebaseManager.initialize().load(str(message.guild.id))
+    """Обрабатывает упоминания бота, проверяя доступ через Firebase."""
+    try:
+        if isinstance(message.channel, discord.DMChannel):
+            logger.debug("Упоминание в DM, доступ разрешён")
+            return True
+        if bot_client.bot.user not in message.mentions:
+            logger.debug("Бот не упомянут в сообщении")
+            return False
+
+        config = FirebaseManager.initialize().load_guild_config(str(message.guild.id))
+        if config is None:
+            logger.warning(f"Конфигурация для гильдии {message.guild.id} не найдена в Firebase")
+            await notify_restricted_channel(message, "конфигурация сервера не найдена")
+            return False
+
         allowed_channels = config.get("bot_allowed_channels", [])
         channel_id = str(message.channel.id)
-        if message.reference:
-            try:
-                replied_message = await message.channel.fetch_message(message.reference.message_id)
-                if replied_message.author == bot_client.bot.user and "настройте каналы через /restrict" in replied_message.content:
-                    return True
-            except discord.errors.NotFound:
-                pass
         if not allowed_channels:
+            logger.debug(f"Каналы не настроены для гильдии {message.guild.id}")
             await notify_restricted_channel(message, "каналы не настроены")
             return False
         if channel_id not in allowed_channels:
+            logger.debug(f"Канал {channel_id} не разрешён для гильдии {message.guild.id}")
             await notify_restricted_channel(message)
             return False
+
+        logger.debug(f"Упоминание в разрешённом канале {channel_id} для гильдии {message.guild.id}")
         return True
-    return isinstance(message.channel, discord.DMChannel)
+    except Exception as e:
+        logger.error(f"Ошибка в handle_mention для гильдии {message.guild.id}: {e}", exc_info=True)
+        await notify_restricted_channel(message, "ошибка при проверке доступа")
+        return False
 
 async def restrict(interaction: discord.Interaction, bot_client):
+    """Команда /restrict: Настройка доступа бота."""
+    if not await restrict_command_execution(interaction, bot_client):
+        return
+
     if not interaction.guild:
         if not interaction.response.is_done():
             await interaction.response.send_message("Команда только для серверов!", ephemeral=True)
@@ -456,7 +537,7 @@ async def restrict(interaction: discord.Interaction, bot_client):
         return
 
     await interaction.response.defer(ephemeral=True)
-    view = ActionSelectView(interaction.user.id, interaction.guild.id)
+    view = ActionSelectView(interaction.user.id, interaction.guild.id, bot_client)
     embed = discord.Embed(
         title="Настройка доступа бота 🛠️",
         description=(
