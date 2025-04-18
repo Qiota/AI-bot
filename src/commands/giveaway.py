@@ -64,13 +64,12 @@ def parse_duration(duration_str):
         raise ValueError(f"Длительность должна быть от {MIN_DURATION} до {MAX_DURATION} минут")
     return total_minutes
 
-async def save_giveaways(giveaways, completed_giveaways):
+async def save_giveaways(giveaways, completed_giveaways, bot_client):
     try:
-        from ..firebase.firebase_manager import FirebaseManager
-        firebase = FirebaseManager.initialize()
+        firebase_manager = await bot_client._ensure_firebase_initialized()
         active_data = {cid: g.to_dict() for cid, g in giveaways.items()}
         completed_data = {cid: g.to_dict() for cid, g in completed_giveaways.items()}
-        firebase.save_giveaways(active_data, completed_data)
+        await firebase_manager.save_giveaways(active_data, completed_data)
         logger.debug("Розыгрыши сохранены в Firebase")
     except Exception as e:
         logger.error(f"Ошибка сохранения розыгрышей: {e}")
@@ -79,9 +78,8 @@ async def load_giveaways(bot_client):
     active_giveaways = {}
     completed_giveaways = {}
     try:
-        from ..firebase.firebase_manager import FirebaseManager
-        firebase = FirebaseManager.initialize()
-        data = firebase.load_giveaways()
+        firebase_manager = await bot_client._ensure_firebase_initialized()
+        data = await firebase_manager.load_giveaways()
         current_time = int(time.time())
         for custom_id, giveaway_data in data.get("active", {}).items():
             giveaway = Giveaway.from_dict(giveaway_data, bot_client)
@@ -93,7 +91,7 @@ async def load_giveaways(bot_client):
                 giveaway = Giveaway.from_dict(giveaway_data, bot_client)
                 if giveaway:
                     completed_giveaways[custom_id] = giveaway
-        logger.success(f"Загружено {len(active_giveaways)} активных и {len(completed_giveaways)} завершённых розыгрышей")
+        logger.info(f"Загружено {len(active_giveaways)} активных и {len(completed_giveaways)} завершённых розыгрышей")
     except Exception as e:
         logger.error(f"Ошибка загрузки розыгрышей: {e}")
     return active_giveaways, completed_giveaways
@@ -215,6 +213,12 @@ class GiveawayView(ui.View):
     @ui.button(label="Участвовать", style=discord.ButtonStyle.green, emoji="🎉")
     async def participate(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
+        # Проверяем наличие атрибутов giveaways и completed_giveaways
+        if not hasattr(self.bot_client, 'giveaways') or not hasattr(self.bot_client, 'completed_giveaways'):
+            logger.error("BotClient не имеет атрибутов giveaways или completed_giveaways")
+            embed = discord.Embed(description="Ошибка: функционал розыгрышей недоступен.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
         giveaway = self.bot_client.giveaways.get(self.custom_id)
         if not giveaway:
             embed = discord.Embed(description="Розыгрыш завершён или не существует.", color=discord.Color.red())
@@ -231,7 +235,7 @@ class GiveawayView(ui.View):
             return
         try:
             giveaway.participants.add(interaction.user)
-            await save_giveaways(self.bot_client.giveaways, self.bot_client.completed_giveaways)
+            await save_giveaways(self.bot_client.giveaways, self.bot_client.completed_giveaways, self.bot_client)
             embed = discord.Embed(
                 title="🎉 Новый розыгрыш!",
                 description=f"**Приз:** {giveaway.prize}\n**Описание:** {giveaway.description}",
@@ -254,6 +258,12 @@ class GiveawayView(ui.View):
     @ui.button(label="Список участников", style=discord.ButtonStyle.blurple)
     async def show_participants(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
+        # Проверяем наличие атрибутов giveaways
+        if not hasattr(self.bot_client, 'giveaways'):
+            logger.error("BotClient не имеет атрибута giveaways")
+            embed = discord.Embed(description="Ошибка: функционал розыгрышей недоступен.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
         giveaway = self.bot_client.giveaways.get(self.custom_id)
         if not giveaway:
             embed = discord.Embed(description="Розыгрыш завершён или не существует.", color=discord.Color.red())
@@ -301,6 +311,10 @@ async def update_giveaway_message(bot_client, giveaway):
         logger.error(f"Неизвестная ошибка при обновлении сообщения розыгрыша {giveaway.custom_id}: {e}")
 
 async def resume_giveaways(bot_client):
+    # Проверяем наличие атрибутов giveaways и completed_giveaways
+    if not hasattr(bot_client, 'giveaways') or not hasattr(bot_client, 'completed_giveaways'):
+        logger.error("BotClient не имеет атрибутов giveaways или completed_giveaways")
+        return
     bot_client.giveaways, bot_client.completed_giveaways = await load_giveaways(bot_client)
     current_time = int(time.time())
     for custom_id, giveaway in list(bot_client.giveaways.items()):
@@ -336,6 +350,12 @@ async def start_giveaway(interaction, prize, duration_str, description, bot_clie
         embed = discord.Embed(description="Требуются права разработчика, администратора или модератора.", color=discord.Color.red())
         await interaction.followup.send(embed=embed, ephemeral=True)
         return
+    # Проверяем наличие атрибутов giveaways и completed_giveaways
+    if not hasattr(bot_client, 'giveaways') or not hasattr(bot_client, 'completed_giveaways'):
+        logger.error("BotClient не имеет атрибутов giveaways или completed_giveaways")
+        embed = discord.Embed(description="Ошибка: функционал розыгрышей недоступен.", color=discord.Color.red())
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
     try:
         duration = parse_duration(duration_str)
         if len(prize) > MAX_PRIZE_LENGTH:
@@ -369,7 +389,7 @@ async def start_giveaway(interaction, prize, duration_str, description, bot_clie
         view = GiveawayView(bot_client, final_custom_id, duration)
         message = await interaction.channel.send(embed=embed, view=view)
         giveaway.message_id = message.id
-        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways)
+        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
         embed = discord.Embed(description=f"Розыгрыш `{final_custom_id}` начат!", color=discord.Color.green())
         await interaction.followup.send(embed=embed, ephemeral=True)
         asyncio.create_task(run_giveaway_timer(bot_client, giveaway, duration * 60))
@@ -383,6 +403,10 @@ async def start_giveaway(interaction, prize, duration_str, description, bot_clie
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 async def end_giveaway(bot_client, giveaway):
+    # Проверяем наличие атрибутов giveaways и completed_giveaways
+    if not hasattr(bot_client, 'giveaways') or not hasattr(bot_client, 'completed_giveaways'):
+        logger.error("BotClient не имеет атрибутов giveaways или completed_giveaways")
+        return
     try:
         message = await giveaway.channel.fetch_message(giveaway.message_id)
         view = discord.ui.View()
@@ -417,7 +441,7 @@ async def end_giveaway(bot_client, giveaway):
         logger.error(f"Ошибка завершения розыгрыша {giveaway.custom_id}: {e}")
     finally:
         bot_client.giveaways.pop(giveaway.custom_id, None)
-        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways)
+        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
 
 async def reroll_giveaway(interaction, custom_id, bot_client):
     await interaction.response.defer(ephemeral=True)
@@ -429,6 +453,12 @@ async def reroll_giveaway(interaction, custom_id, bot_client):
     developer_ids = [str(did) for did in (developer_ids if isinstance(developer_ids, list) else [developer_ids]) if did]
     if not (user_id in developer_ids or interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild):
         embed = discord.Embed(description="Требуются права разработчика, администратора или модератора.", color=discord.Color.red())
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+    # Проверяем наличие атрибутов giveaways и completed_giveaways
+    if not hasattr(bot_client, 'giveaways') or not hasattr(bot_client, 'completed_giveaways'):
+        logger.error("BotClient не имеет атрибутов giveaways или completed_giveaways")
+        embed = discord.Embed(description="Ошибка: функционал розыгрышей недоступен.", color=discord.Color.red())
         await interaction.followup.send(embed=embed, ephemeral=True)
         return
     giveaway = bot_client.giveaways.get(custom_id) or bot_client.completed_giveaways.get(custom_id)
@@ -451,7 +481,7 @@ async def reroll_giveaway(interaction, custom_id, bot_client):
         giveaway.completed_at = int(time.time())
         bot_client.completed_giveaways[custom_id] = giveaway
         bot_client.giveaways.pop(custom_id, None)
-        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways)
+        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
         embed = discord.Embed(
             title="🎉 Реролл розыгрыша!",
             color=discord.Color.blue()
@@ -491,6 +521,12 @@ async def edit_giveaway(interaction, custom_id, prize, duration_str, description
         embed = discord.Embed(description="Требуются права разработчика, администратора или модератора.", color=discord.Color.red())
         await interaction.followup.send(embed=embed, ephemeral=True)
         return
+    # Проверяем наличие атрибутов giveaways
+    if not hasattr(bot_client, 'giveaways'):
+        logger.error("BotClient не имеет атрибута giveaways")
+        embed = discord.Embed(description="Ошибка: функционал розыгрышей недоступен.", color=discord.Color.red())
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
     giveaway = bot_client.giveaways.get(custom_id)
     if not giveaway:
         embed = discord.Embed(description="Розыгрыш не найден или завершён.", color=discord.Color.red())
@@ -525,7 +561,7 @@ async def edit_giveaway(interaction, custom_id, prize, duration_str, description
         message = await giveaway.channel.fetch_message(giveaway.message_id)
         view = GiveawayView(bot_client, custom_id, new_duration)
         await message.edit(embed=embed, view=view)
-        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways)
+        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
         embed = discord.Embed(description=f"Розыгрыш `{custom_id}` обновлён!", color=discord.Color.green())
         await interaction.followup.send(embed=embed, ephemeral=True)
     except ValueError as e:

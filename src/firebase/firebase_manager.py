@@ -329,3 +329,48 @@ class FirebaseManager:
         except Exception as e:
             logger.error(f"Ошибка очистки устаревших разговоров в Realtime Database: {e}")
             raise Exception(f"Ошибка очистки разговоров: {e}")
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def save_giveaways(self, active_giveaways: Dict, completed_giveaways: Dict) -> None:
+        """Сохранение данных розыгрышей в Realtime Database."""
+        self._ensure_db_initialized()
+        try:
+            logger.debug("Начало сохранения розыгрышей в Realtime Database")
+            def sync_set():
+                self._db.child("giveaways/active").set(active_giveaways)
+                self._db.child("giveaways/completed").set(completed_giveaways)
+            await self._run_sync_in_executor(sync_set)
+            logger.debug("Розыгрыши успешно сохранены в Realtime Database")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения розыгрышей в Realtime Database: {e}")
+            raise Exception(f"Ошибка сохранения розыгрышей: {e}")
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def load_giveaways(self) -> Dict:
+        """Загрузка данных розыгрышей из Realtime Database."""
+        self._ensure_db_initialized()
+        try:
+            logger.debug("Начало загрузки розыгрышей из Realtime Database")
+            def sync_get():
+                data = self._db.child("giveaways").get()
+                return data if data else {"active": {}, "completed": {}}
+            data = await self._run_sync_in_executor(sync_get)
+            logger.debug("Розыгрыши успешно загружены из Realtime Database")
+            return data
+        except Exception as e:
+            logger.error(f"Ошибка загрузки розыгрышей из Realtime Database: {e}")
+            raise Exception(f"Ошибка загрузки розыгрышей: {e}")

@@ -10,6 +10,7 @@ from collections import defaultdict
 import uuid
 from .commands.prompt import load_user_prompt, default_prompt, create_command as prompt_command
 from .commands.restrict import check_user_restriction, check_bot_access, create_command as restrict_command
+from .commands.giveaway import create_command as giveaway_command  # Добавляем импорт для розыгрышей
 from .firebase.firebase_manager import FirebaseManager
 import aiohttp
 import json
@@ -34,6 +35,8 @@ class BotClient:
         self.tree: app_commands.CommandTree = app_commands.CommandTree(self.bot)
         self.g4f_client: G4FClient = G4FClient(provider=PollinationsAI)
         self.firebase_manager: Optional[FirebaseManager] = None
+        self.giveaways: Dict = {}  # Добавляем для активных розыгрышей
+        self.completed_giveaways: Dict = {}  # Добавляем для завершённых розыгрышей
         self.models: Dict[str, List[str] | float | Dict[str, List[str]] | Dict[str, Dict[str, int]] | None] = {
             "text": [],  # Заполняется через API или Firebase
             "vision": [],  # Заполняется через API или Firebase
@@ -67,8 +70,17 @@ class BotClient:
         logger.debug("Начало setup_hook")
         await self._ensure_firebase_initialized()
         logger.debug("Firebase инициализирован, запуск асинхронных задач")
+        # Добавляем команды розыгрышей
+        giveaway, reroll, edit = giveaway_command(self)
+        self.tree.add_command(giveaway)
+        self.tree.add_command(reroll)
+        self.tree.add_command(edit)
+        logger.debug("Команды розыгрышей добавлены в CommandTree")
         asyncio.create_task(self.update_models_periodically())
         asyncio.create_task(self.cleanup_conversations_periodically())
+        # Возобновляем розыгрыши
+        from .commands.giveaway import resume_giveaways
+        asyncio.create_task(resume_giveaways(self))
         logger.info("Асинхронные задачи запущены в setup_hook")
 
     async def _ensure_firebase_initialized(self) -> FirebaseManager:
