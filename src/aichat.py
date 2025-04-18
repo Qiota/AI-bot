@@ -165,21 +165,13 @@ class BotClient:
                 await self._send_split_message(message, response)
 
     async def _process_edit(self, after: discord.Message):
+        if after.id in self.message_to_response:
+            return
+        
         async with after.channel.typing():
             text = after.content.replace(f"<@{self.bot.user.id}>", "").strip()
             response = await self.generate_response(str(after.author.id), str(after.id), text, after, is_edit=True)
-            if response and after.id in self.message_to_response:
-                try:
-                    response_msg = await after.channel.fetch_message(self.message_to_response[after.id])
-                    if response_msg.author == self.bot.user:
-                        await response_msg.edit(content=response)
-                    else:
-                        sent_msg = await after.reply(response)
-                        self.message_to_response[after.id] = sent_msg.id
-                except discord.NotFound:
-                    sent_msg = await after.reply(response)
-                    self.message_to_response[after.id] = sent_msg.id
-            elif response:
+            if response:
                 sent_msg = await after.reply(response)
                 self.message_to_response[after.id] = sent_msg.id
 
