@@ -5,12 +5,22 @@ from ..systemLog import logger
 
 description = "Управление системным промптом бота"
 
+default_prompt = (
+    "**Системные инструкции**:\n"
+    "- Ты интеллектуальный ассистент, отвечающий на русском языке, если пользователь пишет на русском, или на языке запроса, если он другой.\n"
+    "- Пользовательский промт: {user_prompt}\n"
+    "- Текущее время (UTC): {now}\n"
+    "- Формат ответа: Markdown для Discord (используй заголовки, списки, выделение текста, если уместно).\n"
+    "- Для общих вопросов: предоставляй структурированный ответ с кратким введением и основными пунктами.\n"
+    "- Для вопросов о программировании: включай примеры кода в блоках ```python``` (или другой язык, если указан), проверяй синтаксис и актуальность библиотек.\n"
+    "- Если запрос неясен, уточняй детали в ответе или предлагай возможные интерпретации.\n"
+)
+
 class BotClient:
     def __init__(self):
         self.prompt_cache = {}
 
 async def load_user_prompt(user_id: str, guild_id: str, bot_client: BotClient) -> str:
-    default_prompt = "Ты - дружелюбный чат-бот от Qiota. Отвечай кратко и точно."
     cache_key = f"{guild_id}_{user_id}"
     
     if cache_key in bot_client.prompt_cache:
@@ -69,7 +79,6 @@ async def set_prompt(interaction: discord.Interaction, bot_client: BotClient, pr
 async def reset_prompt(interaction: discord.Interaction, bot_client: BotClient) -> None:
     user_id = str(interaction.user.id)
     guild_id = str(interaction.guild.id) if interaction.guild else "DM"
-    default_prompt = "Ты - дружелюбный чат-бот от Qiota. Отвечай кратко и точно."
     try:
         await save_user_prompt(user_id, guild_id, default_prompt, bot_client)
         cache_key = f"{guild_id}_{user_id}"

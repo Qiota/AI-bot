@@ -2,6 +2,7 @@ import firebase_admin
 from firebase_admin import credentials, db
 from ..systemLog import logger
 import os
+from ..commands.prompt import default_prompt
 
 class FirebaseManager:
     _instance = None
@@ -27,6 +28,9 @@ class FirebaseManager:
 
     def load_guild_config(self, guild_id: str) -> dict:
         try:
+            if guild_id == "DM":
+                logger.debug("Конфигурация для DM, возвращается дефолтная")
+                return {"bot_allowed_channels": [], "restricted_users": []}
             ref = db.reference(f"/guilds/{guild_id}")
             data = ref.get()
             if not isinstance(data, dict):
@@ -65,20 +69,21 @@ class FirebaseManager:
         try:
             ref = db.reference("/models")
             data = ref.get()
+            default_models = {
+                "text": [
+                    "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b", "llama-3.3-70b", "mistral-nemo",
+                    "llama-3.1-8b", "deepseek-r1", "phi-4", "qwq-32b", "deepseek-v3", "llama-3.2-11b",
+                    "grok-3", "claude-3.5-sonnet", "gemini-1.5-pro", "mixtral-8x7b"
+                ],
+                "vision": [
+                    "gpt-4o", "gpt-4o-mini", "o1-mini", "flux", "flux-realism", "flux-anime", "flux-3d"
+                ],
+                "last_update": None,
+                "unavailable": {"text": [], "vision": []},
+                "last_successful": {"text": None, "vision": None}
+            }
             if not data:
-                return {
-                    "text": [
-                        "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b", "llama-3.3-70b", "mistral-nemo",
-                        "llama-3.1-8b", "deepseek-r1", "phi-4", "qwq-32b", "deepseek-v3", "llama-3.2-11b",
-                        "grok-3", "claude-3.5-sonnet", "gemini-1.5-pro", "mixtral-8x7b"
-                    ],
-                    "vision": [
-                        "gpt-4o", "gpt-4o-mini", "o1-mini", "o3-mini", "clip-vit-large", "dall-e-3", "stable-diffusion-xl"
-                    ],
-                    "last_update": None,
-                    "unavailable": {"text": [], "vision": []},
-                    "last_successful": {"text": None, "vision": None}
-                }
+                return default_models
             if not isinstance(data.get("unavailable", {}).get("text", []), list) or \
                not isinstance(data.get("unavailable", {}).get("vision", []), list):
                 logger.warning("Некорректный формат unavailable в моделях, сброс на дефолт")
@@ -86,19 +91,7 @@ class FirebaseManager:
             return data
         except Exception as e:
             logger.error(f"Ошибка чтения моделей: {e}")
-            return {
-                "text": [
-                    "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b", "llama-3.3-70b", "mistral-nemo",
-                    "llama-3.1-8b", "deepseek-r1", "phi-4", "qwq-32b", "deepseek-v3", "llama-3.2-11b",
-                    "grok-3", "claude-3.5-sonnet", "gemini-1.5-pro", "mixtral-8x7b"
-                ],
-                "vision": [
-                    "gpt-4o", "gpt-4o-mini", "o1-mini", "o3-mini", "clip-vit-large", "dall-e-3", "stable-diffusion-xl"
-                ],
-                "last_update": None,
-                "unavailable": {"text": [], "vision": []},
-                "last_successful": {"text": None, "vision": None}
-            }
+            return default_models
 
     def save_models(self, models: dict):
         if not isinstance(models, dict):
@@ -150,11 +143,11 @@ class FirebaseManager:
             ref = db.reference(f"/prompts/{guild_id}/{user_id}")
             data = ref.get()
             if not data or not isinstance(data.get("system_prompt", ""), str):
-                return "Ты - дружелюбный чат-бот от Qiota. Отвечай кратко и точно."
-            return data.get("system_prompt", "Ты - дружелюбный чат-бот от Qiota. Отвечай кратко и точно.")
+                return default_prompt
+            return data.get("system_prompt", default_prompt)
         except Exception as e:
             logger.error(f"Ошибка чтения промпта для guild_id {guild_id}, user_id {user_id}: {e}")
-            return "Ты - дружелюбный чат-бот от Qiota. Отвечай кратко и точно."
+            return default_prompt
 
     def save_prompt(self, guild_id: str, user_id: str, prompt: str):
         if not isinstance(prompt, str):

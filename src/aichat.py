@@ -2,34 +2,32 @@ import discord
 from discord import app_commands, Forbidden, HTTPException
 import asyncio
 from typing import List, Dict, Optional
-import aiohttp
-import json
-from g4f.client import Client
+from g4f.client import Client as G4FClient
 from g4f.Provider import PollinationsAI
 from .systemLog import logger
 import time
-import random
 from collections import defaultdict
 import uuid
+from .commands.prompt import load_user_prompt, default_prompt, create_command as prompt_command
+from .commands.restrict import check_user_restriction, check_bot_access, create_command as restrict_command
+from .firebase.firebase_manager import FirebaseManager
 
 class BotClient:
     def __init__(self, config):
         logger.info("Инициализация BotClient")
         self.config = config
-        self.client = Client(provider=PollinationsAI)
         self.bot = discord.Client(intents=self._setup_intents())
         self.tree = app_commands.CommandTree(self.bot)
+        self.g4f_client = G4FClient(provider=PollinationsAI)
         self.models = {
             "text": [
-                "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b", "llama-3.3-70b", "mistral-nemo",
-                "llama-3.1-8b", "deepseek-r1", "phi-4", "qwq-32b", "deepseek-v3", "llama-3.2-11b",
-                "grok-3", "claude-3.5-sonnet", "gemini-1.5-pro", "mixtral-8x7b"
+                "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b",
+                "llama-3.3-70b", "mistral-nemo", "llama-3.1-8b",
+                "deepseek-r1", "phi-4", "qwq-32b", "deepseek-v3", "llama-3.2-11b"
             ],
-            "vision": [
-                "gpt-4o", "gpt-4o-mini", "o1-mini", "o3-mini", "clip-vit-large", "dall-e-3", "stable-diffusion-xl"
-            ],
+            "vision": ["gpt-4o", "gpt-4o-mini", "o1-mini", "o3-mini"],
             "last_update": None,
-            "unavailable": {"text": set(), "vision": set()},
+            "unavailable": {"text": [], "vision": []},
             "last_successful": {"text": None, "vision": None}
         }
         self.prompt_cache = {}
@@ -39,14 +37,14 @@ class BotClient:
         self.processed_messages = set()
         self.message_to_response = {}
         self.user_settings = defaultdict(lambda: {"max_response_length": 2000})
+        self.last_message_time = defaultdict(float)
         self._initialize_settings()
+        self.tree.add_command(prompt_command(self))
+        self.tree.add_command(restrict_command(self))
         asyncio.create_task(self.update_models_periodically())
 
     async def close(self):
         try:
-            if hasattr(self.client, '_session') and self.client._session:
-                await self.client._session.close()
-                logger.info("Сессия aiohttp закрыта")
             await self.bot.close()
             logger.info("Клиент Discord закрыт")
         except Exception as e:
@@ -58,13 +56,26 @@ class BotClient:
         return intents
 
     def _initialize_settings(self):
-        self.cache_limits = {"messages": 100, "topics": 5, "memory_days": 14}
+        self.cache_limits = {"messages": 25, "topics": 2, "memory_days": 1}
         self.request_settings = {
-            "headers": {"Content-Type": "application/json", "Accept": "application/json"},
             "rate_limit_delay": 3.0,
             "max_retries": 3,
             "retry_delay_base": 5.0
         }
+        self.spam_cooldown = 3.0
+
+    async def check_spam(self, user_id: str) -> bool:
+        current_time = time.time()
+        last_time = self.last_message_time[user_id]
+        if current_time - last_time < self.spam_cooldown:
+            return False
+        self.last_message_time[user_id] = current_time
+        return True
+
+    async def is_bot_mentioned(self, message: discord.Message) -> bool:
+        if isinstance(message.channel, discord.DMChannel):
+            return True
+        return self.bot.user in message.mentions or f"<@{self.bot.user.id}>" in message.content
 
     async def update_models_periodically(self):
         await self.fetch_available_models()
@@ -79,44 +90,21 @@ class BotClient:
 
     async def fetch_available_models(self):
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-                async with session.get("https://text.pollinations.ai/models") as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    new_models = {
-                        "text": [],
-                        "vision": [],
-                        "last_update": time.time(),
-                        "unavailable": {"text": set(), "vision": set()},
-                        "last_successful": self.models["last_successful"]
-                    }
-                    models_data = data if isinstance(data, list) else data.get("models", [])
-                    known_models = set(self.models["text"])
-                    known_vision = set(self.models["vision"])
-                    for model in models_data:
-                        model_id = model if isinstance(model, str) else model.get("id", "")
-                        if model_id in known_models:
-                            new_models["text"].append(model_id)
-                            if model_id in known_vision or (isinstance(model, dict) and model.get("supports_vision")):
-                                new_models["vision"].append(model_id)
-                    new_models["text"] = new_models["text"] or self.models["text"]
-                    new_models["vision"] = new_models["vision"] or self.models["vision"]
-                    new_models["unavailable"]["text"] = self.models["unavailable"]["text"]
-                    new_models["unavailable"]["vision"] = self.models["unavailable"]["vision"]
-                    self.models = new_models
-                    logger.info(f"Модели обновлены: текст={len(new_models['text'])}, вижн={len(new_models['vision'])}")
-                    from .firebase.firebase_manager import FirebaseManager
-                    FirebaseManager.initialize()
-                    FirebaseManager().save_models(self.models)
-        except aiohttp.ClientError as e:
-            logger.error(f"Сетевая ошибка: {e}")
-        except json.JSONDecodeError as e:
-            logger.error(f"Ошибка парсинга JSON: {e}")
+            FirebaseManager.initialize()
+            loaded_models = FirebaseManager().load_models()
+            if isinstance(loaded_models, dict):
+                if "unavailable" in loaded_models and isinstance(loaded_models["unavailable"], dict):
+                    for key in ["text", "vision"]:
+                        if isinstance(loaded_models["unavailable"].get(key), set):
+                            loaded_models["unavailable"][key] = list(loaded_models["unavailable"][key])
+                self.models.update(loaded_models)
+            self.models["last_update"] = time.time()
+            FirebaseManager().save_models(self.models)
+            logger.info(f"Модели загружены из Firebase: Text моделей = {len(self.models['text'])}, Vision моделей = {len(self.models['vision'])}")
         except Exception as e:
-            logger.error(f"Ошибка получения моделей: {e}")
+            logger.error(f"Ошибка загрузки/сохранения моделей: {e}")
 
     async def on_message(self, message: discord.Message):
-        from .commands.restrict import check_user_restriction, check_bot_access, handle_mention
         msg_key = f"{message.id}-{message.channel.id}"
         if message.author.bot or msg_key in self.processed_messages:
             return
@@ -126,17 +114,24 @@ class BotClient:
         try:
             user_id = str(message.author.id)
             channel_id = str(message.channel.id)
+            
+            if not await self.is_bot_mentioned(message):
+                return
+
+            if not await self.check_spam(user_id):
+                await self._send_temp_message(message.channel, "Слишком быстро! Подождите 3 секунды.", user_id)
+                return
+
             await self.start_new_conversation(user_id, channel_id, message.content)
             if isinstance(message.channel, discord.DMChannel):
                 if await check_user_restriction(message):
                     await self._process_message(message)
-            elif await check_bot_access(message) and await check_user_restriction(message) and await handle_mention(message, self):
+            elif await check_bot_access(message) and await check_user_restriction(message):
                 await self._process_message(message)
         except Exception as e:
             logger.error(f"Ошибка обработки сообщения {msg_key}: {e}")
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        from .commands.restrict import check_user_restriction, check_bot_access
         msg_key = f"{after.id}-{after.channel.id}"
         if before.content == after.content or after.author.bot or msg_key not in self.processed_messages:
             return
@@ -145,6 +140,14 @@ class BotClient:
         try:
             user_id = str(after.author.id)
             channel_id = str(after.channel.id)
+
+            if not await self.is_bot_mentioned(after):
+                return
+
+            if not await self.check_spam(user_id):
+                await self._send_temp_message(after.channel, "Слишком быстро! Подождите 3 секунды.", user_id)
+                return
+
             await self.start_new_conversation(user_id, channel_id, after.content)
             if isinstance(after.channel, discord.DMChannel):
                 if await check_user_restriction(after):
@@ -188,7 +191,7 @@ class BotClient:
                 sent_msg = await (message.reply(part) if i == 0 else message.channel.send(part))
                 self.message_to_response[f"{message.id}_{i}" if i > 0 else message.id] = sent_msg.id
             except (Forbidden, HTTPException):
-                await self._send_temp_message(message.channel, "Ошибка отправки.", str(message.author.id))
+                await self._send_temp_message(message.channel, "Ошибка отправки.", str(message.author.id), ephemeral=True)
 
     async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message, is_edit: bool = False) -> Optional[str]:
         try:
@@ -211,35 +214,22 @@ class BotClient:
             return final_response
         except Exception as e:
             logger.error(f"Ошибка генерации для {user_id}: {e}")
-            await self._send_temp_message(message.channel, "Ошибка. Попробуйте позже.", user_id)
+            await self._send_temp_message(message.channel, "Ошибка. Попробуйте позже.", user_id, ephemeral=True)
             return None
 
     async def _build_system_prompt(self, user_id: str, guild_id: str, attachments: List) -> str:
-        from .commands.prompt import load_user_prompt
         now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-        prompt = (
-            f"System Instructions: {await load_user_prompt(user_id, guild_id, self)}\n"
-            f"Current Date and Time (UTC): {now}\n"
-            f"Output Format: Discord Markdown\n"
-            "Provide accurate, concise, and clear responses. Structure answers with bullet points or numbered lists when appropriate. "
-            "Use reliable information and avoid speculation. For queries requiring recent data, utilize web search to ensure accuracy. "
-            "Always use the current date and time provided above to ensure responses are up-to-date."
-        )
+        user_prompt = await load_user_prompt(user_id, guild_id, self)
+        base_prompt = default_prompt.format(user_prompt=user_prompt, now=now)
         if attachments:
-            prompt += (
-                "\nImage Analysis Instructions:\n"
-                f"Current Date and Time (UTC): {now}\n"
-                "- Analyze the image with high precision to identify its content and context.\n"
-                "- Identify and describe:\n"
-                "  - Characters: If the image depicts a character (e.g., from anime, games, or other media), provide their name, origin (title of the anime, game, or media), and relevant details (role, personality, or notable traits). Use web search to confirm identities if necessary.\n"
-                "  - Locations: Specify the setting or geographical context of the scene. Use web search to identify landmarks or settings if needed.\n"
-                "  - Objects: Detail notable items, their purpose, or context. Use web search for unfamiliar objects.\n"
-                "  - Art Style: Determine the style (e.g., anime, realism, cartoon) and describe relevant visual elements (e.g., costume, background).\n"
-                "- If the image contains text, transcribe and interpret it in the context of the image.\n"
-                "- Use web search to enhance accuracy for ambiguous or context-dependent elements (e.g., identifying a character or location).\n"
-                "Format the response in Discord Markdown, using clear headings and lists."
+            base_prompt += (
+                "\n**Инструкции по анализу изображений**:\n"
+                f"- Текущее время (UTC): {now}\n"
+                "- Анализируй изображение с высокой точностью.\n"
+                "- Описывай персонажей, локации, объекты и стиль.\n"
+                "- Форматируй ответ в Markdown."
             )
-        return prompt
+        return base_prompt
 
     async def _try_generate_response(self, messages: List[Dict], has_image: bool, needs_web: bool, max_tokens: int) -> Optional[str]:
         model_type = "vision" if has_image else "text"
@@ -247,22 +237,20 @@ class BotClient:
         if not models:
             logger.error(f"Нет доступных моделей для типа {model_type}")
             return None
-        
+
         last_successful = self.models["last_successful"][model_type]
         if last_successful and last_successful in models:
             try:
                 response = await self.process_response(model_type, last_successful, messages, max_tokens, needs_web)
                 if response:
-                    # Сохранение успешной модели в Firebase
-                    from .firebase.firebase_manager import FirebaseManager
                     FirebaseManager.initialize()
                     self.models["last_successful"][model_type] = last_successful
                     FirebaseManager().save_models(self.models)
                     return response
             except Exception as e:
                 logger.warning(f"Последняя успешная модель {last_successful} ({model_type}) не сработала: {e}")
-                self.models["unavailable"][model_type].add(last_successful)
-                from .firebase.firebase_manager import FirebaseManager
+                if last_successful not in self.models["unavailable"][model_type]:
+                    self.models["unavailable"][model_type].append(last_successful)
                 FirebaseManager.initialize()
                 FirebaseManager().save_models(self.models)
 
@@ -271,72 +259,48 @@ class BotClient:
                 response = await self.process_response(model_type, model, messages, max_tokens, needs_web)
                 if response:
                     self.models["last_successful"][model_type] = model
-                    self.models["unavailable"][model_type].discard(model)
-                    # Сохранение в Firebase
-                    from .firebase.firebase_manager import FirebaseManager
+                    if model in self.models["unavailable"][model_type]:
+                        self.models["unavailable"][model_type].remove(model)
                     FirebaseManager.initialize()
                     FirebaseManager().save_models(self.models)
                     return response
             except Exception as e:
                 logger.warning(f"Модель {model} ({model_type}) не сработала: {e}")
-                self.models["unavailable"][model_type].add(model)
-                # Сохранение в Firebase
-                from .firebase.firebase_manager import FirebaseManager
+                if model not in self.models["unavailable"][model_type]:
+                    self.models["unavailable"][model_type].append(model)
                 FirebaseManager.initialize()
                 FirebaseManager().save_models(self.models)
         logger.error(f"Все модели типа {model_type} недоступны")
         return None
 
     async def process_response(self, model_type: str, model: str, messages: List[Dict], max_tokens: int, needs_web: bool) -> Optional[str]:
-        url = "https://text.pollinations.ai/openai" if model_type == "vision" else "https://text.pollinations.ai/"
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": 0.7,
-            "top_p": 0.9
-        }
-        if needs_web:
-            payload["web_search"] = True
         for attempt in range(self.request_settings["max_retries"]):
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=self.request_settings["headers"], json=payload) as resp:
-                        resp.raise_for_status()
-                        content_type = resp.headers.get("Content-Type", "")
-                        raw_text = await resp.text()
-                        raw_text = raw_text.strip().lstrip('\ufeff')
-                        if "application/json" in content_type:
-                            try:
-                                data = json.loads(raw_text)
-                                content = data.get("choices", [{}])[0].get("message", {}).get("content")
-                                if content:
-                                    await asyncio.sleep(self.request_settings["rate_limit_delay"])
-                                    return content
-                                logger.warning(f"Нет содержимого в JSON-ответе для модели {model}")
-                            except json.JSONDecodeError as e:
-                                logger.error(f"Ошибка парсинга JSON для модели {model}: {e}, содержимое: {raw_text[:500]}")
-                                return None
-                        else:
-                            try:
-                                data = json.loads(raw_text)
-                                content = data.get("choices", [{}])[0].get("message", {}).get("content")
-                                if content:
-                                    await asyncio.sleep(self.request_settings["rate_limit_delay"])
-                                    return content
-                                logger.warning(f"Нет содержимого в JSON (text/plain) для модели {model}")
-                            except json.JSONDecodeError:
-                                if raw_text:
-                                    await asyncio.sleep(self.request_settings["rate_limit_delay"])
-                                    return raw_text
-                                logger.warning(f"Пустой текстовый ответ для модели {model}")
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                if model_type == "vision":
+                    response = await asyncio.to_thread(
+                        self.g4f_client.images.generate,
+                        model=model,
+                        prompt=messages[-1]["content"][0]["text"],
+                        response_format="url"
+                    )
+                    content = f"Generated image: {response.data[0].url}"
+                else:
+                    response = await asyncio.to_thread(
+                        self.g4f_client.chat.completions.create,
+                        model=model,
+                        messages=messages,
+                        web_search=needs_web,
+                        max_tokens=max_tokens
+                    )
+                    content = response.choices[0].message.content
+                if content:
+                    await asyncio.sleep(self.request_settings["rate_limit_delay"])
+                    return content
+                logger.warning(f"Нет содержимого в ответе для модели {model}")
+            except Exception as e:
                 logger.warning(f"Попытка {attempt + 1}/{self.request_settings['max_retries']} не удалась: {e}")
                 if attempt < self.request_settings["max_retries"] - 1:
                     await asyncio.sleep(self.request_settings["retry_delay_base"] * (2 ** attempt))
-            except Exception as e:
-                logger.error(f"Ошибка модели {model}: {e}")
-                break
         return None
 
     async def start_new_conversation(self, user_id: str, channel_id: str, content: str):
@@ -475,10 +439,13 @@ class BotClient:
         )
         return text_needs_search or context_needs_search
 
-    async def _send_temp_message(self, channel: discord.abc.Messageable, content: str, user_id: str):
+    async def _send_temp_message(self, channel: discord.abc.Messageable, content: str, user_id: str, ephemeral: bool = False):
         try:
-            msg = await channel.send(content)
-            await asyncio.sleep(10)
-            await msg.delete()
-        except (Forbidden, HTTPException):
-            logger.error(f"Ошибка отправки временного сообщения для {user_id}")
+            if ephemeral and isinstance(channel, discord.Interaction):
+                await channel.response.send_message(content, ephemeral=True)
+            else:
+                msg = await channel.send(content)
+                await asyncio.sleep(10)
+                await msg.delete()
+        except (Forbidden, HTTPException) as e:
+            logger.error(f"Ошибка отправки временного сообщения для {user_id}: {e}")
