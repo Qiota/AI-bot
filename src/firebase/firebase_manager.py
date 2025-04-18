@@ -1,186 +1,331 @@
 import firebase_admin
 from firebase_admin import credentials, db
-from ..systemLog import logger
+from typing import Dict, Optional
 import os
-from ..commands.prompt import default_prompt
+from decouple import config
+import logging
+import backoff
+import asyncio
+import json
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class FirebaseManager:
-    _instance = None
+    """Менеджер для работы с Firebase Realtime Database."""
+    _instance: Optional['FirebaseManager'] = None
+    _file_cache: Dict[str, str] = {}  # Кэш путей к файлам
+    _initialized: bool = False  # Флаг инициализации
+    _init_lock: asyncio.Lock = asyncio.Lock()  # Замок для синхронизации инициализации
+    _db_url: str = "https://ai-assist-fe86c-default-rtdb.europe-west1.firebasedatabase.app/"
+
+    @staticmethod
+    def find_file(filename: str) -> Optional[str]:
+        """
+        Рекурсивный поиск файла по имени в проекте и стандартных директориях.
+        
+        Args:
+            filename: Имя файла для поиска.
+        
+        Returns:
+            Полный путь к файлу или None, если файл не найден.
+        """
+        cache_key = filename
+        if cache_key in FirebaseManager._file_cache:
+            logger.debug(f"Путь к файлу {filename} взят из кэша: {FirebaseManager._file_cache[cache_key]}")
+            return FirebaseManager._file_cache[cache_key]
+
+        logger.debug(f"Поиск файла {filename}")
+        try:
+            # Начальная директория: текущая директория скрипта
+            start_dir = os.path.abspath(os.path.dirname(__file__))
+            project_root = start_dir
+            # Поднимаемся до корня проекта (пока не найдём корень диска или .git)
+            while project_root != os.path.dirname(project_root) and not os.path.exists(os.path.join(project_root, '.git')):
+                project_root = os.path.dirname(project_root)
+
+            # Проверяем стандартные директории
+            search_dirs = [
+                project_root,
+                os.path.join(project_root, 'firebase'),
+                os.path.join(project_root, 'config'),
+                os.path.join(project_root, 'credentials'),
+                os.path.join(project_root, 'src', 'firebase'),
+                start_dir
+            ]
+
+            for search_dir in search_dirs:
+                for root, _, files in os.walk(search_dir):
+                    if filename in files:
+                        file_path = os.path.join(root, filename)
+                        FirebaseManager._file_cache[cache_key] = file_path
+                        logger.info(f"Файл {filename} найден по пути: {file_path}")
+                        return file_path
+
+            # Проверяем переменную окружения
+            env_path = config('FIREBASE_KEY_PATH', default=None)
+            if env_path and os.path.exists(env_path):
+                FirebaseManager._file_cache[cache_key] = env_path
+                logger.info(f"Файл {filename} найден по пути из FIREBASE_KEY_PATH: {env_path}")
+                return env_path
+
+            logger.warning(f"Файл {filename} не найден в проекте или FIREBASE_KEY_PATH")
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при поиске файла {filename}: {e}")
+            return None
 
     @classmethod
-    def initialize(cls):
-        if cls._instance is None:
+    async def initialize(cls) -> 'FirebaseManager':
+        """Инициализация подключения к Firebase Realtime Database с использованием asyncio.Lock."""
+        async with cls._init_lock:
+            if cls._instance and cls._initialized:
+                logger.debug("Firebase уже инициализирован")
+                return cls._instance
+
             try:
-                cred_path = os.path.join(os.path.dirname(__file__), "serviceAccountKey.json")
-                if not os.path.exists(cred_path):
-                    logger.error(f"Файл учетных данных Firebase не найден: {cred_path}")
-                    raise FileNotFoundError(f"Firebase credentials file not found: {cred_path}")
-                cred = credentials.Certificate(cred_path)
-                firebase_admin.initialize_app(cred, {
-                    'databaseURL': "https://ai-assist-fe86c-default-rtdb.europe-west1.firebasedatabase.app/"
-                })
+                # Проверка, инициализировано ли приложение
+                try:
+                    firebase_admin.get_app(name='[DEFAULT]')
+                    logger.debug("Приложение Firebase уже инициализировано")
+                except ValueError:
+                    firebase_key_filename = 'serviceAccountKey.json'
+                    firebase_key_path = cls.find_file(firebase_key_filename)
+                    
+                    if not firebase_key_path:
+                        raise FileNotFoundError(
+                            f"Файл ключа Firebase '{firebase_key_filename}' не найден в проекте и не указан в FIREBASE_KEY_PATH"
+                        )
+                    
+                    cred = credentials.Certificate(firebase_key_path)
+                    firebase_admin.initialize_app(cred, {
+                        'databaseURL': cls._db_url
+                    })
+                    logger.info("Firebase Realtime Database успешно инициализирован")
+
                 cls._instance = cls()
-                logger.info("Firebase инициализирован")
+                cls._instance._db = db.reference()  # Клиент Realtime Database
+                cls._initialized = True
+                logger.debug(f"Клиент Realtime Database инициализирован: _db={cls._instance._db}")
+                return cls._instance
             except Exception as e:
                 logger.error(f"Ошибка инициализации Firebase: {e}")
-                raise
-        return cls._instance
+                cls._initialized = False
+                raise Exception(f"Ошибка инициализации Firebase: {e}")
 
-    def load_guild_config(self, guild_id: str) -> dict:
-        try:
-            if guild_id == "DM":
-                logger.debug("Конфигурация для DM, возвращается дефолтная")
-                return {"bot_allowed_channels": [], "restricted_users": []}
-            ref = db.reference(f"/guilds/{guild_id}")
-            data = ref.get()
-            if not isinstance(data, dict):
-                logger.warning(f"Некорректные данные конфигурации для guild_id {guild_id}: {data}")
-                return {"bot_allowed_channels": [], "restricted_users": []}
-            return data or {"bot_allowed_channels": [], "restricted_users": []}
-        except Exception as e:
-            logger.error(f"Ошибка чтения конфигурации для guild_id {guild_id}: {e}")
-            return {"bot_allowed_channels": [], "restricted_users": []}
+    def _ensure_db_initialized(self) -> None:
+        """Проверка, что клиент Realtime Database инициализирован."""
+        if not self._initialized or not hasattr(self, '_db') or self._db is None:
+            logger.error("Клиент Realtime Database не инициализирован")
+            raise AttributeError("FirebaseManager._db не инициализирован. Вызовите initialize() перед использованием.")
 
-    def save_guild_config(self, guild_id: str, config: dict):
-        if not isinstance(config, dict):
-            logger.error(f"Некорректный формат конфигурации для guild_id {guild_id}: {config}")
-            raise ValueError("Конфигурация должна быть словарем")
-        try:
-            ref = db.reference(f"/guilds/{guild_id}")
-            ref.set(config)
-            logger.info(f"Конфигурация сохранена для guild_id {guild_id}")
-        except Exception as e:
-            logger.error(f"Ошибка сохранения конфигурации для guild_id {guild_id}: {e}")
-            raise
+    async def _run_sync_in_executor(self, func):
+        """Запуск синхронной функции в пуле потоков."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, func)
 
-    def update_guild_fields(self, guild_id: str, fields: dict):
-        if not isinstance(fields, dict):
-            logger.error(f"Некорректный формат полей для guild_id {guild_id}: {fields}")
-            raise ValueError("Поля должны быть словарем")
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def load_models(self) -> Dict:
+        """Загрузка моделей из Realtime Database."""
+        self._ensure_db_initialized()
         try:
-            ref = db.reference(f"/guilds/{guild_id}")
-            ref.update(fields)
-            logger.info(f"Поля обновлены для guild_id {guild_id}: {fields.keys()}")
-        except Exception as e:
-            logger.error(f"Ошибка обновления полей для guild_id {guild_id}: {e}")
-            raise
-
-    def load_models(self) -> dict:
-        try:
-            ref = db.reference("/models")
-            data = ref.get()
-            default_models = {
-                "text": [
-                    "gpt-4o-mini", "gpt-4o", "o1-mini", "qwen-2.5-coder-32b", "llama-3.3-70b", "mistral-nemo",
-                    "llama-3.1-8b", "deepseek-r1", "phi-4", "qwq-32b", "deepseek-v3", "llama-3.2-11b",
-                    "grok-3", "claude-3.5-sonnet", "gemini-1.5-pro", "mixtral-8x7b"
-                ],
-                "vision": [
-                    "gpt-4o", "gpt-4o-mini", "o1-mini", "flux", "flux-realism", "flux-anime", "flux-3d"
-                ],
-                "last_update": None,
-                "unavailable": {"text": [], "vision": []},
-                "last_successful": {"text": None, "vision": None}
-            }
-            if not data:
-                return default_models
-            if not isinstance(data.get("unavailable", {}).get("text", []), list) or \
-               not isinstance(data.get("unavailable", {}).get("vision", []), list):
-                logger.warning("Некорректный формат unavailable в моделях, сброс на дефолт")
-                data["unavailable"] = {"text": [], "vision": []}
+            logger.debug("Начало загрузки моделей из Realtime Database")
+            def sync_get():
+                data = self._db.child("models/available_models").get()
+                return data if data else {}
+            data = await self._run_sync_in_executor(sync_get)
+            logger.debug("Модели успешно загружены из Realtime Database")
             return data
         except Exception as e:
-            logger.error(f"Ошибка чтения моделей: {e}")
-            return default_models
+            logger.error(f"Ошибка загрузки моделей из Realtime Database: {e}")
+            raise Exception(f"Ошибка загрузки моделей: {e}")
 
-    def save_models(self, models: dict):
-        if not isinstance(models, dict):
-            logger.error(f"Некорректный формат моделей: {models}")
-            raise ValueError("Модели должны быть словарем")
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def save_models(self, models: Dict) -> None:
+        """Сохранение моделей в Realtime Database."""
+        self._ensure_db_initialized()
         try:
-            ref = db.reference("/models")
-            ref.set({
-                "text": models["text"],
-                "vision": models["vision"],
-                "last_update": models["last_update"],
-                "unavailable": {
-                    "text": list(models["unavailable"]["text"]),
-                    "vision": list(models["unavailable"]["vision"])
-                },
-                "last_successful": models["last_successful"]
-            })
-            logger.info("Модели сохранены в Firebase")
+            logger.debug("Начало сохранения моделей в Realtime Database")
+            def sync_set():
+                self._db.child("models/available_models").set(models)
+            await self._run_sync_in_executor(sync_set)
+            logger.debug("Модели успешно сохранены в Realtime Database")
         except Exception as e:
-            logger.error(f"Ошибка сохранения моделей: {e}")
-            raise
+            logger.error(f"Ошибка сохранения моделей в Realtime Database: {e}")
+            raise Exception(f"Ошибка сохранения моделей: {e}")
 
-    def load_giveaways(self) -> dict:
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def load_guild_config(self, guild_id: str) -> Dict:
+        """Загрузка конфигурации гильдии из Realtime Database."""
+        self._ensure_db_initialized()
         try:
-            ref = db.reference("/giveaways")
-            data = ref.get()
-            if not isinstance(data, dict):
-                logger.warning(f"Некорректные данные розыгрышей: {data}")
-                return {"active": {}, "completed": {}}
-            return data or {"active": {}, "completed": {}}
+            logger.debug(f"Начало загрузки конфигурации гильдии {guild_id}")
+            def sync_get():
+                data = self._db.child(f"guilds/{guild_id}").get()
+                return data if data else {}
+            data = await self._run_sync_in_executor(sync_get)
+            logger.debug(f"Конфигурация гильдии {guild_id} загружена из Realtime Database")
+            return data
         except Exception as e:
-            logger.error(f"Ошибка чтения розыгрышей: {e}")
-            return {"active": {}, "completed": {}}
+            logger.error(f"Ошибка загрузки конфигурации гильдии {guild_id}: {e}")
+            raise Exception(f"Ошибка загрузки конфигурации гильдии {guild_id}: {e}")
 
-    def save_giveaways(self, giveaways: dict):
-        if not isinstance(giveaways, dict):
-            logger.error(f"Некорректный формат розыгрышей: {giveaways}")
-            raise ValueError("Розыгрыши должны быть словарем")
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def update_guild_fields(self, guild_id: str, updates: Dict) -> None:
+        """Обновление полей конфигурации гильдии в Realtime Database."""
+        self._ensure_db_initialized()
         try:
-            ref = db.reference("/giveaways")
-            ref.set(giveaways)
-            logger.info("Розыгрыши сохранены в Firebase")
+            logger.debug(f"Начало обновления конфигурации гильдии {guild_id}")
+            def sync_update():
+                self._db.child(f"guilds/{guild_id}").update(updates)
+            await self._run_sync_in_executor(sync_update)
+            logger.debug(f"Конфигурация гильдии {guild_id} обновлена в Realtime Database")
         except Exception as e:
-            logger.error(f"Ошибка сохранения розыгрышей: {e}")
-            raise
+            logger.error(f"Ошибка обновления конфигурации гильдии {guild_id}: {e}")
+            raise Exception(f"Ошибка обновления конфигурации гильдии {guild_id}: {e}")
 
-    def load_prompt(self, guild_id: str, user_id: str) -> str:
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def save_cache(self, cache_key: str, cache_data: Dict) -> None:
+        """Сохранение данных кэша в Realtime Database."""
+        self._ensure_db_initialized()
         try:
-            ref = db.reference(f"/prompts/{guild_id}/{user_id}")
-            data = ref.get()
-            if not data or not isinstance(data.get("system_prompt", ""), str):
-                return default_prompt
-            return data.get("system_prompt", default_prompt)
+            logger.debug(f"Начало сохранения кэша для ключа {cache_key}")
+            def sync_set():
+                self._db.child(f"response_cache/{cache_key}").set(cache_data)
+            await self._run_sync_in_executor(sync_set)
+            logger.debug(f"Кэш сохранён в Realtime Database для ключа {cache_key}")
         except Exception as e:
-            logger.error(f"Ошибка чтения промпта для guild_id {guild_id}, user_id {user_id}: {e}")
-            return default_prompt
+            logger.error(f"Ошибка сохранения кэша в Realtime Database для ключа {cache_key}: {e}")
+            raise Exception(f"Ошибка сохранения кэша: {e}")
 
-    def save_prompt(self, guild_id: str, user_id: str, prompt: str):
-        if not isinstance(prompt, str):
-            logger.error(f"Некорректный формат промпта для guild_id {guild_id}, user_id {user_id}: {prompt}")
-            raise ValueError("Промпт должен быть строкой")
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def load_cache(self, cache_key: str) -> Optional[Dict]:
+        """Загрузка данных кэша из Realtime Database."""
+        self._ensure_db_initialized()
         try:
-            ref = db.reference(f"/prompts/{guild_id}/{user_id}")
-            ref.set({"system_prompt": prompt})
-            logger.info(f"Промпт сохранен для guild_id {guild_id}, user_id {user_id}")
+            logger.debug(f"Начало загрузки кэша для ключа {cache_key}")
+            def sync_get():
+                data = self._db.child(f"response_cache/{cache_key}").get()
+                return data if data else None
+            data = await self._run_sync_in_executor(sync_get)
+            logger.debug(f"Кэш загружен из Realtime Database для ключа {cache_key}")
+            return data
         except Exception as e:
-            logger.error(f"Ошибка сохранения промпта для guild_id {guild_id}, user_id {user_id}: {e}")
-            raise
+            logger.error(f"Ошибка загрузки кэша из Realtime Database для ключа {cache_key}: {e}")
+            raise Exception(f"Ошибка загрузки кэша: {e}")
 
-    def load_user_settings(self, user_id: str) -> dict:
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def save_conversation(self, user_id: str, conversation_id: str, conversation_data: Dict) -> None:
+        """Сохранение контекста разговора в Realtime Database."""
+        self._ensure_db_initialized()
         try:
-            ref = db.reference(f"/user_settings/{user_id}")
-            data = ref.get()
-            if not isinstance(data, dict):
-                logger.warning(f"Некорректные настройки пользователя {user_id}: {data}")
-                return {"max_response_length": 2000, "preferred_model": None}
-            return data or {"max_response_length": 2000, "preferred_model": None}
+            logger.debug(f"Начало сохранения разговора {conversation_id} для пользователя {user_id}")
+            def sync_set():
+                self._db.child(f"conversations/{user_id}/sessions/{conversation_id}").set(conversation_data)
+            await self._run_sync_in_executor(sync_set)
+            logger.debug(f"Разговор {conversation_id} сохранён в Realtime Database для пользователя {user_id}")
         except Exception as e:
-            logger.error(f"Ошибка чтения настроек пользователя {user_id}: {e}")
-            return {"max_response_length": 2000, "preferred_model": None}
+            logger.error(f"Ошибка сохранения разговора {conversation_id} в Realtime Database: {e}")
+            raise Exception(f"Ошибка сохранения разговора: {e}")
 
-    def save_user_settings(self, user_id: str, settings: dict):
-        if not isinstance(settings, dict):
-            logger.error(f"Некорректный формат настроек для пользователя {user_id}: {settings}")
-            raise ValueError("Настройки должны быть словарем")
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def load_conversation(self, user_id: str, conversation_id: str) -> Optional[Dict]:
+        """Загрузка контекста разговора из Realtime Database."""
+        self._ensure_db_initialized()
         try:
-            ref = db.reference(f"/user_settings/{user_id}")
-            ref.set(settings)
-            logger.info(f"Настройки сохранены для пользователя {user_id}")
+            logger.debug(f"Начало загрузки разговора {conversation_id} для пользователя {user_id}")
+            def sync_get():
+                data = self._db.child(f"conversations/{user_id}/sessions/{conversation_id}").get()
+                return data if data else None
+            data = await self._run_sync_in_executor(sync_get)
+            logger.debug(f"Разговор {conversation_id} загружен из Realtime Database для пользователя {user_id}")
+            return data
         except Exception as e:
-            logger.error(f"Ошибка сохранения настроек для пользователя {user_id}: {e}")
-            raise
+            logger.error(f"Ошибка загрузки разговора {conversation_id} из Realtime Database: {e}")
+            raise Exception(f"Ошибка загрузки разговора: {e}")
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def cleanup_expired_conversations(self, current_time: float) -> None:
+        """Очистка устаревших разговоров из Realtime Database."""
+        self._ensure_db_initialized()
+        try:
+            logger.debug("Начало очистки устаревших разговоров в Realtime Database")
+            def sync_cleanup():
+                users = self._db.child("conversations").get() or {}
+                for user_id, user_data in users.items():
+                    sessions = user_data.get("sessions", {})
+                    for session_id, session_data in sessions.items():
+                        last_message_time = session_data.get("last_message_time", 0)
+                        ttl_seconds = session_data.get("ttl_seconds", 86400)
+                        if current_time - last_message_time > ttl_seconds:
+                            self._db.child(f"conversations/{user_id}/sessions/{session_id}").delete()
+                            logger.debug(f"Удалён устаревший разговор {session_id} для пользователя {user_id}")
+            await self._run_sync_in_executor(sync_cleanup)
+            logger.debug("Очистка устаревших разговоров завершена")
+        except Exception as e:
+            logger.error(f"Ошибка очистки устаревших разговоров в Realtime Database: {e}")
+            raise Exception(f"Ошибка очистки разговоров: {e}")

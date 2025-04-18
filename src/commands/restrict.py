@@ -88,7 +88,6 @@ class SelectView(BaseView):
         self.action = action
         self.main_view = main_view
         self.bot_client = bot_client
-        self.config = FirebaseManager.initialize().load_guild_config(str(guild_id))
         self.selected_values = []
         self.current_page = 0
         self.items_per_page = 25
@@ -98,7 +97,16 @@ class SelectView(BaseView):
         if not self.is_finished():
             self.setup_select()
 
+    async def load_config(self):
+        """Загрузка конфигурации гильдии асинхронно."""
+        firebase_manager = await FirebaseManager.initialize()
+        return await firebase_manager.load_guild_config(str(self.guild_id))
+
     def setup_items(self):
+        # Конфигурация загружается синхронно для инициализации, но должна быть асинхронной
+        # Используем run_in_executor для вызова в синхронном контексте
+        loop = asyncio.get_event_loop()
+        self.config = loop.run_until_complete(self.load_config())
         if self.action == "bot_access":
             self.all_items = [
                 {"label": channel.name, "value": str(channel.id), "default": str(channel.id) in self.config.get("bot_allowed_channels", [])}
@@ -274,7 +282,8 @@ class SelectView(BaseView):
                 ]
                 action_log = f"Снято ограничений: {len(self.selected_values)}"
 
-            FirebaseManager.initialize().update_guild_fields(str(self.guild.id), update_data)
+            firebase_manager = await FirebaseManager.initialize()
+            await firebase_manager.update_guild_fields(str(self.guild.id), update_data)
             logger.info(f"Настройки сервера {self.guild.id}: {action_log}")
             await interaction.followup.send("✅ Настройки сохранены!", ephemeral=True)
         except Exception as e:
@@ -383,7 +392,8 @@ async def check_channels_setup(obj):
             logger.debug("Команда /restrict, пропуск проверки каналов")
             return True, None
 
-        config = FirebaseManager.initialize().load_guild_config(str(obj.guild.id))
+        firebase_manager = await FirebaseManager.initialize()
+        config = await firebase_manager.load_guild_config(str(obj.guild.id))
         if config is None:
             logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена в Firebase")
             return False, "конфигурация сервера не найдена"
@@ -413,7 +423,8 @@ async def check_bot_access(obj):
             logger.debug(f"check_channels_setup вернул False: {reason}")
             return False, reason
 
-        config = FirebaseManager.initialize().load_guild_config(str(obj.guild.id))
+        firebase_manager = await FirebaseManager.initialize()
+        config = await firebase_manager.load_guild_config(str(obj.guild.id))
         if config is None:
             logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена в Firebase")
             return False, "конфигурация сервера не найдена"
@@ -438,7 +449,8 @@ async def check_user_restriction(obj):
             return True, None
 
         guild_id = str(obj.guild.id) if obj.guild else "DM"
-        config = FirebaseManager.initialize().load_guild_config(guild_id)
+        firebase_manager = await FirebaseManager.initialize()
+        config = await firebase_manager.load_guild_config(guild_id)
         if config is None and obj.guild:
             logger.warning(f"Конфигурация для гильдии {guild_id} не найдена в Firebase")
             return False, "конфигурация сервера не найдена"
@@ -455,7 +467,7 @@ async def check_user_restriction(obj):
         logger.error(f"Ошибка в check_user_restriction для гильдии {guild_id}: {e}", exc_info=True)
         return False, "ошибка при проверке ограничений"
 
-async def restrict_command_execution(obj, bot_client) -> bool:
+async def restrict_command_execution(obj, bot_client):
     """Проверяет, может ли бот выполнить команду на сервере, читая Firebase."""
     try:
         if isinstance(obj, discord.Interaction) and obj.guild:
@@ -465,7 +477,8 @@ async def restrict_command_execution(obj, bot_client) -> bool:
                     await obj.response.send_message("Бот еще не готов. Пожалуйста, попробуйте позже.", ephemeral=True)
                 return False
 
-            config = FirebaseManager.initialize().load_guild_config(str(obj.guild.id))
+            firebase_manager = await FirebaseManager.initialize()
+            config = await firebase_manager.load_guild_config(str(obj.guild.id))
             if config is None:
                 logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена в Firebase")
                 if not obj.response.is_done():
@@ -497,7 +510,8 @@ async def handle_mention(message: discord.Message, bot_client):
             logger.debug("Бот не упомянут в сообщении")
             return False
 
-        config = FirebaseManager.initialize().load_guild_config(str(message.guild.id))
+        firebase_manager = await FirebaseManager.initialize()
+        config = await firebase_manager.load_guild_config(str(message.guild.id))
         if config is None:
             logger.warning(f"Конфигурация для гильдии {message.guild.id} не найдена в Firebase")
             await notify_restricted_channel(message, "конфигурация сервера не найдена")
