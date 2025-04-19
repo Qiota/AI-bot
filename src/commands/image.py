@@ -190,10 +190,11 @@ async def generate_image(
         logger.error(f"Ошибка /image для {interaction.user.id}: {e}")
 
 class SettingsModal(Modal):
-    def __init__(self, bot_client, view: 'SettingsView'):
+    def __init__(self, bot_client, view: 'SettingsView', user_id: int):
         super().__init__(title="Настройки генерации изображения")
         self.bot_client = bot_client
         self.view = view
+        self.user_id = user_id
 
         self.prompt_input = TextInput(
             label="Промпт",
@@ -229,6 +230,13 @@ class SettingsModal(Modal):
         self.add_item(self.cfg_scale_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Вы не можете использовать эту панель, так как не являетесь автором команды.",
+                ephemeral=True
+            )
+            return
+
         await interaction.response.defer(ephemeral=self.view.ephemeral)
         self.view.prompt = self.prompt_input.value
         self.view.negative_prompt = self.negative_prompt_input.value or ""
@@ -252,10 +260,11 @@ class SettingsModal(Modal):
         await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self.view)
 
 class SettingsView(View):
-    def __init__(self, bot_client, ephemeral: bool):
+    def __init__(self, bot_client, ephemeral: bool, user_id: int):
         super().__init__(timeout=300)
         self.bot_client = bot_client
         self.ephemeral = ephemeral
+        self.user_id = user_id
         self.prompt = DEFAULT_PROMPT
         self.negative_prompt = ""
         self.model = DEFAULT_SETTINGS["model"]
@@ -290,6 +299,15 @@ class SettingsView(View):
         self.generate_button.callback = self.generate_button_callback
         self.add_item(self.generate_button)
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Вы не можете использовать эту панель, так как не являетесь автором команды.",
+                ephemeral=True
+            )
+            return False
+        return True
+
     async def model_select_callback(self, interaction: discord.Interaction):
         self.model = self.model_select.values[0]
         embed = Embed(title="⚙️ Текущие настройки", color=0x3498DB)
@@ -312,7 +330,7 @@ class SettingsView(View):
 
     @discord.ui.button(label="Настройки", style=ButtonStyle.green, custom_id="open_settings", row=2)
     async def open_settings_button(self, interaction: discord.Interaction, button: Button):
-        modal = SettingsModal(self.bot_client, self)
+        modal = SettingsModal(self.bot_client, self, self.user_id)
         await interaction.response.send_modal(modal)
 
     async def improve_prompt_button_callback(self, interaction: discord.Interaction):
@@ -391,7 +409,7 @@ def create_command(bot_client):
     @app_commands.describe(ephemeral="Скрыть сообщения (True/False)")
     async def generate(interaction: discord.Interaction, ephemeral: bool = False):
         await interaction.response.defer(ephemeral=ephemeral)
-        view = SettingsView(bot_client, ephemeral)
+        view = SettingsView(bot_client, ephemeral, interaction.user.id)
         embed = Embed(title="⚙️ Текущие настройки", color=0x3498DB)
         embed.add_field(name="📝 Промпт", value=f"```{view.prompt[:1000]}[...]```" if len(view.prompt) > 1000 else f"```{view.prompt}```", inline=False)
         embed.add_field(name="🤖 Модель", value=f"> `{MODELS[view.model]}`", inline=True)
