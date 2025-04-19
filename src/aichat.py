@@ -8,7 +8,7 @@ from .systemLog import logger
 import time
 from collections import defaultdict
 import uuid
-from .commands.prompt import load_user_prompt, default_prompt, create_command as prompt_command
+from .commands.prompt import load_user_prompt, DEFAULT_PROMPT, DEFAULT_VISION_PROMPT, create_command as prompt_command, cleanup_expired_prompts
 from .commands.restrict import check_user_restriction, check_bot_access, create_command as restrict_command
 from .commands.giveaway import create_command as giveaway_command
 from .firebase.firebase_manager import FirebaseManager
@@ -26,11 +26,6 @@ import traceback
 version = getattr(g4f, "__version__", "неизвестна")
 logger.info(f"Используемая версия g4f: {version}")
 
-# Резервный список моделей
-DEFAULT_MODELS = {
-    "text": ["gpt-3.5-turbo"],
-    "vision": ["clip-vit"]
-}
 
 class BotClient:
     """Клиент Discord-бота с поддержкой текстовых и vision моделей через G4F и PollinationsAI."""
@@ -88,6 +83,7 @@ class BotClient:
         logger.debug("Команды розыгрышей добавлены в CommandTree")
         asyncio.create_task(self.update_models_periodically())
         asyncio.create_task(self.cleanup_conversations_periodically())
+        asyncio.create_task(self.cleanup_prompts_periodically())
         from .commands.giveaway import resume_giveaways
         asyncio.create_task(resume_giveaways(self))
         logger.info("Асинхронные задачи запущены в setup_hook")
@@ -266,8 +262,8 @@ class BotClient:
                 logger.info(f"Модели загружены из Firebase: Text={len(self.models['text'])}, Vision={len(self.models['vision'])}")
             else:
                 if not self.models["text"] and not self.models["vision"]:
-                    self.models["text"] = DEFAULT_MODELS["text"]
-                    self.models["vision"] = DEFAULT_MODELS["vision"]
+                    self.models["text"] = ["text"]
+                    self.models["vision"] = ["vision"]
                     self.models["last_update"] = time.time()
                     for model in self.models["vision"]:
                         if model not in self.models["model_stats"]["vision"]:
@@ -282,8 +278,8 @@ class BotClient:
                     logger.info(f"Резервные модели сохранены: Text={len(self.models['text'])}, Vision={len(self.models['vision'])}")
         except Exception as e:
             logger.error(f"Ошибка чтения моделей из Firebase: {e}\n{traceback.format_exc()}")
-            self.models["text"] = DEFAULT_MODELS["text"]
-            self.models["vision"] = DEFAULT_MODELS["vision"]
+            self.models["text"] = ["text"]
+            self.models["vision"] = ["vision"]
             self.models["last_update"] = time.time()
             for model in self.models["vision"]:
                 if model not in self.models["model_stats"]["vision"]:
@@ -714,22 +710,33 @@ class BotClient:
     async def _build_system_prompt(self, user_id: str, guild_id: str, has_image: bool) -> str:
         """Построение системного промпта для каждого запроса с сохранением личности."""
         prompt_key = f"{user_id}-{guild_id}"
-        if prompt_key not in self.prompt_cache:
-            self.prompt_cache[prompt_key] = await load_user_prompt(user_id, guild_id, self)
-        
-        prompt_data = self.prompt_cache[prompt_key]
-        base_prompt = prompt_data.get("vision_prompt" if has_image else "text_prompt", default_prompt)
-        
-        logger.debug(f"Исходный промпт для {prompt_key} ({'vision' if has_image else 'text'}): {base_prompt}")
-        
-        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        formatted_prompt = (
-            f"[PERSONALITY]\n{base_prompt.format(now=current_date)}\n"
-            f"[INSTRUCTIONS]\n{'Analyze the image and respond according to the personality.' if has_image else 'Respond according to the personality.'}"
-        )
-        
-        logger.debug(f"Сформирован системный промпт для {prompt_key} ({'vision' if has_image else 'text'}): {formatted_prompt}")
-        return formatted_prompt
+        try:
+            if prompt_key not in self.prompt_cache:
+                self.prompt_cache[prompt_key] = await load_user_prompt(user_id, guild_id, self)
+            
+            prompt_data = self.prompt_cache[prompt_key]
+            base_prompt = prompt_data.get("vision_prompt" if has_image else "text_prompt", DEFAULT_PROMPT)
+            
+            logger.debug(f"Исходный промпт для {prompt_key} ({'vision' if has_image else 'text'}): {base_prompt}")
+            
+            current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            formatted_prompt = (
+                f"[PERSONALITY]\n{base_prompt.format(now=current_date)}\n"
+                f"[INSTRUCTIONS]\n{'Analyze the image and respond according to the personality.' if has_image else 'Respond according to the personality.'}"
+            )
+            
+            logger.debug(f"Сформирован системный промпт для {prompt_key} ({'vision' if has_image else 'text'}): {formatted_prompt}")
+            return formatted_prompt
+        except Exception as e:
+            logger.error(f"Ошибка построения системного промпта для {prompt_key}: {e}")
+            current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            default_prompt = DEFAULT_VISION_PROMPT if has_image else DEFAULT_PROMPT
+            formatted_prompt = (
+                f"[PERSONALITY]\n{default_prompt.format(now=current_date)}\n"
+                f"[INSTRUCTIONS]\n{'Analyze the image and respond according to the personality.' if has_image else 'Respond according to the personality.'}"
+            )
+            logger.debug(f"Использован стандартный промпт для {prompt_key}: {formatted_prompt}")
+            return formatted_prompt
 
     def _adjust_conversation_ttl(self, user_id: str) -> None:
         """Динамическая настройка TTL разговора."""
@@ -815,6 +822,17 @@ class BotClient:
             except Exception as e:
                 logger.error(f"Ошибка очистки разговоров: {e}\n{traceback.format_exc()}")
                 await asyncio.sleep(1800)
+
+    async def cleanup_prompts_periodically(self) -> None:
+        """Периодическая очистка устаревших промптов."""
+        logger.debug("Начало cleanup_prompts_periodically")
+        while True:
+            try:
+                await cleanup_expired_prompts(self)
+                await asyncio.sleep(24 * 3600)  # Очистка раз в день
+            except Exception as e:
+                logger.error(f"Ошибка периодической очистки промптов: {e}")
+                await asyncio.sleep(3600)
 
     async def _send_temp_message(self, channel: discord.abc.Messageable, content: str, user_id: str, ephemeral: bool = False) -> None:
         """Отправка временного сообщения."""

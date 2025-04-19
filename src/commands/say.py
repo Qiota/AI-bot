@@ -1,43 +1,42 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import discord
 from discord import app_commands
 import aiohttp
 import io
 import re
-import asyncio
 import traceback
 from ..systemLog import logger
 
 DESCRIPTION = "Говорить от имени бота, с файлами или ответом на сообщение"
 
 async def check_permissions(interaction: discord.Interaction, bot_client) -> bool:
-    """Проверяет права пользователя для выполнения команды."""
+    """Проверяет, имеет ли пользователь права для выполнения команды."""
     if interaction.guild is None:
-        if interaction.user.id != bot_client.config.DEVELOPER_ID:
-            await interaction.response.send_message(
-                "Команда доступна только на сервере или разработчику.", ephemeral=True
-            )
-            logger.warning(f"Пользователь {interaction.user.id} попытался использовать /say вне сервера без прав.")
-            return False
-        return True
-
-    if not (interaction.user.id == bot_client.config.DEVELOPER_ID or (
-            isinstance(interaction.user, discord.Member) and (
-                interaction.user.guild_permissions.administrator or
-                interaction.user.guild_permissions.manage_channels or
-                interaction.user.guild_permissions.manage_messages
-            )
-    )):
-        await interaction.response.send_message("Нет прав для выполнения команды.", ephemeral=True)
-        logger.warning(f"Пользователь {interaction.user.id} попытался использовать /say без прав.")
+        if interaction.user.id == bot_client.config.DEVELOPER_ID:
+            return True
+        await interaction.response.send_message(
+            "Команда доступна только на сервере или разработчику.", ephemeral=True, delete_after=10
+        )
         return False
-    return True
 
-async def get_message_reference(interaction: discord.Interaction, reply: Optional[str]) -> tuple[Optional[discord.MessageReference], Optional[discord.Message]]:
-    """Получает ссылку на сообщение для ответа и само сообщение для резервного метода."""
+    permissions = (
+        interaction.user.guild_permissions.administrator,
+        interaction.user.guild_permissions.manage_channels,
+        interaction.user.guild_permissions.manage_messages
+    )
+    if interaction.user.id == bot_client.config.DEVELOPER_ID or (isinstance(interaction.user, discord.Member) and any(permissions)):
+        return True
+    await interaction.response.send_message(
+        "Нет прав для выполнения команды.", ephemeral=True, delete_after=10
+    )
+    return False
+
+async def get_message_reference(interaction: discord.Interaction, reply: Optional[str]) -> Tuple[Optional[discord.MessageReference], Optional[discord.Message]]:
+    """Получает ссылку на сообщение для ответа и само сообщение."""
     if not reply:
         return None, None
 
+    # Проверка, является ли reply URL сообщения
     url_pattern = r"https?://discord\.com/channels/(?:@me|\d+)/(\d+)/(\d+)"
     match = re.match(url_pattern, reply.strip())
     
@@ -48,47 +47,46 @@ async def get_message_reference(interaction: discord.Interaction, reply: Optiona
             target_message = await channel.fetch_message(message_id)
             return target_message.to_reference(fail_if_not_exists=False), target_message
         except (discord.NotFound, discord.HTTPException) as e:
-            await interaction.edit_original_response(content=f"Ошибка получения сообщения по ссылке: {str(e)}")
+            await interaction.response.send_message(
+                f"Ошибка получения сообщения по ссылке: {str(e)}", ephemeral=True, delete_after=10
+            )
             logger.error(f"Ошибка получения сообщения {message_id} для {interaction.user.id}: {e}")
             return None, None
 
+    # Проверка, является ли reply числовым ID
     try:
         message_id = int(reply)
         target_message = await interaction.channel.fetch_message(message_id)
         return target_message.to_reference(fail_if_not_exists=False), target_message
     except ValueError:
-        await interaction.edit_original_response(content="Ошибка: reply должен быть числовым ID или ссылкой на сообщение.")
+        await interaction.response.send_message(
+            "Ошибка: reply должен быть числовым ID или ссылкой на сообщение.", ephemeral=True, delete_after=10
+        )
         logger.error(f"Неверный reply от {interaction.user.id}: {reply}")
         return None, None
     except (discord.NotFound, discord.HTTPException) as e:
-        await interaction.edit_original_response(content=f"Ошибка получения сообщения: {str(e)}")
+        await interaction.response.send_message(
+            f"Ошибка получения сообщения: {str(e)}", ephemeral=True, delete_after=10
+        )
         logger.error(f"Ошибка получения сообщения {reply} для {interaction.user.id}: {e}")
         return None, None
 
-async def process_attachments(attachment: Optional[discord.Attachment], additional_attachments: List[discord.Attachment]) -> List[discord.File]:
-    """Загружает вложения (основное и дополнительные) и возвращает список discord.File."""
+async def process_attachments(attachments: List[discord.Attachment]) -> List[discord.File]:
+    """Загружает вложения и возвращает список discord.File."""
     discord_files = []
-    
-    if attachment:
-        if attachment.size > 25 * 1024 * 1024:
-            raise ValueError(f"Файл {attachment.filename} слишком большой (макс. 25 МБ).")
-        async with aiohttp.ClientSession() as session:
-            async with session.get(attachment.url) as resp:
-                if resp.status != 200:
-                    raise ValueError(f"Ошибка загрузки файла {attachment.filename}: HTTP {resp.status}")
-                data = await resp.read()
-                discord_files.append(discord.File(fp=io.BytesIO(data), filename=attachment.filename))
+    max_size = 25 * 1024 * 1024  # 25 МБ
+    max_files = 10  # Максимум 10 вложений
 
-    for att in additional_attachments[:10 - len(discord_files)]:
-        if att.size > 25 * 1024 * 1024:
-            raise ValueError(f"Файл {att.filename} слишком большой (макс. 25 МБ).")
-        async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession() as session:
+        for att in attachments[:max_files]:
+            if att.size > max_size:
+                raise ValueError(f"Файл {att.filename} слишком большой (макс. 25 МБ).")
             async with session.get(att.url) as resp:
                 if resp.status != 200:
                     raise ValueError(f"Ошибка загрузки файла {att.filename}: HTTP {resp.status}")
                 data = await resp.read()
                 discord_files.append(discord.File(fp=io.BytesIO(data), filename=att.filename))
-    
+
     return discord_files
 
 async def say(interaction: discord.Interaction, message: Optional[str] = None, bot_client=None, reply: Optional[str] = None, attachment: Optional[discord.Attachment] = None) -> None:
@@ -99,27 +97,37 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
     await interaction.response.defer(ephemeral=True)
 
     try:
-        additional_attachments = interaction.data.get('resolved', {}).get('attachments', {}).values()
-        additional_attachments = [discord.Attachment(data=att, state=interaction._state) for att in additional_attachments]
-        if attachment and str(attachment.id) in [str(att.id) for att in additional_attachments]:
-            additional_attachments = [att for att in additional_attachments if str(att.id) != str(attachment.id)]
+        # Собираем все вложения
+        attachments = [attachment] if attachment else []
+        additional_attachments = [
+            discord.Attachment(data=att, state=interaction._state)
+            for att in interaction.data.get('resolved', {}).get('attachments', {}).values()
+            if not attachment or str(att.get('id')) != str(attachment.id)
+        ]
+        attachments.extend(additional_attachments)
 
-        if reply and not (message or attachment or additional_attachments):
-            await interaction.edit_original_response(content="Для ответа на сообщение нужен текст или хотя бы один файл.")
-            logger.warning(f"Пользователь {interaction.user.id} указал reply без message и файлов.")
+        # Проверяем наличие контента
+        if reply and not (message or attachments):
+            await interaction.response.send_message(
+                "Для ответа на сообщение нужен текст или хотя бы один файл.", ephemeral=True, delete_after=10
+            )
             return
 
+        if not message and not attachments:
+            await interaction.response.send_message(
+                "Нельзя отправить пустое сообщение без файлов.", ephemeral=True, delete_after=10
+            )
+            return
+
+        # Получаем ссылку на сообщение
         reference, target_message = await get_message_reference(interaction, reply)
         if reference is None and reply:
             return
 
-        discord_files = await process_attachments(attachment, additional_attachments)
+        # Обрабатываем вложения
+        discord_files = await process_attachments(attachments)
 
-        if not message and not discord_files:
-            await interaction.edit_original_response(content="Нельзя отправить пустое сообщение без файлов.")
-            logger.warning(f"Пользователь {interaction.user.id} попытался отправить пустое сообщение без файлов.")
-            return
-
+        # Отправляем сообщение
         try:
             await interaction.channel.send(
                 content=message[:2000] if message else None,
@@ -127,7 +135,7 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
                 reference=reference
             )
         except discord.HTTPException as e:
-            if e.code == 50035 and reference and target_message:
+            if e.code == 50035 and reference and target_message:  # Слишком длинное сообщение
                 await target_message.reply(
                     content=message[:2000] if message else None,
                     files=discord_files or None
@@ -138,7 +146,7 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
         await interaction.delete_original_response()
 
     except ValueError as e:
-        await interaction.edit_original_response(content=str(e))
+        await interaction.response.send_message(str(e), ephemeral=True, delete_after=10)
         logger.error(f"Ошибка ValueError в /say для {interaction.user.id}: {e}")
     except discord.HTTPException as e:
         error_messages = {
@@ -146,33 +154,34 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
             50006: "Нельзя отправить пустое сообщение.",
             50013: "У бота нет прав для отправки сообщения или файлов."
         }
-        await interaction.edit_original_response(content=error_messages.get(e.code, f"Ошибка отправки: {e}"))
+        await interaction.response.send_message(
+            error_messages.get(e.code, f"Ошибка отправки: {e}"), ephemeral=True, delete_after=10
+        )
         logger.error(f"Ошибка HTTP в /say для {interaction.user.id}: {e}")
     except Exception as e:
-        await interaction.edit_original_response(content=f"Неизвестная ошибка: {e}")
+        await interaction.response.send_message(
+            f"Неизвестная ошибка: {e}", ephemeral=True, delete_after=10
+        )
         logger.error(f"Неизвестная ошибка в /say для {interaction.user.id}: {e}")
 
 def create_command(bot_client):
     """Создаёт команду /say и контекстное меню."""
-
     @app_commands.command(name="say", description=DESCRIPTION)
     @app_commands.describe(
         message="Текст, который бот должен отправить",
-        reply="ID сообщения на которое нужно ответить",
+        reply="ID сообщения, на которое нужно ответить",
         attachment="Файл для отправки"
     )
     async def say_command(interaction: discord.Interaction, message: Optional[str] = None, reply: Optional[str] = None, attachment: Optional[discord.Attachment] = None) -> None:
+        """Команда /say для отправки сообщения от имени бота."""
         await say(interaction, message, bot_client, reply, attachment)
 
     @app_commands.context_menu(name="ID сообщения")
     async def get_message_id(interaction: discord.Interaction, message: discord.Message) -> None:
+        """Получает и отправляет ID сообщения, автоматически удаляя ответ через 10 секунд."""
         try:
-            await interaction.response.send_message(f"```{message.id}```", ephemeral=True)
-            await asyncio.sleep(10)
+            await interaction.response.send_message(f"```{message.id}```", ephemeral=True, delete_after=10)
         except discord.HTTPException as e:
-            if e.code == 10062:
-                logger.warning(f"Взаимодействие истекло для {interaction.user.id}: {e}")
-            else:
-                logger.error(f"Ошибка в get_message_id для {interaction.user.id}: {e}\n{traceback.format_exc()}")
+            logger.error(f"Ошибка в get_message_id для {interaction.user.id}: {e}\n{traceback.format_exc()}")
 
     return say_command, get_message_id

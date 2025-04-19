@@ -316,8 +316,8 @@ class FirebaseManager:
     @backoff.on_exception(
         backoff.expo,
         Exception,
-        max_tries=5,  # Увеличено до 5 попыток
-        max_time=60,  # Увеличено до 60 секунд
+        max_tries=5,
+        max_time=60,
         factor=2,
         jitter=backoff.full_jitter
     )
@@ -338,7 +338,6 @@ class FirebaseManager:
                         logger.debug(f"Запланировано удаление устаревшего разговора {session_id} для пользователя {user_id}")
                 return updates
 
-            # Загрузка пользователей по одному для минимизации нагрузки
             def sync_get_users():
                 return self._db.child("conversations").get() or {}
 
@@ -346,7 +345,6 @@ class FirebaseManager:
             total_users = len(users)
             logger.debug(f"Найдено {total_users} пользователей для проверки")
 
-            # Пакетное удаление
             batch_updates = {}
             processed_users = 0
             processed_sessions = 0
@@ -358,7 +356,6 @@ class FirebaseManager:
                 processed_users += 1
                 processed_sessions += len(updates)
                 
-                # Ограничение размера пакета (например, 100 обновлений)
                 if len(batch_updates) >= 100:
                     def sync_batch_update():
                         self._db.update(batch_updates)
@@ -366,7 +363,6 @@ class FirebaseManager:
                     logger.debug(f"Выполнено пакетное удаление {len(batch_updates)} сессий")
                     batch_updates = {}
 
-            # Обработка оставшихся обновлений
             if batch_updates:
                 def sync_final_update():
                     self._db.update(batch_updates)
@@ -377,6 +373,54 @@ class FirebaseManager:
         except Exception as e:
             logger.error(f"Ошибка очистки устаревших разговоров в Realtime Database: {e}")
             raise Exception(f"Ошибка очистки разговоров: {e}")
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=60,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def cleanup_expired_giveaways(self, current_time: float, retention_seconds: float = 7 * 24 * 60 * 60) -> None:
+        """Очистка устаревших розыгрышей из Realtime Database."""
+        self._ensure_db_initialized()
+        try:
+            logger.debug("Начало очистки устаревших розыгрышей в Realtime Database")
+
+            def sync_get_giveaways():
+                return self._db.child("giveaways").get() or {"active": {}, "completed": {}}
+
+            giveaways_data = await self._run_sync_in_executor(sync_get_giveaways)
+            batch_updates = {}
+            processed_giveaways = 0
+
+            # Обработка завершённых розыгрышей
+            for custom_id, giveaway_data in giveaways_data.get("completed", {}).items():
+                completed_at = giveaway_data.get("completed_at", 0)
+                if current_time - completed_at > retention_seconds:
+                    batch_updates[f"giveaways/completed/{custom_id}"] = None
+                    logger.debug(f"Запланировано удаление устаревшего завершённого розыгрыша {custom_id}")
+                    processed_giveaways += 1
+
+            # Обработка активных розыгрышей
+            for custom_id, giveaway_data in giveaways_data.get("active", {}).items():
+                end_time = giveaway_data.get("end_time", 0)
+                if current_time - end_time > retention_seconds:
+                    batch_updates[f"giveaways/active/{custom_id}"] = None
+                    logger.debug(f"Запланировано удаление устаревшего активного розыгрыша {custom_id}")
+                    processed_giveaways += 1
+
+            if batch_updates:
+                def sync_batch_update():
+                    self._db.update(batch_updates)
+                await self._run_sync_in_executor(sync_batch_update)
+                logger.debug(f"Выполнено пакетное удаление {len(batch_updates)} розыгрышей")
+
+            logger.info(f"Очистка завершена: удалено {processed_giveaways} устаревших розыгрышей")
+        except Exception as e:
+            logger.error(f"Ошибка очистки устаревших розыгрышей в Realtime Database: {e}")
+            raise Exception(f"Ошибка очистки розыгрышей: {e}")
 
     @backoff.on_exception(
         backoff.expo,

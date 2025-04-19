@@ -81,12 +81,24 @@ async def load_giveaways(bot_client):
         firebase_manager = await bot_client._ensure_firebase_initialized()
         data = await firebase_manager.load_giveaways()
         current_time = int(time.time())
+        expired_giveaways = []
+
+        # Обработка активных розыгрышей
         for custom_id, giveaway_data in data.get("active", {}).items():
             giveaway = Giveaway.from_dict(giveaway_data, bot_client)
-            if giveaway:
-                active_giveaways[custom_id] = giveaway
+            if not giveaway:
+                logger.debug(f"Удаление недоступного активного розыгрыша {custom_id}")
+                expired_giveaways.append(f"giveaways/active/{custom_id}")
+                continue
+            if current_time >= giveaway.end_time:
+                giveaway.completed_at = current_time
+                completed_giveaways[custom_id] = giveaway
+                expired_giveaways.append(f"giveaways/active/{custom_id}")
+                logger.debug(f"Активный розыгрыш {custom_id} истёк, перемещён в завершённые")
             else:
-                logger.debug(f"Пропущен активный розыгрыш {custom_id} из-за недоступных данных")
+                active_giveaways[custom_id] = giveaway
+
+        # Обработка завершённых розыгрышей
         for custom_id, giveaway_data in data.get("completed", {}).items():
             completed_at = giveaway_data.get("completed_at", 0)
             if current_time - completed_at <= COMPLETED_GIVEAWAY_RETENTION:
@@ -94,9 +106,20 @@ async def load_giveaways(bot_client):
                 if giveaway:
                     completed_giveaways[custom_id] = giveaway
                 else:
-                    logger.debug(f"Пропущен завершённый розыгрыш {custom_id} из-за недоступных данных")
+                    logger.debug(f"Удаление недоступного завершённого розыгрыша {custom_id}")
+                    expired_giveaways.append(f"giveaways/completed/{custom_id}")
             else:
-                logger.debug(f"Завершённый розыгрыш {custom_id} устарел и будет удалён")
+                logger.debug(f"Завершённый розыгрыш {custom_id} устарел, будет удалён")
+                expired_giveaways.append(f"giveaways/completed/{custom_id}")
+
+        # Удаление недоступных и устаревших розыгрышей из Firebase
+        if expired_giveaways:
+            def sync_remove_expired():
+                updates = {path: None for path in expired_giveaways}
+                firebase_manager._db.update(updates)
+            await bot_client._run_sync_in_executor(sync_remove_expired)
+            logger.debug(f"Удалено {len(expired_giveaways)} недоступных или устаревших розыгрышей из Firebase")
+
         logger.info(f"Загружено {len(active_giveaways)} активных и {len(completed_giveaways)} завершённых розыгрышей")
     except Exception as e:
         logger.error(f"Ошибка загрузки розыгрышей: {e}")
@@ -348,23 +371,29 @@ async def resume_giveaways(bot_client):
         logger.error("BotClient не имеет атрибутов giveaways или completed_giveaways")
         return
     try:
+        # Загружаем розыгрыши
         bot_client.giveaways, bot_client.completed_giveaways = await load_giveaways(bot_client)
-        current_time = int(time.time())
-        expired_giveaways = []
-        
+
+        # Очистка устаревших розыгрышей
+        firebase_manager = await bot_client._ensure_firebase_initialized()
+        await firebase_manager.cleanup_expired_giveaways(current_time=int(time.time()))
+
+        # Возобновление активных розыгрышей
         for custom_id, giveaway in list(bot_client.giveaways.items()):
-            # Проверка доступности сервера и канала
             guild = bot_client.bot.get_guild(giveaway.channel.guild.id) if giveaway.channel.guild else None
             if not guild:
                 logger.warning(f"Сервер {giveaway.channel.guild.id} недоступен для розыгрыша {custom_id}")
-                expired_giveaways.append(custom_id)
+                del bot_client.giveaways[custom_id]
+                await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
                 continue
             channel = guild.get_channel(giveaway.channel.id)
             if not channel:
                 logger.warning(f"Канал {giveaway.channel.id} недоступен для розыгрыша {custom_id}")
-                expired_giveaways.append(custom_id)
+                del bot_client.giveaways[custom_id]
+                await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
                 continue
-            
+
+            current_time = int(time.time())
             if giveaway.end_time > current_time:
                 remaining_time = giveaway.end_time - current_time
                 logger.debug(f"Возобновление розыгрыша {custom_id} с оставшимся временем {remaining_time} секунд")
@@ -372,20 +401,9 @@ async def resume_giveaways(bot_client):
                 asyncio.create_task(update_giveaway_message(bot_client, giveaway))
             else:
                 logger.info(f"Розыгрыш {custom_id} истёк, завершаем")
-                expired_giveaways.append(custom_id)
                 asyncio.create_task(end_giveaway(bot_client, giveaway))
-        
-        # Очистка устаревших завершённых розыгрышей
-        for custom_id, giveaway in list(bot_client.completed_giveaways.items()):
-            if current_time - giveaway.completed_at > COMPLETED_GIVEAWAY_RETENTION:
-                logger.debug(f"Удаление устаревшего завершённого розыгрыша {custom_id}")
-                del bot_client.completed_giveaways[custom_id]
-        
-        # Сохранение обновлённых данных
-        if expired_giveaways or bot_client.completed_giveaways:
-            await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
-        
-        logger.info(f"Возобновлено {len(bot_client.giveaways) - len(expired_giveaways)} активных розыгрышей")
+
+        logger.info(f"Возобновлено {len(bot_client.giveaways)} активных розыгрышей")
     except Exception as e:
         logger.error(f"Ошибка в resume_giveaways: {e}")
 
@@ -495,11 +513,16 @@ async def end_giveaway(bot_client, giveaway):
             await message.edit(content=f"{giveaway.host.mention} {giveaway.winner.mention}\n", embed=embed, view=view)
         giveaway.completed_at = int(time.time())
         bot_client.completed_giveaways[giveaway.custom_id] = giveaway
+        bot_client.giveaways.pop(giveaway.custom_id, None)
+        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
     except discord.NotFound:
         logger.error(f"Сообщение розыгрыша {giveaway.message_id} не найдено")
+        bot_client.completed_giveaways[giveaway.custom_id] = giveaway
+        bot_client.giveaways.pop(giveaway.custom_id, None)
+        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
     except Exception as e:
         logger.error(f"Ошибка завершения розыгрыша {giveaway.custom_id}: {e}")
-    finally:
+        bot_client.completed_giveaways[giveaway.custom_id] = giveaway
         bot_client.giveaways.pop(giveaway.custom_id, None)
         await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
 
