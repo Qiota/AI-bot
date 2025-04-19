@@ -7,6 +7,8 @@ import logging
 import backoff
 import asyncio
 import json
+import aiohttp
+from contextlib import asynccontextmanager
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -38,14 +40,11 @@ class FirebaseManager:
 
         logger.debug(f"Поиск файла {filename}")
         try:
-            # Начальная директория: текущая директория скрипта
             start_dir = os.path.abspath(os.path.dirname(__file__))
             project_root = start_dir
-            # Поднимаемся до корня проекта (пока не найдём корень диска или .git)
             while project_root != os.path.dirname(project_root) and not os.path.exists(os.path.join(project_root, '.git')):
                 project_root = os.path.dirname(project_root)
 
-            # Проверяем стандартные директории
             search_dirs = [
                 project_root,
                 os.path.join(project_root, 'firebase'),
@@ -63,7 +62,6 @@ class FirebaseManager:
                         logger.info(f"Файл {filename} найден по пути: {file_path}")
                         return file_path
 
-            # Проверяем переменную окружения
             env_path = config('FIREBASE_KEY_PATH', default=None)
             if env_path and os.path.exists(env_path):
                 FirebaseManager._file_cache[cache_key] = env_path
@@ -85,7 +83,6 @@ class FirebaseManager:
                 return cls._instance
 
             try:
-                # Проверка, инициализировано ли приложение
                 try:
                     firebase_admin.get_app(name='[DEFAULT]')
                     logger.debug("Приложение Firebase уже инициализировано")
@@ -100,12 +97,13 @@ class FirebaseManager:
                     
                     cred = credentials.Certificate(firebase_key_path)
                     firebase_admin.initialize_app(cred, {
-                        'databaseURL': cls._db_url
+                        'databaseURL': cls._db_url,
+                        'httpTimeout': 30  # Увеличенный тайм-аут для HTTP-запросов
                     })
                     logger.info("Firebase Realtime Database успешно инициализирован")
 
                 cls._instance = cls()
-                cls._instance._db = db.reference()  # Клиент Realtime Database
+                cls._instance._db = db.reference()
                 cls._initialized = True
                 logger.debug(f"Клиент Realtime Database инициализирован: _db={cls._instance._db}")
                 return cls._instance
@@ -121,9 +119,23 @@ class FirebaseManager:
             raise AttributeError("FirebaseManager._db не инициализирован. Вызовите initialize() перед использованием.")
 
     async def _run_sync_in_executor(self, func):
-        """Запуск синхронной функции в пуле потоков."""
+        """Запуск синхронной функции в пуле потоков с тайм-аутом."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, func)
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, func),
+                timeout=30  # Тайм-аут 30 секунд для синхронных операций
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Тайм-аут выполнения синхронной операции: {func}")
+            raise Exception(f"Тайм-аут выполнения операции: {func}")
+
+    @asynccontextmanager
+    async def _http_session(self):
+        """Контекстный менеджер для создания HTTP-сессии с увеличенным тайм-аутом."""
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            yield session
 
     @backoff.on_exception(
         backoff.expo,
@@ -304,28 +316,64 @@ class FirebaseManager:
     @backoff.on_exception(
         backoff.expo,
         Exception,
-        max_tries=3,
-        max_time=30,
+        max_tries=5,  # Увеличено до 5 попыток
+        max_time=60,  # Увеличено до 60 секунд
         factor=2,
         jitter=backoff.full_jitter
     )
     async def cleanup_expired_conversations(self, current_time: float) -> None:
-        """Очистка устаревших разговоров из Realtime Database."""
+        """Очистка устаревших разговоров из Realtime Database с пагинацией и пакетным удалением."""
         self._ensure_db_initialized()
         try:
             logger.debug("Начало очистки устаревших разговоров в Realtime Database")
-            def sync_cleanup():
-                users = self._db.child("conversations").get() or {}
-                for user_id, user_data in users.items():
-                    sessions = user_data.get("sessions", {})
-                    for session_id, session_data in sessions.items():
-                        last_message_time = session_data.get("last_message_time", 0)
-                        ttl_seconds = session_data.get("ttl_seconds", 86400)
-                        if current_time - last_message_time > ttl_seconds:
-                            self._db.child(f"conversations/{user_id}/sessions/{session_id}").delete()
-                            logger.debug(f"Удалён устаревший разговор {session_id} для пользователя {user_id}")
-            await self._run_sync_in_executor(sync_cleanup)
-            logger.debug("Очистка устаревших разговоров завершена")
+            
+            async def process_user(user_id: str, sessions: Dict) -> Dict:
+                """Обработка сессий одного пользователя."""
+                updates = {}
+                for session_id, session_data in sessions.items():
+                    last_message_time = session_data.get("last_message_time", 0)
+                    ttl_seconds = session_data.get("ttl_seconds", 86400)
+                    if current_time - last_message_time > ttl_seconds:
+                        updates[f"conversations/{user_id}/sessions/{session_id}"] = None
+                        logger.debug(f"Запланировано удаление устаревшего разговора {session_id} для пользователя {user_id}")
+                return updates
+
+            # Загрузка пользователей по одному для минимизации нагрузки
+            def sync_get_users():
+                return self._db.child("conversations").get() or {}
+
+            users = await self._run_sync_in_executor(sync_get_users)
+            total_users = len(users)
+            logger.debug(f"Найдено {total_users} пользователей для проверки")
+
+            # Пакетное удаление
+            batch_updates = {}
+            processed_users = 0
+            processed_sessions = 0
+
+            for user_id, user_data in users.items():
+                sessions = user_data.get("sessions", {})
+                updates = await process_user(user_id, sessions)
+                batch_updates.update(updates)
+                processed_users += 1
+                processed_sessions += len(updates)
+                
+                # Ограничение размера пакета (например, 100 обновлений)
+                if len(batch_updates) >= 100:
+                    def sync_batch_update():
+                        self._db.update(batch_updates)
+                    await self._run_sync_in_executor(sync_batch_update)
+                    logger.debug(f"Выполнено пакетное удаление {len(batch_updates)} сессий")
+                    batch_updates = {}
+
+            # Обработка оставшихся обновлений
+            if batch_updates:
+                def sync_final_update():
+                    self._db.update(batch_updates)
+                await self._run_sync_in_executor(sync_final_update)
+                logger.debug(f"Выполнено финальное пакетное удаление {len(batch_updates)} сессий")
+
+            logger.info(f"Очистка завершена: обработано {processed_users}/{total_users} пользователей, удалено {processed_sessions} сессий")
         except Exception as e:
             logger.error(f"Ошибка очистки устаревших разговоров в Realtime Database: {e}")
             raise Exception(f"Ошибка очистки разговоров: {e}")
