@@ -5,6 +5,7 @@ import aiohttp
 import io
 import re
 import asyncio
+import traceback
 from ..systemLog import logger
 
 DESCRIPTION = "Говорить от имени бота, с файлами или ответом на сообщение"
@@ -37,14 +38,12 @@ async def get_message_reference(interaction: discord.Interaction, reply: Optiona
     if not reply:
         return None, None
 
-    # Обработка URL (включая @me для прямых сообщений)
     url_pattern = r"https?://discord\.com/channels/(?:@me|\d+)/(\d+)/(\d+)"
     match = re.match(url_pattern, reply.strip())
     
     if match:
         channel_id, message_id = map(int, match.groups())
         try:
-            # Для прямых сообщений (@me) или сервера
             channel = interaction.client.get_channel(channel_id) or await interaction.client.fetch_channel(channel_id)
             target_message = await channel.fetch_message(message_id)
             return target_message.to_reference(fail_if_not_exists=False), target_message
@@ -53,7 +52,6 @@ async def get_message_reference(interaction: discord.Interaction, reply: Optiona
             logger.error(f"Ошибка получения сообщения {message_id} для {interaction.user.id}: {e}")
             return None, None
 
-    # Обработка ID сообщения
     try:
         message_id = int(reply)
         target_message = await interaction.channel.fetch_message(message_id)
@@ -71,7 +69,6 @@ async def process_attachments(attachment: Optional[discord.Attachment], addition
     """Загружает вложения (основное и дополнительные) и возвращает список discord.File."""
     discord_files = []
     
-    # Обработка основного вложения (attachment)
     if attachment:
         if attachment.size > 25 * 1024 * 1024:
             raise ValueError(f"Файл {attachment.filename} слишком большой (макс. 25 МБ).")
@@ -82,7 +79,6 @@ async def process_attachments(attachment: Optional[discord.Attachment], addition
                 data = await resp.read()
                 discord_files.append(discord.File(fp=io.BytesIO(data), filename=attachment.filename))
 
-    # Обработка дополнительных вложений (до 10 файлов в сумме)
     for att in additional_attachments[:10 - len(discord_files)]:
         if att.size > 25 * 1024 * 1024:
             raise ValueError(f"Файл {att.filename} слишком большой (макс. 25 МБ).")
@@ -103,14 +99,11 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
     await interaction.response.defer(ephemeral=True)
 
     try:
-        # Получение дополнительных вложений
         additional_attachments = interaction.data.get('resolved', {}).get('attachments', {}).values()
         additional_attachments = [discord.Attachment(data=att, state=interaction._state) for att in additional_attachments]
-        # Удаляем основное вложение из списка дополнительных, чтобы избежать дублирования
         if attachment and str(attachment.id) in [str(att.id) for att in additional_attachments]:
             additional_attachments = [att for att in additional_attachments if str(att.id) != str(attachment.id)]
 
-        # Проверка: если есть reply, то должен быть message или файлы
         if reply and not (message or attachment or additional_attachments):
             await interaction.edit_original_response(content="Для ответа на сообщение нужен текст или хотя бы один файл.")
             logger.warning(f"Пользователь {interaction.user.id} указал reply без message и файлов.")
@@ -118,17 +111,15 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
 
         reference, target_message = await get_message_reference(interaction, reply)
         if reference is None and reply:
-            return  # Ошибка уже обработана в get_message_reference
+            return
 
         discord_files = await process_attachments(attachment, additional_attachments)
 
-        # Если нет ни сообщения, ни файлов, отправка невозможна
         if not message and not discord_files:
             await interaction.edit_original_response(content="Нельзя отправить пустое сообщение без файлов.")
             logger.warning(f"Пользователь {interaction.user.id} попытался отправить пустое сообщение без файлов.")
             return
 
-        # Попробуем отправить с использованием reference
         try:
             await interaction.channel.send(
                 content=message[:2000] if message else None,
@@ -175,9 +166,13 @@ def create_command(bot_client):
 
     @app_commands.context_menu(name="ID сообщения")
     async def get_message_id(interaction: discord.Interaction, message: discord.Message) -> None:
-        await interaction.response.send_message(f"```{message.id}```", ephemeral=True)
-        
-        await asyncio.sleep(10)
-        await interaction.delete_original_response()
+        try:
+            await interaction.response.send_message(f"```{message.id}```", ephemeral=True)
+            await asyncio.sleep(10)
+        except discord.HTTPException as e:
+            if e.code == 10062:
+                logger.warning(f"Взаимодействие истекло для {interaction.user.id}: {e}")
+            else:
+                logger.error(f"Ошибка в get_message_id для {interaction.user.id}: {e}\n{traceback.format_exc()}")
 
     return say_command, get_message_id

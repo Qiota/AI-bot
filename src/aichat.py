@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands, Forbidden, HTTPException
 import asyncio
-from typing import List, Dict, Optional, DefaultDict, Set
+from typing import List, Dict, Optional, DefaultDict, Set, Tuple
 from g4f.client import AsyncClient as G4FClient
 from g4f.Provider import PollinationsAI
 from .systemLog import logger
@@ -17,7 +17,7 @@ import json
 import hashlib
 import backoff
 from aiohttp import ClientSession, ClientTimeout
-from g4f.errors import ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError
+from g4f.errors import ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, ResponseStatusError
 import g4f
 from datetime import datetime, timezone
 import traceback
@@ -67,6 +67,9 @@ class BotClient:
         self.message_to_response: Dict[str | int, int] = {}
         self.user_settings: DefaultDict[str, Dict[str, int]] = defaultdict(lambda: {"max_response_length": 2000})
         self.last_message_time: DefaultDict[str, float] = defaultdict(float)
+        # Очереди и семафоры для моделей
+        self.model_queues: Dict[str, asyncio.Queue] = {}
+        self.model_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._initialize_settings()
         self.tree.add_command(prompt_command(self))
         self.tree.add_command(restrict_command(self))
@@ -112,6 +115,8 @@ class BotClient:
             else:
                 self.models_loaded = True
                 logger.info("Модели успешно загружены при старте бота")
+                # Инициализация очередей и семафоров для моделей
+                self._initialize_model_queues()
         except Exception as e:
             logger.error(f"Критическая ошибка загрузки моделей при старте бота: {e}\n{traceback.format_exc()}")
             self.models_loaded = False
@@ -144,9 +149,19 @@ class BotClient:
         self.request_settings: Dict[str, float | int] = {
             "rate_limit_delay": 3.0,
             "max_retries": 3,
-            "retry_delay_base": 5.0
+            "retry_delay_base": 5.0,
+            "max_queue_size": 5,  # Максимальный размер очереди для каждой модели
+            "max_concurrent_requests": 2  # Максимум одновременных запросов на модель
         }
         self.spam_cooldown: float = 3.0
+
+    def _initialize_model_queues(self) -> None:
+        """Инициализация очередей и семафоров для каждой модели."""
+        for model_type in ["text", "vision"]:
+            for model in self.models[model_type]:
+                self.model_queues[model] = asyncio.Queue(maxsize=self.request_settings["max_queue_size"])
+                self.model_semaphores[model] = asyncio.Semaphore(self.request_settings["max_concurrent_requests"])
+                logger.debug(f"Инициализирована очередь и семафор для модели {model} ({model_type})")
 
     async def check_spam(self, user_id: str) -> bool:
         """Проверка на спам от пользователя."""
@@ -176,6 +191,7 @@ class BotClient:
                     else:
                         self.models_loaded = True
                         logger.info("Модели успешно обновлены в периодическом обновлении")
+                        self._initialize_model_queues()  # Реинициализация очередей при обновлении моделей
                 await asyncio.sleep(3600)
             except Exception as e:
                 logger.error(f"Ошибка периодического обновления моделей: {e}\n{traceback.format_exc()}")
@@ -442,7 +458,6 @@ class BotClient:
             user_content = [{"type": "text", "text": text}] if text else []
             user_content.extend({"type": "image_url", "image_url": {"url": url}} for url in attachments)
             
-            # Гарантируем, что системный промпт всегда первый
             messages = [{"role": "system", "content": system_prompt}] + context + [
                 {"role": "user", "content": user_content}
             ]
@@ -481,6 +496,72 @@ class BotClient:
         message_data = json.dumps(messages, sort_keys=True)
         return f"{model_type}:{hashlib.sha256(message_data.encode()).hexdigest()}"
 
+    async def _enqueue_request(self, model: str, messages: List[Dict], max_tokens: int, session: ClientSession) -> Optional[str]:
+        """Добавление запроса в очередь модели и выполнение его."""
+        queue = self.model_queues.get(model)
+        if not queue:
+            logger.error(f"Очередь для модели {model} не найдена")
+            return None
+
+        try:
+            # Добавляем запрос в очередь
+            await queue.put((messages, max_tokens, session))
+            logger.debug(f"Запрос добавлен в очередь модели {model}, размер очереди: {queue.qsize()}")
+
+            async with self.model_semaphores[model]:
+                # Извлекаем запрос из очереди
+                messages, max_tokens, session = await queue.get()
+                try:
+                    response = await self.g4f_client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        web_search=True,
+                        session=session
+                    )
+                    response_text = response.choices[0].message.content.strip()
+                    logger.debug(f"Успешный ответ от модели {model}: {len(response_text)} символов")
+                    return response_text
+                finally:
+                    queue.task_done()
+        except Exception as e:
+            logger.error(f"Ошибка обработки запроса в очереди для модели {model}: {e}\n{traceback.format_exc()}")
+            queue.task_done()
+            raise
+
+    async def _distribute_request(self, model_type: str, messages: List[Dict], max_tokens: int, session: ClientSession) -> Optional[str]:
+        """Распределение запроса между моделями, если очередь заполнена."""
+        available_models = [m for m in self.models[model_type] if m not in self.models["unavailable"][model_type]]
+        if not available_models:
+            logger.error(f"Нет доступных моделей для типа {model_type}")
+            return None
+
+        # Сортируем модели по размеру очереди (от меньшего к большему)
+        model_queue_sizes = [(model, self.model_queues[model].qsize()) for model in available_models]
+        sorted_models = sorted(model_queue_sizes, key=lambda x: x[1])
+
+        for model, _ in sorted_models:
+            queue = self.model_queues[model]
+            if not queue.full():
+                logger.debug(f"Выбрана модель {model} с размером очереди {queue.qsize()}")
+                return await self._enqueue_request(model, messages, max_tokens, session)
+
+        # Если все очереди заполнены, ждем освобождения любой очереди
+        logger.warning(f"Все очереди для {model_type} заполнены, ожидание освобождения")
+        tasks = [asyncio.create_task(queue.join()) for model, queue in [(m[0], self.model_queues[m[0]]) for m in sorted_models]]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+
+        # Пробуем снова распределить запрос
+        for model, _ in sorted_models:
+            if not self.model_queues[model].full():
+                logger.debug(f"Повторная попытка с моделью {model} после освобождения очереди")
+                return await self._enqueue_request(model, messages, max_tokens, session)
+
+        logger.error(f"Не удалось распределить запрос для {model_type}: все очереди заполнены")
+        return None
+
     @backoff.on_exception(
         backoff.expo,
         (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, ConnectionError, TimeoutError),
@@ -490,7 +571,7 @@ class BotClient:
         jitter=backoff.full_jitter
     )
     async def _try_generate_response(self, messages: List[Dict], has_image: bool, max_tokens: int) -> Optional[str]:
-        """Попытка генерации ответа с ротацией моделей."""
+        """Попытка генерации ответа с использованием очередей и ротацией моделей."""
         model_type = "vision" if has_image else "text"
         available_models = [m for m in self.models[model_type] if m not in self.models["unavailable"][model_type]]
         
@@ -505,60 +586,69 @@ class BotClient:
             reverse=True
         )
 
-        for selected_model in sorted_models:
-            logger.debug(f"Попытка с моделью {selected_model} для типа {model_type}")
-            cache_key = self._generate_cache_key(messages, model_type)
-            
-            # Отладка: логируем отправляемые messages
-            logger.debug(f"Отправляем messages в API: {json.dumps(messages, ensure_ascii=False, indent=2)}")
-            
-            try:
-                cached_response = await self.firebase_manager.load_cache(cache_key)
-                if cached_response and cached_response.get("timestamp", 0) + self.cache_limits["cache_ttl_seconds"] > time.time():
-                    logger.debug(f"Ответ найден в кэше для {cache_key}")
-                    return cached_response["response"]
-            except Exception as e:
-                logger.error(f"Ошибка чтения кэша для {cache_key}: {e}")
+        cache_key = self._generate_cache_key(messages, model_type)
+        # Проверка кэша
+        try:
+            cached_response = await self.firebase_manager.load_cache(cache_key)
+            if cached_response and cached_response.get("timestamp", 0) + self.cache_limits["cache_ttl_seconds"] > time.time():
+                logger.debug(f"Ответ найден в кэше для {cache_key}")
+                return cached_response["response"]
+        except Exception as e:
+            logger.error(f"Ошибка чтения кэша для {cache_key}: {e}")
 
-            try:
-                timeout = ClientTimeout(total=30)
-                headers = {"User-Agent": "BotClient/1.0 (DiscordBot; PollinationsAI)"}
-                async with ClientSession(timeout=timeout, headers=headers) as session:
-                    response = await self.g4f_client.chat.completions.create(
-                        model=selected_model,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        web_search=True,
-                        session=session
-                    )
-                    response_text = response.choices[0].message.content.strip()
-
-                    if not response_text:
-                        logger.warning(f"Пустой ответ от модели {selected_model}")
-                        self.models["model_stats"][model_type][selected_model]["failure"] += 1
-                        continue
-
-                    logger.debug(f"Успешный ответ от {selected_model}: {len(response_text)} символов")
-                    self.models["model_stats"][model_type][selected_model]["success"] += 1
-                    self.models["last_successful"][model_type] = selected_model
-                    await self.firebase_manager.save_models({
-                        **self.models,
-                        "timestamp": time.time()
-                    })
-
+        timeout = ClientTimeout(total=60)  # Увеличен таймаут
+        headers = {"User-Agent": "BotClient/1.0 (DiscordBot; PollinationsAI)"}
+        async with ClientSession(timeout=timeout, headers=headers) as session:
+            for selected_model in sorted_models:
+                logger.debug(f"Попытка с моделью {selected_model} для типа {model_type}")
+                
+                for attempt in range(self.request_settings["max_retries"]):
                     try:
-                        await self.firebase_manager.save_cache(cache_key, {
-                            "response": response_text,
+                        response_text = await self._enqueue_request(selected_model, messages, max_tokens, session)
+                        if not response_text:
+                            logger.warning(f"Пустой ответ от модели {selected_model} на попытке {attempt + 1}")
+                            raise ValueError("Empty response from model")
+
+                        self.models["model_stats"][model_type][selected_model]["success"] += 1
+                        self.models["last_successful"][model_type] = selected_model
+                        await self.firebase_manager.save_models({
+                            **self.models,
                             "timestamp": time.time()
                         })
-                        logger.debug(f"Ответ сохранён в кэш для {cache_key}")
+
+                        try:
+                            await self.firebase_manager.save_cache(cache_key, {
+                                "response": response_text,
+                                "timestamp": time.time()
+                            })
+                            logger.debug(f"Ответ сохранён в кэш для {cache_key}")
+                        except Exception as e:
+                            logger.error(f"Ошибка сохранения кэша: {e}")
+
+                        return response_text
+
+                    except ResponseStatusError as e:
+                        if e.status >= 500 and attempt < self.request_settings["max_retries"] - 1:
+                            logger.warning(f"Серверная ошибка {e.status} для {selected_model}, попытка {attempt + 1}, повтор через 5 секунд")
+                            await asyncio.sleep(self.request_settings["retry_delay_base"])
+                        else:
+                            logger.error(f"Не удалось обработать запрос для {selected_model} после {attempt + 1} попыток: {e}")
+                            break
+
+                    except (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, ConnectionError, TimeoutError) as e:
+                        logger.error(f"Ошибка G4F для {selected_model} на попытке {attempt + 1}: {e}\n{traceback.format_exc()}")
+                        if attempt < self.request_settings["max_retries"] - 1:
+                            logger.warning(f"Повторная попытка через 5 секунд для {selected_model}")
+                            await asyncio.sleep(self.request_settings["retry_delay_base"])
+                        else:
+                            break
+
                     except Exception as e:
-                        logger.error(f"Ошибка сохранения кэша: {e}")
+                        logger.error(f"Неизвестная ошибка для {selected_model} на попытке {attempt + 1}: {e}\n{traceback.format_exc()}")
+                        break
 
-                    return response_text
-
-            except (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError) as e:
-                logger.error(f"Ошибка G4F для {selected_model}: {e}\n{traceback.format_exc()}")
+                # Если все попытки для модели провалились
+                logger.error(f"Все попытки для {selected_model} не удались, помечаем как недоступную")
                 self.models["model_stats"][model_type][selected_model]["failure"] += 1
                 self.models["unavailable"][model_type].append(selected_model)
                 await self.firebase_manager.save_models({
@@ -566,21 +656,29 @@ class BotClient:
                     "timestamp": time.time()
                 })
                 await asyncio.sleep(3)  # Задержка перед следующей моделью
-                continue
 
-            except (ConnectionError, TimeoutError) as e:
-                logger.error(f"Сетевая ошибка для {selected_model}: {e}\n{traceback.format_exc()}")
-                self.models["model_stats"][model_type][selected_model]["failure"] += 1
-                await asyncio.sleep(3)
-                continue
+            # Если все модели заняты или провалились, пробуем распределить запрос
+            logger.debug(f"Попытка распределения запроса между моделями для {model_type}")
+            response_text = await self._distribute_request(model_type, messages, max_tokens, session)
+            if response_text:
+                # Обновляем статистику для последней успешной модели
+                last_model = self.models["last_successful"][model_type] or sorted_models[0]
+                self.models["model_stats"][model_type][last_model]["success"] += 1
+                await self.firebase_manager.save_models({
+                    **self.models,
+                    "timestamp": time.time()
+                })
+                try:
+                    await self.firebase_manager.save_cache(cache_key, {
+                        "response": response_text,
+                        "timestamp": time.time()
+                    })
+                    logger.debug(f"Ответ сохранён в кэш для {cache_key}")
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения кэша: {e}")
+                return response_text
 
-            except Exception as e:
-                logger.error(f"Неизвестная ошибка для {selected_model}: {e}\n{traceback.format_exc()}")
-                self.models["model_stats"][model_type][selected_model]["failure"] += 1
-                await asyncio.sleep(3)
-                continue
-
-        logger.error(f"Все модели ({model_type}) не смогли обработать запрос")
+        logger.error(f"Все модели ({model_type}) не смогли обработать запрос после всех попыток")
         return None
 
     async def get_context(self, user_id: str, channel: discord.abc.Messageable) -> List[Dict]:
@@ -625,7 +723,6 @@ class BotClient:
         logger.debug(f"Исходный промпт для {prompt_key} ({'vision' if has_image else 'text'}): {base_prompt}")
         
         current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        # Альтернативный формат для усиления личности
         formatted_prompt = (
             f"[PERSONALITY]\n{base_prompt.format(now=current_date)}\n"
             f"[INSTRUCTIONS]\n{'Analyze the image and respond according to the personality.' if has_image else 'Respond according to the personality.'}"
