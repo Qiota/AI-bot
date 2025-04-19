@@ -10,7 +10,7 @@ from collections import defaultdict
 import uuid
 from .commands.prompt import load_user_prompt, default_prompt, create_command as prompt_command
 from .commands.restrict import check_user_restriction, check_bot_access, create_command as restrict_command
-from .commands.giveaway import create_command as giveaway_command  # Добавляем импорт для розыгрышей
+from .commands.giveaway import create_command as giveaway_command
 from .firebase.firebase_manager import FirebaseManager
 import aiohttp
 import json
@@ -19,10 +19,18 @@ import backoff
 from aiohttp import ClientSession, ClientTimeout
 from g4f.errors import ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError
 import g4f
+from datetime import datetime, timezone
+import traceback
 
 # Безопасная проверка версии g4f
 version = getattr(g4f, "__version__", "неизвестна")
 logger.info(f"Используемая версия g4f: {version}")
+
+# Резервный список моделей
+DEFAULT_MODELS = {
+    "text": ["gpt-3.5-turbo"],
+    "vision": ["clip-vit"]
+}
 
 class BotClient:
     """Клиент Discord-бота с поддержкой текстовых и vision моделей через G4F и PollinationsAI."""
@@ -35,25 +43,25 @@ class BotClient:
         self.tree: app_commands.CommandTree = app_commands.CommandTree(self.bot)
         self.g4f_client: G4FClient = G4FClient(provider=PollinationsAI)
         self.firebase_manager: Optional[FirebaseManager] = None
-        self.giveaways: Dict = {}  # Добавляем для активных розыгрышей
-        self.completed_giveaways: Dict = {}  # Добавляем для завершённых розыгрышей
+        self.giveaways: Dict = {}
+        self.completed_giveaways: Dict = {}
         self.models: Dict[str, List[str] | float | Dict[str, List[str]] | Dict[str, Dict[str, int]] | None] = {
-            "text": [],  # Заполняется через API или Firebase
-            "vision": [],  # Заполняется через API или Firebase
+            "text": [],
+            "vision": [],
             "last_update": None,
             "unavailable": {"text": [], "vision": []},
             "last_successful": {"text": None, "vision": None},
-            "model_stats": {"text": {}, "vision": {}}  # Статистика успешных/неудачных запросов
+            "model_stats": {"text": {}, "vision": {}}
         }
-        self.models_loaded: bool = False  # Флаг для отслеживания загрузки моделей
+        self.models_loaded: bool = False
         self.prompt_cache: Dict = {}
         self.chat_memory: DefaultDict[str, List[Dict]] = defaultdict(list)
         self.topic_memory: DefaultDict[str, List[str]] = defaultdict(list)
         self.current_conversation: DefaultDict[str, Dict] = defaultdict(lambda: {
             "id": str(uuid.uuid4()),
             "last_message_time": time.time(),
-            "request_count": 0,  # Для отслеживания активности пользователя
-            "ttl_seconds": 86400  # Начальный TTL: 24 часа
+            "request_count": 0,
+            "ttl_seconds": 86400
         })
         self.processed_messages: Set[str] = set()
         self.message_to_response: Dict[str | int, int] = {}
@@ -63,14 +71,13 @@ class BotClient:
         self.tree.add_command(prompt_command(self))
         self.tree.add_command(restrict_command(self))
         self.bot.event(self.on_ready)
-        self.bot.setup_hook = self._setup_hook  # Регистрируем асинхронный хук
+        self.bot.setup_hook = self._setup_hook
 
     async def _setup_hook(self):
         """Асинхронный хук для инициализации Firebase и запуска задач."""
         logger.debug("Начало setup_hook")
         await self._ensure_firebase_initialized()
         logger.debug("Firebase инициализирован, запуск асинхронных задач")
-        # Добавляем команды розыгрышей
         giveaway, reroll, edit = giveaway_command(self)
         self.tree.add_command(giveaway)
         self.tree.add_command(reroll)
@@ -78,7 +85,6 @@ class BotClient:
         logger.debug("Команды розыгрышей добавлены в CommandTree")
         asyncio.create_task(self.update_models_periodically())
         asyncio.create_task(self.cleanup_conversations_periodically())
-        # Возобновляем розыгрыши
         from .commands.giveaway import resume_giveaways
         asyncio.create_task(resume_giveaways(self))
         logger.info("Асинхронные задачи запущены в setup_hook")
@@ -107,7 +113,7 @@ class BotClient:
                 self.models_loaded = True
                 logger.info("Модели успешно загружены при старте бота")
         except Exception as e:
-            logger.error(f"Критическая ошибка загрузки моделей при старте бота: {e}")
+            logger.error(f"Критическая ошибка загрузки моделей при старте бота: {e}\n{traceback.format_exc()}")
             self.models_loaded = False
 
     async def close(self) -> None:
@@ -127,13 +133,13 @@ class BotClient:
     def _initialize_settings(self) -> None:
         """Инициализация настроек бота."""
         self.cache_limits: Dict[str, int] = {
-            "messages": 25,  # Максимум сообщений в памяти
+            "messages": 25,
             "topics": 2,
-            "memory_days": 1,  # Устаревший параметр, заменён на ttl_seconds
-            "cache_ttl_seconds": 3600,  # Базовый TTL для кэша ответов (1 час)
-            "models_ttl_seconds": 86400,  # TTL для кэша моделей (24 часа)
-            "max_conversation_ttl": 604800,  # Максимальный TTL: 7 дней
-            "min_conversation_ttl": 3600  # Минимальный TTL: 1 час
+            "memory_days": 1,
+            "cache_ttl_seconds": 3600,
+            "models_ttl_seconds": 86400,
+            "max_conversation_ttl": 604800,
+            "min_conversation_ttl": 3600
         }
         self.request_settings: Dict[str, float | int] = {
             "rate_limit_delay": 3.0,
@@ -172,12 +178,12 @@ class BotClient:
                         logger.info("Модели успешно обновлены в периодическом обновлении")
                 await asyncio.sleep(3600)
             except Exception as e:
-                logger.error(f"Ошибка периодического обновления моделей: {e}")
+                logger.error(f"Ошибка периодического обновления моделей: {e}\n{traceback.format_exc()}")
                 self.models_loaded = False
                 await asyncio.sleep(1800)
 
     async def fetch_available_models(self) -> None:
-        """Загрузка доступных моделей из API Pollinations и сохранение в Firebase, затем чтение из Firebase."""
+        """Загрузка доступных моделей из API Pollinations и сохранение в Firebase."""
         logger.debug("Начало fetch_available_models")
         vision_models = []
         text_models = []
@@ -208,34 +214,31 @@ class BotClient:
                     else:
                         logger.warning(f"Ошибка API Pollinations: статус {response.status}")
         except Exception as e:
-            logger.error(f"Ошибка загрузки моделей из Pollinations API: {e}")
+            logger.error(f"Ошибка загрузки моделей из Pollinations API: {e}\n{traceback.format_exc()}")
+
+        if text_models or vision_models:
+            try:
+                self.models["vision"] = vision_models
+                self.models["text"] = text_models
+                self.models["unavailable"]["vision"] = []
+                self.models["unavailable"]["text"] = []
+                self.models["last_update"] = time.time()
+                for model in vision_models:
+                    if model not in self.models["model_stats"]["vision"]:
+                        self.models["model_stats"]["vision"][model] = {"success": 0, "failure": 0}
+                for model in text_models:
+                    if model not in self.models["model_stats"]["text"]:
+                        self.models["model_stats"]["text"][model] = {"success": 0, "failure": 0}
+                await self.firebase_manager.save_models({
+                    **self.models,
+                    "timestamp": self.models["last_update"]
+                })
+                logger.info(f"Модели сохранены в Firebase: Text={len(self.models['text'])}, Vision={len(self.models['vision'])}")
+            except Exception as e:
+                logger.error(f"Ошибка сохранения моделей в Firebase: {e}\n{traceback.format_exc()}")
 
         try:
-            logger.debug("Перед сохранением моделей в Firebase")
-            self.models["vision"] = vision_models
-            self.models["text"] = text_models
-            self.models["unavailable"]["vision"] = []
-            self.models["unavailable"]["text"] = []
-            self.models["last_update"] = time.time()
-            for model in vision_models:
-                if model not in self.models["model_stats"]["vision"]:
-                    self.models["model_stats"]["vision"][model] = {"success": 0, "failure": 0}
-            for model in text_models:
-                if model not in self.models["model_stats"]["text"]:
-                    self.models["model_stats"]["text"][model] = {"success": 0, "failure": 0}
-            await self.firebase_manager.save_models({
-                **self.models,
-                "timestamp": self.models["last_update"]
-            })
-            logger.info(f"Модели сохранены в Firebase: Text моделей = {len(self.models['text'])}, Vision моделей = {len(self.models['vision'])}")
-        except Exception as e:
-            logger.error(f"Ошибка сохранения моделей в Firebase: {e}")
-            raise
-
-        try:
-            logger.debug("Чтение моделей из Firebase")
             loaded_models = await self.firebase_manager.load_models()
-            logger.debug(f"Модели из Firebase: {loaded_models}")
             if isinstance(loaded_models, dict) and loaded_models.get("timestamp", 0) + self.cache_limits["models_ttl_seconds"] > time.time():
                 self.models.update(loaded_models)
                 self.models["vision"] = loaded_models.get("vision", [])
@@ -244,26 +247,38 @@ class BotClient:
                 self.models["unavailable"]["text"] = loaded_models.get("unavailable", {}).get("text", [])
                 self.models["model_stats"]["vision"] = loaded_models.get("model_stats", {}).get("vision", {})
                 self.models["model_stats"]["text"] = loaded_models.get("model_stats", {}).get("text", {})
-                for key in ["text", "vision"]:
-                    if isinstance(self.models["unavailable"].get(key), set):
-                        self.models["unavailable"][key] = list(self.models["unavailable"][key])
-                for model in self.models["vision"]:
-                    if model not in self.models["model_stats"]["vision"]:
-                        self.models["model_stats"]["vision"][model] = {"success": 0, "failure": 0}
-                for model in self.models["text"]:
-                    if model not in self.models["model_stats"]["text"]:
-                        self.models["model_stats"]["text"][model] = {"success": 0, "failure": 0}
-                logger.info(f"Модели загружены из Firebase: Text моделей = {len(self.models['text'])}, Vision моделей = {len(self.models['vision'])}")
+                logger.info(f"Модели загружены из Firebase: Text={len(self.models['text'])}, Vision={len(self.models['vision'])}")
             else:
-                logger.warning("Некорректные или устаревшие данные моделей из Firebase, списки остаются пустыми")
-                self.models["vision"] = []
-                self.models["text"] = []
-                self.models["unavailable"]["vision"] = []
-                self.models["unavailable"]["text"] = []
-                self.models["last_update"] = time.time()
+                if not self.models["text"] and not self.models["vision"]:
+                    self.models["text"] = DEFAULT_MODELS["text"]
+                    self.models["vision"] = DEFAULT_MODELS["vision"]
+                    self.models["last_update"] = time.time()
+                    for model in self.models["vision"]:
+                        if model not in self.models["model_stats"]["vision"]:
+                            self.models["model_stats"]["vision"][model] = {"success": 0, "failure": 0}
+                    for model in self.models["text"]:
+                        if model not in self.models["model_stats"]["text"]:
+                            self.models["model_stats"]["text"][model] = {"success": 0, "failure": 0}
+                    await self.firebase_manager.save_models({
+                        **self.models,
+                        "timestamp": self.models["last_update"]
+                    })
+                    logger.info(f"Резервные модели сохранены: Text={len(self.models['text'])}, Vision={len(self.models['vision'])}")
         except Exception as e:
-            logger.error(f"Ошибка чтения моделей из Firebase: {e}")
-            raise
+            logger.error(f"Ошибка чтения моделей из Firebase: {e}\n{traceback.format_exc()}")
+            self.models["text"] = DEFAULT_MODELS["text"]
+            self.models["vision"] = DEFAULT_MODELS["vision"]
+            self.models["last_update"] = time.time()
+            for model in self.models["vision"]:
+                if model not in self.models["model_stats"]["vision"]:
+                    self.models["model_stats"]["vision"][model] = {"success": 0, "failure": 0}
+            for model in self.models["text"]:
+                if model not in self.models["model_stats"]["text"]:
+                    self.models["model_stats"]["text"][model] = {"success": 0, "failure": 0}
+            await self.firebase_manager.save_models({
+                **self.models,
+                "timestamp": self.models["last_update"]
+            })
 
     async def on_message(self, message: discord.Message) -> None:
         """Обработка входящих сообщений."""
@@ -282,7 +297,7 @@ class BotClient:
 
             if not self.models_loaded:
                 logger.warning(f"Модели ещё не загружены, сообщение от {user_id} пропущено")
-                await self._send_temp_message(message.channel, "Бот ещё инициализируется, попробуйте снова через несколько секунд.", user_id)
+                await self._send_temp_message(message.channel, "Бот ещё инициализируется.", user_id)
                 return
 
             if not await self.check_spam(user_id):
@@ -305,7 +320,7 @@ class BotClient:
                     reason = access_reason if not access_result else restriction_reason
                     await self._send_temp_message(message.channel, f"Ошибка: {reason}", user_id, ephemeral=True)
         except Exception as e:
-            logger.error(f"Ошибка обработки сообщения {msg_key}: {e}")
+            logger.error(f"Ошибка обработки сообщения {msg_key}: {e}\n{traceback.format_exc()}")
             await self._send_temp_message(message.channel, "Ошибка обработки сообщения.", user_id, ephemeral=True)
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
@@ -324,7 +339,7 @@ class BotClient:
 
             if not self.models_loaded:
                 logger.warning(f"Модели ещё не загружены, редактирование от {user_id} пропущено")
-                await self._send_temp_message(after.channel, "Бот ещё инициализируется, попробуйте снова через несколько секунд.", user_id)
+                await self._send_temp_message(after.channel, "Бот ещё инициализируется.", user_id)
                 return
 
             if not await self.check_spam(user_id):
@@ -347,7 +362,7 @@ class BotClient:
                     reason = access_reason if not access_result else restriction_reason
                     await self._send_temp_message(after.channel, f"Ошибка: {reason}", user_id, ephemeral=True)
         except Exception as e:
-            logger.error(f"Ошибка обработки редактирования {msg_key}: {e}")
+            logger.error(f"Ошибка обработки редактирования {msg_key}: {e}\n{traceback.format_exc()}")
             await self._send_temp_message(after.channel, "Ошибка обработки редактирования.", user_id, ephemeral=True)
 
     async def _process_message(self, message: discord.Message) -> None:
@@ -371,7 +386,7 @@ class BotClient:
                 await self._send_split_message(after, parts)
 
     def _split_response(self, response: str, max_length: int = 2000) -> List[str]:
-        """Разделение длинного ответа на части, не превышающие max_length."""
+        """Разделение длинного ответа на части."""
         parts: List[str] = []
         remaining = response
         separators = [". ", "! ", "? ", "; "]
@@ -405,65 +420,64 @@ class BotClient:
                 logger.debug(f"Отправка части {i+1}/{len(parts)} сообщения {message.id}: {len(part)} символов")
                 sent_msg = await (message.reply(part) if i == 0 else message.channel.send(part))
                 self.message_to_response[f"{message.id}_{i}" if i > 0 else message.id] = sent_msg.id
-                # Сохраняем ответ бота в контекст разговора
                 conversation_id = self.current_conversation[str(message.author.id)]["id"]
                 self.chat_memory[conversation_id].append({"role": "assistant", "content": part})
                 await self._save_conversation(str(message.author.id), conversation_id)
             except (Forbidden, HTTPException) as e:
-                logger.error(f"Ошибка отправки части сообщения {i+1}: {e}")
+                logger.error(f"Ошибка отправки части сообщения {i+1}: {e}\n{traceback.format_exc()}")
                 await self._send_temp_message(message.channel, "Ошибка отправки.", str(message.author.id), ephemeral=True)
 
     async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message, is_edit: bool = False) -> Optional[List[str]]:
-        """Генерация ответа с учетом текста и изображений, с разделением обязанностей моделей."""
+        """Генерация ответа с учетом текста и изображений."""
         try:
             if not (text or message.attachments):
                 return ["Введите текст или прикрепите изображение."]
             
             context = await self.get_context(user_id, message.channel)
             guild_id = str(message.guild.id) if message.guild else "DM"
-            system_prompt = await self._build_system_prompt(user_id, guild_id, message.attachments)
+            has_image = any(a.content_type and a.content_type.startswith("image/") for a in message.attachments)
+            system_prompt = await self._build_system_prompt(user_id, guild_id, has_image)
             
-            attachments = [
-                a.url for a in message.attachments
-                if a.content_type and a.content_type.startswith("image/")
-            ]
+            attachments = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
             user_content = [{"type": "text", "text": text}] if text else []
             user_content.extend({"type": "image_url", "image_url": {"url": url}} for url in attachments)
-            messages = context + [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]
+            
+            # Гарантируем, что системный промпт всегда первый
+            messages = [{"role": "system", "content": system_prompt}] + context + [
+                {"role": "user", "content": user_content}
+            ]
             
             final_response = None
+            model_type = "vision" if has_image else "text"
 
-            # Если есть изображение, используем vision модель
-            if attachments:
+            if has_image:
                 if not self.models["vision"]:
-                    logger.error(f"Список vision моделей пуст для пользователя {user_id}: {self.models['vision']}")
-                    return ["Ошибка: vision модели недоступны. Пожалуйста, обратитесь к администратору."]
-                logger.debug(f"Обработка запроса с изображением (текст: {'есть' if text else 'нет'}) с использованием vision модели")
+                    logger.error(f"Список vision моделей пуст для {user_id}: {self.models['vision']}")
+                    return ["Ошибка: vision модели недоступны."]
+                logger.debug(f"Обработка vision запроса (текст: {'есть' if text else 'нет'})")
                 vision_response = await self._try_generate_response(messages, has_image=True, max_tokens=2000)
                 if not vision_response:
-                    return ["Не удалось обработать изображение. Попробуйте снова."]
-                logger.debug(f"Vision модель вернула: {vision_response}")
+                    return ["Не удалось обработать изображение."]
+                logger.debug(f"Vision модель вернула: {vision_response[:100]}...")
                 final_response = vision_response
-            # Если есть только текст, используем текстовую модель
             else:
                 if not self.models["text"]:
-                    logger.error(f"Список текстовых моделей пуст для пользователя {user_id}: {self.models['text']}")
-                    return ["Ошибка: текстовые модели недоступны. Пожалуйста, обратитесь к администратору."]
-                logger.debug(f"Обработка текстового запроса: {text} с использованием текстовой модели")
+                    logger.error(f"Список текстовых моделей пуст для {user_id}: {self.models['text']}")
+                    return ["Ошибка: текстовые модели недоступны."]
+                logger.debug(f"Обработка текстового запроса: {text}")
                 text_response = await self._try_generate_response(messages, has_image=False, max_tokens=2000)
                 if not text_response:
-                    return ["Не удалось обработать текстовый запрос. Попробуйте снова."]
-                logger.debug(f"Текстовая модель вернула: {text_response}")
+                    return ["Не удалось обработать текстовый запрос."]
+                logger.debug(f"Текстовая модель вернула: {text_response[:100]}...")
                 final_response = text_response
 
-            # Разбиваем ответ на части, если он слишком длинный
             return self._split_response(final_response, self.user_settings[user_id]["max_response_length"])
         except Exception as e:
-            logger.error(f"Ошибка генерации ответа для сообщения {message_id}: {e}")
+            logger.error(f"Ошибка генерации ответа для сообщения {message_id}: {e}\n{traceback.format_exc()}")
             return ["Произошла ошибка при генерации ответа."]
 
     def _generate_cache_key(self, messages: List[Dict], model_type: str) -> str:
-        """Генерация уникального ключа кэша на основе сообщений и типа модели."""
+        """Генерация уникального ключа кэша."""
         message_data = json.dumps(messages, sort_keys=True)
         return f"{model_type}:{hashlib.sha256(message_data.encode()).hexdigest()}"
 
@@ -476,7 +490,7 @@ class BotClient:
         jitter=backoff.full_jitter
     )
     async def _try_generate_response(self, messages: List[Dict], has_image: bool, max_tokens: int) -> Optional[str]:
-        """Попытка генерации ответа с использованием подходящей модели и кэшированием в Firebase."""
+        """Попытка генерации ответа с ротацией моделей."""
         model_type = "vision" if has_image else "text"
         available_models = [m for m in self.models[model_type] if m not in self.models["unavailable"][model_type]]
         
@@ -484,111 +498,95 @@ class BotClient:
             logger.error(f"Нет доступных моделей для типа {model_type}")
             return None
 
-        # Выбираем модель с наибольшим количеством успешных запросов
         model_stats = self.models["model_stats"][model_type]
         sorted_models = sorted(
             available_models,
             key=lambda m: model_stats.get(m, {"success": 0, "failure": 0})["success"],
             reverse=True
         )
-        selected_model = sorted_models[0]
-        logger.debug(f"Выбрана модель {selected_model} для типа {model_type}")
 
-        # Проверка кэша в Firebase
-        cache_key = self._generate_cache_key(messages, model_type)
-        try:
-            cached_response = await self.firebase_manager.load_cache(cache_key)
-            if cached_response and cached_response.get("timestamp", 0) + self.cache_limits["cache_ttl_seconds"] > time.time():
-                logger.debug(f"Ответ найден в кэше для {cache_key}")
-                return cached_response["response"]
-            else:
-                logger.debug(f"Кэш для {cache_key} истёк или отсутствует")
-        except Exception as e:
-            logger.error(f"Ошибка чтения кэша для {cache_key}: {e}")
+        for selected_model in sorted_models:
+            logger.debug(f"Попытка с моделью {selected_model} для типа {model_type}")
+            cache_key = self._generate_cache_key(messages, model_type)
+            
+            # Отладка: логируем отправляемые messages
+            logger.debug(f"Отправляем messages в API: {json.dumps(messages, ensure_ascii=False, indent=2)}")
+            
+            try:
+                cached_response = await self.firebase_manager.load_cache(cache_key)
+                if cached_response and cached_response.get("timestamp", 0) + self.cache_limits["cache_ttl_seconds"] > time.time():
+                    logger.debug(f"Ответ найден в кэше для {cache_key}")
+                    return cached_response["response"]
+            except Exception as e:
+                logger.error(f"Ошибка чтения кэша для {cache_key}: {e}")
 
-        try:
-            # Настройка таймаута и заголовков для веб-поиска
-            timeout = ClientTimeout(total=30)
-            headers = {"User-Agent": "BotClient/1.0 (DiscordBot; PollinationsAI)"}
+            try:
+                timeout = ClientTimeout(total=30)
+                headers = {"User-Agent": "BotClient/1.0 (DiscordBot; PollinationsAI)"}
+                async with ClientSession(timeout=timeout, headers=headers) as session:
+                    response = await self.g4f_client.chat.completions.create(
+                        model=selected_model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        web_search=True,
+                        session=session
+                    )
+                    response_text = response.choices[0].message.content.strip()
 
-            async with ClientSession(timeout=timeout, headers=headers) as session:
-                # Выполняем запрос к G4F с веб-поиском
-                response = await self.g4f_client.chat.completions.create(
-                    model=selected_model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    web_search=True,
-                    session=session
-                )
-                response_text = response.choices[0].message.content.strip()
+                    if not response_text:
+                        logger.warning(f"Пустой ответ от модели {selected_model}")
+                        self.models["model_stats"][model_type][selected_model]["failure"] += 1
+                        continue
 
-                if not response_text:
-                    logger.warning(f"Пустой ответ от модели {selected_model}")
-                    self.models["model_stats"][model_type][selected_model]["failure"] += 1
-                    return None
+                    logger.debug(f"Успешный ответ от {selected_model}: {len(response_text)} символов")
+                    self.models["model_stats"][model_type][selected_model]["success"] += 1
+                    self.models["last_successful"][model_type] = selected_model
+                    await self.firebase_manager.save_models({
+                        **self.models,
+                        "timestamp": time.time()
+                    })
 
-                logger.debug(f"Успешный ответ от модели {selected_model}: {len(response_text)} символов")
-                self.models["model_stats"][model_type][selected_model]["success"] += 1
-                self.models["last_successful"][model_type] = selected_model
+                    try:
+                        await self.firebase_manager.save_cache(cache_key, {
+                            "response": response_text,
+                            "timestamp": time.time()
+                        })
+                        logger.debug(f"Ответ сохранён в кэш для {cache_key}")
+                    except Exception as e:
+                        logger.error(f"Ошибка сохранения кэша: {e}")
+
+                    return response_text
+
+            except (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError) as e:
+                logger.error(f"Ошибка G4F для {selected_model}: {e}\n{traceback.format_exc()}")
+                self.models["model_stats"][model_type][selected_model]["failure"] += 1
+                self.models["unavailable"][model_type].append(selected_model)
                 await self.firebase_manager.save_models({
                     **self.models,
                     "timestamp": time.time()
                 })
+                await asyncio.sleep(3)  # Задержка перед следующей моделью
+                continue
 
-                # Сохранение ответа в кэш
-                try:
-                    await self.firebase_manager.save_cache(cache_key, {
-                        "response": response_text,
-                        "timestamp": time.time()
-                    })
-                    logger.debug(f"Ответ сохранён в кэш для {cache_key}")
-                except Exception as e:
-                    logger.error(f"Ошибка сохранения кэша для {cache_key}: {e}")
+            except (ConnectionError, TimeoutError) as e:
+                logger.error(f"Сетевая ошибка для {selected_model}: {e}\n{traceback.format_exc()}")
+                self.models["model_stats"][model_type][selected_model]["failure"] += 1
+                await asyncio.sleep(3)
+                continue
 
-                return response_text
+            except Exception as e:
+                logger.error(f"Неизвестная ошибка для {selected_model}: {e}\n{traceback.format_exc()}")
+                self.models["model_stats"][model_type][selected_model]["failure"] += 1
+                await asyncio.sleep(3)
+                continue
 
-        except (ProviderNotFoundError, ModelNotSupportedError) as e:
-            logger.error(f"Ошибка конфигурации G4F для модели {selected_model}: {e}")
-            self.models["model_stats"][model_type][selected_model]["failure"] += 1
-            self.models["unavailable"][model_type].append(selected_model)
-            await self.firebase_manager.save_models({
-                **self.models,
-                "timestamp": time.time()
-            })
-            raise
-
-        except (ResponseError, RateLimitError) as e:
-            logger.error(f"Ошибка ответа G4F для модели {selected_model}: {e}")
-            self.models["model_stats"][model_type][selected_model]["failure"] += 1
-            await self.firebase_manager.save_models({
-                **self.models,
-                "timestamp": time.time()
-            })
-            raise
-
-        except (ConnectionError, TimeoutError) as e:
-            logger.error(f"Сетевая ошибка для модели {selected_model}: {e}")
-            self.models["model_stats"][model_type][selected_model]["failure"] += 1
-            await self.firebase_manager.save_models({
-                **self.models,
-                "timestamp": time.time()
-            })
-            raise
-
-        except Exception as e:
-            logger.error(f"Неизвестная ошибка для модели {selected_model}: {e.__class__.__name__}: {str(e)}")
-            self.models["model_stats"][model_type][selected_model]["failure"] += 1
-            await self.firebase_manager.save_models({
-                **self.models,
-                "timestamp": time.time()
-            })
-            return None
+        logger.error(f"Все модели ({model_type}) не смогли обработать запрос")
+        return None
 
     async def get_context(self, user_id: str, channel: discord.abc.Messageable) -> List[Dict]:
-        """Получение контекста разговора из памяти или Firebase."""
+        """Получение контекста разговора."""
         conversation_id = self.current_conversation[user_id]["id"]
         
-        # Проверка локальной памяти
         if conversation_id in self.chat_memory and self.chat_memory[conversation_id]:
             messages = self.chat_memory[conversation_id]
             context = [
@@ -596,10 +594,9 @@ class BotClient:
                 for msg in messages[-self.cache_limits["messages"]:]
                 if msg["content"]
             ]
-            logger.debug(f"Контекст загружен из локальной памяти для {conversation_id}: {len(context)} сообщений")
+            logger.debug(f"Контекст из памяти для {conversation_id}: {len(context)} сообщений")
             return context
 
-        # Загрузка из Firebase, если локальная память пуста
         try:
             conversation_data = await self.firebase_manager.load_conversation(user_id, conversation_id)
             if conversation_data:
@@ -610,77 +607,79 @@ class BotClient:
                     for msg in self.chat_memory[conversation_id][-self.cache_limits["messages"]:]
                     if msg["content"]
                 ]
-                logger.debug(f"Контекст загружен из Firebase для {conversation_id}: {len(context)} сообщений")
+                logger.debug(f"Контекст из Firebase для {conversation_id}: {len(context)} сообщений")
                 return context
         except Exception as e:
-            logger.error(f"Ошибка загрузки контекста из Firebase для {conversation_id}: {e}")
+            logger.error(f"Ошибка загрузки контекста для {conversation_id}: {e}\n{traceback.format_exc()}")
             return []
 
-    async def _build_system_prompt(self, user_id: str, guild_id: str, attachments: List) -> str:
-        """Построение системного промпта с учетом пользовательских настроек."""
+    async def _build_system_prompt(self, user_id: str, guild_id: str, has_image: bool) -> str:
+        """Построение системного промпта для каждого запроса с сохранением личности."""
         prompt_key = f"{user_id}-{guild_id}"
         if prompt_key not in self.prompt_cache:
-            self.prompt_cache[prompt_key] = await load_user_prompt(user_id, guild_id, self) or default_prompt
-        base_prompt = self.prompt_cache[prompt_key]
-        if attachments:
-            base_prompt += "\n\nПожалуйста, проанализируйте прикреплённое изображение и дайте соответствующий ответ."
-        return base_prompt
+            self.prompt_cache[prompt_key] = await load_user_prompt(user_id, guild_id, self)
+        
+        prompt_data = self.prompt_cache[prompt_key]
+        base_prompt = prompt_data.get("vision_prompt" if has_image else "text_prompt", default_prompt)
+        
+        logger.debug(f"Исходный промпт для {prompt_key} ({'vision' if has_image else 'text'}): {base_prompt}")
+        
+        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        # Альтернативный формат для усиления личности
+        formatted_prompt = (
+            f"[PERSONALITY]\n{base_prompt.format(now=current_date)}\n"
+            f"[INSTRUCTIONS]\n{'Analyze the image and respond according to the personality.' if has_image else 'Respond according to the personality.'}"
+        )
+        
+        logger.debug(f"Сформирован системный промпт для {prompt_key} ({'vision' if has_image else 'text'}): {formatted_prompt}")
+        return formatted_prompt
 
     def _adjust_conversation_ttl(self, user_id: str) -> None:
-        """Динамическая настройка TTL разговора на основе активности пользователя."""
+        """Динамическая настройка TTL разговора."""
         conversation = self.current_conversation[user_id]
         request_count = conversation["request_count"]
         
-        # Логика настройки TTL:
-        # - Менее 5 запросов за сессию: минимальный TTL (1 час)
-        # - 5-20 запросов: средний TTL (24 часа)
-        # - Более 20 запросов: максимальный TTL (7 дней)
         if request_count < 5:
             conversation["ttl_seconds"] = self.cache_limits["min_conversation_ttl"]
         elif request_count < 20:
-            conversation["ttl_seconds"] = 86400  # 24 часа
+            conversation["ttl_seconds"] = 86400
         else:
             conversation["ttl_seconds"] = self.cache_limits["max_conversation_ttl"]
         
-        logger.debug(f"TTL для пользователя {user_id} установлен на {conversation['ttl_seconds']} секунд (запросов: {request_count})")
+        logger.debug(f"TTL для {user_id}: {conversation['ttl_seconds']} секунд (запросов: {request_count})")
 
     async def start_new_conversation(self, user_id: str, channel_id: str, content: str) -> None:
-        """Запуск новой беседы или продолжение существующей с динамическим TTL."""
+        """Запуск новой беседы."""
         conversation = self.current_conversation[user_id]
         conversation_id = conversation["id"]
         current_time = time.time()
 
-        # Проверка, истёк ли текущий разговор
         if (current_time - conversation["last_message_time"]) > conversation["ttl_seconds"]:
-            logger.debug(f"Разговор {conversation_id} для пользователя {user_id} истёк, создание нового")
+            logger.debug(f"Разговор {conversation_id} для {user_id} истёк")
             conversation_id = str(uuid.uuid4())
             self.current_conversation[user_id] = {
                 "id": conversation_id,
                 "last_message_time": current_time,
                 "request_count": 0,
-                "ttl_seconds": 86400  # Начальный TTL: 24 часа
+                "ttl_seconds": 86400
             }
             self.chat_memory[conversation_id] = []
             self.topic_memory[conversation_id] = []
         
-        # Обновление времени и счётчика запросов
         conversation = self.current_conversation[user_id]
         conversation["last_message_time"] = current_time
         conversation["request_count"] += 1
         
-        # Динамическая настройка TTL
         self._adjust_conversation_ttl(user_id)
 
-        # Добавление сообщения пользователя
         self.chat_memory[conversation_id].append({"role": "user", "content": content})
         if len(self.chat_memory[conversation_id]) > self.cache_limits["messages"]:
             self.chat_memory[conversation_id] = self.chat_memory[conversation_id][-self.cache_limits["messages"]:]
 
-        # Сохранение в Firebase
         await self._save_conversation(user_id, conversation_id)
 
     async def _save_conversation(self, user_id: str, conversation_id: str) -> None:
-        """Сохранение контекста разговора в Firebase."""
+        """Сохранение контекста разговора."""
         try:
             conversation_data = {
                 "messages": self.chat_memory[conversation_id],
@@ -689,13 +688,13 @@ class BotClient:
                 "ttl_seconds": self.current_conversation[user_id]["ttl_seconds"]
             }
             await self.firebase_manager.save_conversation(user_id, conversation_id, conversation_data)
-            logger.debug(f"Разговор {conversation_id} сохранён в Firebase для пользователя {user_id}")
+            logger.debug(f"Разговор {conversation_id} сохранён для {user_id}")
         except Exception as e:
-            logger.error(f"Ошибка сохранения разговора {conversation_id} в Firebase: {e}")
+            logger.error(f"Ошибка сохранения разговора {conversation_id}: {e}\n{traceback.format_exc()}")
 
     async def cleanup_conversations_periodically(self) -> None:
-        """Периодическая очистка устаревших разговоров."""
-        logger.debug("Начало выполнения cleanup_conversations_periodically")
+        """Очистка устаревших разговоров."""
+        logger.debug("Начало cleanup_conversations_periodically")
         while True:
             try:
                 current_time = time.time()
@@ -707,23 +706,21 @@ class BotClient:
                         expired_users.append(user_id)
                         del self.chat_memory[conversation_id]
                         del self.topic_memory[conversation_id]
-                        logger.debug(f"Разговор {conversation_id} для пользователя {user_id} удалён из памяти")
+                        logger.debug(f"Разговор {conversation_id} для {user_id} удалён")
                 
                 for user_id in expired_users:
                     del self.current_conversation[user_id]
                 
-                # Очистка в Firebase
-                logger.debug("Начало очистки устаревших разговоров в Firebase")
                 await self.firebase_manager.cleanup_expired_conversations(current_time)
-                logger.info(f"Очищено {len(expired_users)} устаревших разговоров")
+                logger.info(f"Очищено {len(expired_users)} разговоров")
                 
-                await asyncio.sleep(3600)  # Проверка каждый час
+                await asyncio.sleep(3600)
             except Exception as e:
-                logger.error(f"Ошибка периодической очистки разговоров: {e}")
+                logger.error(f"Ошибка очистки разговоров: {e}\n{traceback.format_exc()}")
                 await asyncio.sleep(1800)
 
     async def _send_temp_message(self, channel: discord.abc.Messageable, content: str, user_id: str, ephemeral: bool = False) -> None:
-        """Отправка временного сообщения с удалением через 10 секунд."""
+        """Отправка временного сообщения."""
         try:
             if isinstance(channel, discord.TextChannel) and ephemeral:
                 await channel.send(content, delete_after=10)
@@ -732,4 +729,4 @@ class BotClient:
                 await asyncio.sleep(10)
                 await msg.delete()
         except (Forbidden, HTTPException) as e:
-            logger.error(f"Ошибка отправки временного сообщения для {user_id}: {e}")
+            logger.error(f"Ошибка отправки временного сообщения для {user_id}: {e}\n{traceback.format_exc()}")
