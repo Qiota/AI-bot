@@ -74,15 +74,17 @@ async def process_attachments(attachments: List[discord.Attachment]) -> List[dis
 
 async def say(interaction: discord.Interaction, message: Optional[str] = None, bot_client=None, reply: Optional[str] = None, attachment: Optional[discord.Attachment] = None) -> None:
     """Команда /say: Отправляет сообщение от имени бота с опциональными файлами и ответом."""
-    if not await check_permissions(interaction, bot_client):
-        await interaction.response.send_message(
-            "Нет прав для выполнения команды.", ephemeral=True, delete_after=10
-        )
-        return
-
+    # Немедленный defer для предотвращения ошибки 10062
     await interaction.response.defer(ephemeral=True)
 
     try:
+        # Проверка прав
+        if not await check_permissions(interaction, bot_client):
+            await interaction.followup.send(
+                "Нет прав для выполнения команды.", ephemeral=True, delete_after=10
+            )
+            return
+
         # Собираем все вложения
         attachments = [attachment] if attachment else []
         additional_attachments = [
@@ -93,10 +95,8 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
         attachments.extend(additional_attachments)
 
         # Проверяем наличие контента
-        if reply and not (message or attachments):
-            raise ValueError("Для ответа на сообщение нужен текст или хотя бы один файл.")
-        if not message and not attachments:
-            raise ValueError("Нельзя отправить пустое сообщение без файлов.")
+        if not message and not attachments and not reply:
+            raise ValueError("Нельзя отправить полностью пустое сообщение.")
 
         # Получаем ссылку на сообщение
         reference, target_message = await get_message_reference(interaction, reply)
@@ -104,7 +104,7 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
             raise ValueError("Ошибка: reply должен быть числовым ID или ссылкой на сообщение.")
 
         # Обрабатываем вложения
-        discord_files = await process_attachments(attachments)
+        discord_files = await process_attachments(attachments) if attachments else None
 
         # Отправляем сообщение
         try:
@@ -129,6 +129,7 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
         logger.error(f"Ошибка ValueError в /say для {interaction.user.id}: {e}")
     except discord.HTTPException as e:
         error_messages = {
+            400: "Некорректный запрос к Discord API.",
             50035: "Сообщение слишком длинное (макс. 2000 символов).",
             50006: "Нельзя отправить пустое сообщение.",
             50013: "У бота нет прав для отправки сообщения или файлов.",
@@ -137,7 +138,7 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
         await interaction.followup.send(
             error_messages.get(e.code, f"Ошибка отправки: {e}"), ephemeral=True, delete_after=10
         )
-        logger.error(f"Ошибка HTTP в /say для {interaction.user.id}: {e}")
+        logger.error(f"Ошибка HTTP в /say для {interaction.user.id}: {e}\n{traceback.format_exc()}")
     except Exception as e:
         await interaction.followup.send(
             f"Неизвестная ошибка: {e}", ephemeral=True, delete_after=10
