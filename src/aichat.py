@@ -11,7 +11,7 @@ import uuid
 from .commands.prompt import load_user_prompt, DEFAULT_PROMPT, DEFAULT_VISION_PROMPT, create_command as prompt_command, cleanup_expired_prompts
 from .commands.restrict import check_user_restriction, check_bot_access, create_command as restrict_command
 from .commands.giveaway import create_command as giveaway_command
-from .firebase.firebase_manager import FirebaseManager
+from .utils.firebase.firebase_manager import FirebaseManager
 import aiohttp
 import json
 import hashlib
