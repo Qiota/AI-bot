@@ -9,6 +9,7 @@ init(autoreset=True)
 # Добавляем уровень SUCCESS
 SUCCESS = 25
 logging.addLevelName(SUCCESS, "SUCCESS")
+
 def success(self, message, *args, **kwargs):
     if self.isEnabledFor(SUCCESS):
         self._log(SUCCESS, message, args, **kwargs)
@@ -53,7 +54,7 @@ def setup_logging():
     os.makedirs("logs", exist_ok=True)
     file_handler = RotatingFileHandler(
         filename="logs/bot.log",
-        maxBytes=5 * 1024 * 1024,
+        maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=5,
         encoding="utf-8"
     )
