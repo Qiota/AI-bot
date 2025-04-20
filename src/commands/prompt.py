@@ -1,7 +1,7 @@
 from typing import Dict, Optional
 from discord import app_commands, Interaction
 from ..systemLog import logger
-from ..firebase.firebase_manager import FirebaseManager
+from ..utils.firebase.firebase_manager import FirebaseManager
 import functools
 import time
 import asyncio
@@ -13,7 +13,7 @@ def ensure_firebase_initialized(func):
     """Декоратор для инициализации FirebaseManager перед выполнением функции."""
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        bot_client = args[-1]  # Последний позиционный аргумент — bot_client
+        bot_client = args[-1]
         firebase_manager = await bot_client._ensure_firebase_initialized()
         kwargs["firebase_manager"] = firebase_manager
         return await func(*args, **kwargs)
@@ -48,16 +48,13 @@ async def save_user_prompt(
 
     cache_key = f"{guild_id}_{user_id}"
     try:
-        # Формируем новые промпты, сбрасывая неуказанные до стандартных
         prompt_data = {
             "text_prompt": text_prompt if text_prompt is not None else DEFAULT_PROMPT,
             "vision_prompt": vision_prompt if vision_prompt is not None else DEFAULT_VISION_PROMPT,
             "timestamp": time.time()
         }
 
-        # Сохраняем в Firebase
         await firebase_manager.save_cache(f"prompts/{guild_id}/{user_id}", prompt_data)
-        # Обновляем локальный кэш
         bot_client.prompt_cache[cache_key] = prompt_data
         logger.debug(f"Промпты сохранены для {cache_key}: {prompt_data}")
     except Exception as e:
@@ -75,7 +72,6 @@ async def reset_user_prompt(
     """Сбрасывает кастомные промпты, устанавливая стандартные в Firebase и кэше."""
     cache_key = f"{guild_id}_{user_id}"
     try:
-        # Сохраняем стандартные промпты
         prompt_data = {
             "text_prompt": DEFAULT_PROMPT,
             "vision_prompt": DEFAULT_VISION_PROMPT,
@@ -100,7 +96,6 @@ async def load_user_prompt(
     cache_key = f"{guild_id}_{user_id}"
     cache_ttl = bot_client.cache_limits.get("cache_ttl_seconds", 3600)
 
-    # Проверяем кэш
     cached = bot_client.prompt_cache.get(cache_key)
     if cached and cached.get("timestamp", 0) + cache_ttl > time.time():
         logger.debug(f"Промпты загружены из кэша для {cache_key}")
@@ -132,10 +127,9 @@ async def cleanup_expired_prompts(
     """Очищает устаревшие промпты из Firebase."""
     try:
         current_time = time.time()
-        ttl_seconds = bot_client.cache_limits.get("cache_ttl_seconds", 3600) * 24 * 30  # 30 дней
+        ttl_seconds = bot_client.cache_limits.get("cache_ttl_seconds", 3600) * 24 * 30
         expired_paths = []
 
-        # Получаем все промпты из Firebase
         prompts_data = await firebase_manager.load_cache("prompts")
         if not prompts_data:
             logger.debug("Нет промптов для очистки")
@@ -178,7 +172,6 @@ def create_command(bot_client):
         guild_id = str(interaction.guild.id) if interaction.guild else "DM"
 
         try:
-            # Откладываем ответ, чтобы избежать ошибки Unknown interaction
             await interaction.response.defer(ephemeral=True)
 
             if action == "set":

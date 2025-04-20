@@ -10,29 +10,20 @@ import json
 import aiohttp
 from contextlib import asynccontextmanager
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class FirebaseManager:
     """Менеджер для работы с Firebase Realtime Database."""
     _instance: Optional['FirebaseManager'] = None
-    _file_cache: Dict[str, str] = {}  # Кэш путей к файлам
-    _initialized: bool = False  # Флаг инициализации
-    _init_lock: asyncio.Lock = asyncio.Lock()  # Замок для синхронизации инициализации
+    _file_cache: Dict[str, str] = {}
+    _initialized: bool = False
+    _init_lock: asyncio.Lock = asyncio.Lock()
     _db_url: str = "https://ai-assist-fe86c-default-rtdb.europe-west1.firebasedatabase.app/"
 
     @staticmethod
     def find_file(filename: str) -> Optional[str]:
-        """
-        Рекурсивный поиск файла по имени в проекте и стандартных директориях.
-        
-        Args:
-            filename: Имя файла для поиска.
-        
-        Returns:
-            Полный путь к файлу или None, если файл не найден.
-        """
+        """Рекурсивный поиск файла по имени в проекте и стандартных директориях."""
         cache_key = filename
         if cache_key in FirebaseManager._file_cache:
             logger.debug(f"Путь к файлу {filename} взят из кэша: {FirebaseManager._file_cache[cache_key]}")
@@ -98,7 +89,7 @@ class FirebaseManager:
                     cred = credentials.Certificate(firebase_key_path)
                     firebase_admin.initialize_app(cred, {
                         'databaseURL': cls._db_url,
-                        'httpTimeout': 30  # Увеличенный тайм-аут для HTTP-запросов
+                        'httpTimeout': 30
                     })
                     logger.info("Firebase Realtime Database успешно инициализирован")
 
@@ -124,7 +115,7 @@ class FirebaseManager:
         try:
             return await asyncio.wait_for(
                 loop.run_in_executor(None, func),
-                timeout=30  # Тайм-аут 30 секунд для синхронных операций
+                timeout=30
             )
         except asyncio.TimeoutError:
             logger.error(f"Тайм-аут выполнения синхронной операции: {func}")
@@ -233,17 +224,17 @@ class FirebaseManager:
         factor=2,
         jitter=backoff.full_jitter
     )
-    async def save_cache(self, cache_key: str, cache_data: Dict) -> None:
+    async def save_cache(self, cache_path: str, cache_data: Dict) -> None:
         """Сохранение данных кэша в Realtime Database."""
         self._ensure_db_initialized()
         try:
-            logger.debug(f"Начало сохранения кэша для ключа {cache_key}")
+            logger.debug(f"Начало сохранения кэша для пути {cache_path}")
             def sync_set():
-                self._db.child(f"response_cache/{cache_key}").set(cache_data)
+                self._db.child(cache_path).set(cache_data)
             await self._run_sync_in_executor(sync_set)
-            logger.debug(f"Кэш сохранён в Realtime Database для ключа {cache_key}")
+            logger.debug(f"Кэш сохранён в Realtime Database для пути {cache_path}")
         except Exception as e:
-            logger.error(f"Ошибка сохранения кэша в Realtime Database для ключа {cache_key}: {e}")
+            logger.error(f"Ошибка сохранения кэша в Realtime Database для пути {cache_path}: {e}")
             raise Exception(f"Ошибка сохранения кэша: {e}")
 
     @backoff.on_exception(
@@ -254,19 +245,19 @@ class FirebaseManager:
         factor=2,
         jitter=backoff.full_jitter
     )
-    async def load_cache(self, cache_key: str) -> Optional[Dict]:
+    async def load_cache(self, cache_path: str) -> Optional[Dict]:
         """Загрузка данных кэша из Realtime Database."""
         self._ensure_db_initialized()
         try:
-            logger.debug(f"Начало загрузки кэша для ключа {cache_key}")
+            logger.debug(f"Начало загрузки кэша для пути {cache_path}")
             def sync_get():
-                data = self._db.child(f"response_cache/{cache_key}").get()
+                data = self._db.child(cache_path).get()
                 return data if data else None
             data = await self._run_sync_in_executor(sync_get)
-            logger.debug(f"Кэш загружен из Realtime Database для ключа {cache_key}")
+            logger.debug(f"Кэш загружен из Realtime Database для пути {cache_path}")
             return data
         except Exception as e:
-            logger.error(f"Ошибка загрузки кэша из Realtime Database для ключа {cache_key}: {e}")
+            logger.error(f"Ошибка загрузки кэша из Realtime Database для пути {cache_path}: {e}")
             raise Exception(f"Ошибка загрузки кэша: {e}")
 
     @backoff.on_exception(
@@ -328,7 +319,6 @@ class FirebaseManager:
             logger.debug("Начало очистки устаревших разговоров в Realtime Database")
             
             async def process_user(user_id: str, sessions: Dict) -> Dict:
-                """Обработка сессий одного пользователя."""
                 updates = {}
                 for session_id, session_data in sessions.items():
                     last_message_time = session_data.get("last_message_time", 0)
@@ -382,6 +372,47 @@ class FirebaseManager:
         factor=2,
         jitter=backoff.full_jitter
     )
+    async def cleanup_expired_cache(self, current_time: float, ttl_seconds: float) -> None:
+        """Очистка устаревшего кэша из Realtime Database."""
+        self._ensure_db_initialized()
+        try:
+            logger.debug("Начало очистки устаревшего кэша в Realtime Database")
+
+            def sync_get_cache():
+                return self._db.child("response_cache").get() or {}
+
+            cache_data = await self._run_sync_in_executor(sync_get_cache)
+            batch_updates = {}
+            processed_entries = 0
+
+            for user_id, channels in cache_data.items():
+                for channel_id, entries in channels.items():
+                    for cache_key, entry_data in entries.items():
+                        timestamp = entry_data.get("timestamp", 0)
+                        if current_time - timestamp > ttl_seconds:
+                            batch_updates[f"response_cache/{user_id}/{channel_id}/{cache_key}"] = None
+                            logger.debug(f"Запланировано удаление устаревшей записи кэша: {user_id}/{channel_id}/{cache_key}")
+                            processed_entries += 1
+
+            if batch_updates:
+                def sync_batch_update():
+                    self._db.update(batch_updates)
+                await self._run_sync_in_executor(sync_batch_update)
+                logger.debug(f"Выполнено пакетное удаление {len(batch_updates)} записей кэша")
+
+            logger.info(f"Очистка завершена: удалено {processed_entries} устаревших записей кэша")
+        except Exception as e:
+            logger.error(f"Ошибка очистки устаревшего кэша в Realtime Database: {e}")
+            raise Exception(f"Ошибка очистки кэша: {e}")
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        max_time=60,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
     async def cleanup_expired_giveaways(self, current_time: float, retention_seconds: float = 7 * 24 * 60 * 60) -> None:
         """Очистка устаревших розыгрышей из Realtime Database."""
         self._ensure_db_initialized()
@@ -395,7 +426,6 @@ class FirebaseManager:
             batch_updates = {}
             processed_giveaways = 0
 
-            # Обработка завершённых розыгрышей
             for custom_id, giveaway_data in giveaways_data.get("completed", {}).items():
                 completed_at = giveaway_data.get("completed_at", 0)
                 if current_time - completed_at > retention_seconds:
@@ -403,7 +433,6 @@ class FirebaseManager:
                     logger.debug(f"Запланировано удаление устаревшего завершённого розыгрыша {custom_id}")
                     processed_giveaways += 1
 
-            # Обработка активных розыгрышей
             for custom_id, giveaway_data in giveaways_data.get("active", {}).items():
                 end_time = giveaway_data.get("end_time", 0)
                 if current_time - end_time > retention_seconds:

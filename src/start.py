@@ -11,7 +11,7 @@ from .server import run_flask
 from .commands.restrict import check_bot_access, check_user_restriction, restrict_command_execution
 from .events.activity import set_bot_activity
 import time
-from typing import Callable, Optional, Union, Tuple
+from typing import Optional, Union, Tuple
 
 async def precheck_command_execution(interaction: discord.Interaction, command_name: str, bot_client: BotClient) -> Tuple[bool, str]:
     """

@@ -4,7 +4,7 @@ from discord import app_commands
 from discord.ui import Select, View, Button, Modal, TextInput
 from decouple import config
 from ..systemLog import logger
-from ..firebase.firebase_manager import FirebaseManager
+from ..utils.firebase.firebase_manager import FirebaseManager
 
 DEVELOPER_ID = config("DEVELOPER_ID", cast=int)
 

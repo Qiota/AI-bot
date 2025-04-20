@@ -12,24 +12,16 @@ DESCRIPTION = "Говорить от имени бота, с файлами ил
 async def check_permissions(interaction: discord.Interaction, bot_client) -> bool:
     """Проверяет, имеет ли пользователь права для выполнения команды."""
     if interaction.guild is None:
-        if interaction.user.id == bot_client.config.DEVELOPER_ID:
-            return True
-        await interaction.response.send_message(
-            "Команда доступна только на сервере или разработчику.", ephemeral=True, delete_after=10
-        )
-        return False
+        return interaction.user.id == bot_client.config.DEVELOPER_ID
 
     permissions = (
         interaction.user.guild_permissions.administrator,
         interaction.user.guild_permissions.manage_channels,
         interaction.user.guild_permissions.manage_messages
     )
-    if interaction.user.id == bot_client.config.DEVELOPER_ID or (isinstance(interaction.user, discord.Member) and any(permissions)):
-        return True
-    await interaction.response.send_message(
-        "Нет прав для выполнения команды.", ephemeral=True, delete_after=10
+    return interaction.user.id == bot_client.config.DEVELOPER_ID or (
+        isinstance(interaction.user, discord.Member) and any(permissions)
     )
-    return False
 
 async def get_message_reference(interaction: discord.Interaction, reply: Optional[str]) -> Tuple[Optional[discord.MessageReference], Optional[discord.Message]]:
     """Получает ссылку на сообщение для ответа и само сообщение."""
@@ -47,9 +39,6 @@ async def get_message_reference(interaction: discord.Interaction, reply: Optiona
             target_message = await channel.fetch_message(message_id)
             return target_message.to_reference(fail_if_not_exists=False), target_message
         except (discord.NotFound, discord.HTTPException) as e:
-            await interaction.response.send_message(
-                f"Ошибка получения сообщения по ссылке: {str(e)}", ephemeral=True, delete_after=10
-            )
             logger.error(f"Ошибка получения сообщения {message_id} для {interaction.user.id}: {e}")
             return None, None
 
@@ -59,15 +48,9 @@ async def get_message_reference(interaction: discord.Interaction, reply: Optiona
         target_message = await interaction.channel.fetch_message(message_id)
         return target_message.to_reference(fail_if_not_exists=False), target_message
     except ValueError:
-        await interaction.response.send_message(
-            "Ошибка: reply должен быть числовым ID или ссылкой на сообщение.", ephemeral=True, delete_after=10
-        )
         logger.error(f"Неверный reply от {interaction.user.id}: {reply}")
         return None, None
     except (discord.NotFound, discord.HTTPException) as e:
-        await interaction.response.send_message(
-            f"Ошибка получения сообщения: {str(e)}", ephemeral=True, delete_after=10
-        )
         logger.error(f"Ошибка получения сообщения {reply} для {interaction.user.id}: {e}")
         return None, None
 
@@ -92,6 +75,9 @@ async def process_attachments(attachments: List[discord.Attachment]) -> List[dis
 async def say(interaction: discord.Interaction, message: Optional[str] = None, bot_client=None, reply: Optional[str] = None, attachment: Optional[discord.Attachment] = None) -> None:
     """Команда /say: Отправляет сообщение от имени бота с опциональными файлами и ответом."""
     if not await check_permissions(interaction, bot_client):
+        await interaction.response.send_message(
+            "Нет прав для выполнения команды.", ephemeral=True, delete_after=10
+        )
         return
 
     await interaction.response.defer(ephemeral=True)
@@ -108,21 +94,14 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
 
         # Проверяем наличие контента
         if reply and not (message or attachments):
-            await interaction.response.send_message(
-                "Для ответа на сообщение нужен текст или хотя бы один файл.", ephemeral=True, delete_after=10
-            )
-            return
-
+            raise ValueError("Для ответа на сообщение нужен текст или хотя бы один файл.")
         if not message and not attachments:
-            await interaction.response.send_message(
-                "Нельзя отправить пустое сообщение без файлов.", ephemeral=True, delete_after=10
-            )
-            return
+            raise ValueError("Нельзя отправить пустое сообщение без файлов.")
 
         # Получаем ссылку на сообщение
         reference, target_message = await get_message_reference(interaction, reply)
         if reference is None and reply:
-            return
+            raise ValueError("Ошибка: reply должен быть числовым ID или ссылкой на сообщение.")
 
         # Обрабатываем вложения
         discord_files = await process_attachments(attachments)
@@ -146,23 +125,24 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
         await interaction.delete_original_response()
 
     except ValueError as e:
-        await interaction.response.send_message(str(e), ephemeral=True, delete_after=10)
+        await interaction.followup.send(str(e), ephemeral=True, delete_after=10)
         logger.error(f"Ошибка ValueError в /say для {interaction.user.id}: {e}")
     except discord.HTTPException as e:
         error_messages = {
             50035: "Сообщение слишком длинное (макс. 2000 символов).",
             50006: "Нельзя отправить пустое сообщение.",
-            50013: "У бота нет прав для отправки сообщения или файлов."
+            50013: "У бота нет прав для отправки сообщения или файлов.",
+            10062: "Взаимодействие устарело или не существует."
         }
-        await interaction.response.send_message(
+        await interaction.followup.send(
             error_messages.get(e.code, f"Ошибка отправки: {e}"), ephemeral=True, delete_after=10
         )
         logger.error(f"Ошибка HTTP в /say для {interaction.user.id}: {e}")
     except Exception as e:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Неизвестная ошибка: {e}", ephemeral=True, delete_after=10
         )
-        logger.error(f"Неизвестная ошибка в /say для {interaction.user.id}: {e}")
+        logger.error(f"Неизвестная ошибка в /say для {interaction.user.id}: {e}\n{traceback.format_exc()}")
 
 def create_command(bot_client):
     """Создаёт команду /say и контекстное меню."""
