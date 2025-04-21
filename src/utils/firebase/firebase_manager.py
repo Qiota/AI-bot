@@ -224,17 +224,18 @@ class FirebaseManager:
         factor=2,
         jitter=backoff.full_jitter
     )
-    async def save_cache(self, cache_path: str, cache_data: Dict) -> None:
+    async def save_cache(self, user_id: str, channel_type: str, channel_id: str, cache_key: str, cache_data: Dict) -> None:
         """Сохранение данных кэша в Realtime Database."""
         self._ensure_db_initialized()
         try:
-            logger.debug(f"Начало сохранения кэша для пути {cache_path}")
+            logger.debug(f"Начало сохранения кэша для {user_id}/{channel_type}/{channel_id}/{cache_key}")
+            cache_path = f"memories/{user_id}/{channel_type}/{channel_id}/{cache_key}"
             def sync_set():
                 self._db.child(cache_path).set(cache_data)
             await self._run_sync_in_executor(sync_set)
-            logger.debug(f"Кэш сохранён в Realtime Database для пути {cache_path}")
+            logger.debug(f"Кэш сохранён в Realtime Database для {cache_path}")
         except Exception as e:
-            logger.error(f"Ошибка сохранения кэша в Realtime Database для пути {cache_path}: {e}")
+            logger.error(f"Ошибка сохранения кэша в Realtime Database для {cache_path}: {e}")
             raise Exception(f"Ошибка сохранения кэша: {e}")
 
     @backoff.on_exception(
@@ -245,19 +246,20 @@ class FirebaseManager:
         factor=2,
         jitter=backoff.full_jitter
     )
-    async def load_cache(self, cache_path: str) -> Optional[Dict]:
+    async def load_cache(self, user_id: str, channel_type: str, channel_id: str, cache_key: str) -> Optional[Dict]:
         """Загрузка данных кэша из Realtime Database."""
         self._ensure_db_initialized()
         try:
-            logger.debug(f"Начало загрузки кэша для пути {cache_path}")
+            logger.debug(f"Начало загрузки кэша для {user_id}/{channel_type}/{channel_id}/{cache_key}")
+            cache_path = f"memories/{user_id}/{channel_type}/{channel_id}/{cache_key}"
             def sync_get():
                 data = self._db.child(cache_path).get()
                 return data if data else None
             data = await self._run_sync_in_executor(sync_get)
-            logger.debug(f"Кэш загружен из Realtime Database для пути {cache_path}")
+            logger.debug(f"Кэш загружен из Realtime Database для {cache_path}")
             return data
         except Exception as e:
-            logger.error(f"Ошибка загрузки кэша из Realtime Database для пути {cache_path}: {e}")
+            logger.error(f"Ошибка загрузки кэша из Realtime Database для {cache_path}: {e}")
             raise Exception(f"Ошибка загрузки кэша: {e}")
 
     @backoff.on_exception(
@@ -379,20 +381,23 @@ class FirebaseManager:
             logger.debug("Начало очистки устаревшего кэша в Realtime Database")
 
             def sync_get_cache():
-                return self._db.child("response_cache").get() or {}
+                return self._db.child("memories").get() or {}
 
             cache_data = await self._run_sync_in_executor(sync_get_cache)
             batch_updates = {}
             processed_entries = 0
 
-            for user_id, channels in cache_data.items():
-                for channel_id, entries in channels.items():
-                    for cache_key, entry_data in entries.items():
-                        timestamp = entry_data.get("timestamp", 0)
-                        if current_time - timestamp > ttl_seconds:
-                            batch_updates[f"response_cache/{user_id}/{channel_id}/{cache_key}"] = None
-                            logger.debug(f"Запланировано удаление устаревшей записи кэша: {user_id}/{channel_id}/{cache_key}")
-                            processed_entries += 1
+            for user_id, user_data in cache_data.items():
+                for channel_type in ['DM', 'guild']:
+                    channels = user_data.get(channel_type, {})
+                    for channel_id, entries in channels.items():
+                        for cache_key, entry_data in entries.items():
+                            timestamp = entry_data.get("timestamp", 0)
+                            if current_time - timestamp > ttl_seconds:
+                                cache_path = f"memories/{user_id}/{channel_type}/{channel_id}/{cache_key}"
+                                batch_updates[cache_path] = None
+                                logger.debug(f"Запланировано удаление устаревшей записи кэша: {cache_path}")
+                                processed_entries += 1
 
             if batch_updates:
                 def sync_batch_update():

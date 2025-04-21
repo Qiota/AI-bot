@@ -15,6 +15,7 @@ def run_flask():
     try:
         logger.info(f"Запуск Flask на {host}:{config.FLASK_PORT}")
         app.run(host=host, port=config.FLASK_PORT, debug=False, use_reloader=False)
+        logger.info(f"Flask-сервер успешно запущен на {host}:{config.FLASK_PORT}")
     except Exception as e:
         logger.error(f"Ошибка запуска Flask: {e}")
         raise

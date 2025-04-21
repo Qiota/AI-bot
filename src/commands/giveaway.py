@@ -5,6 +5,7 @@ import random
 import time
 import asyncio
 import string
+import uuid
 
 description = "Создать розыгрыш через слеш-команду с кнопкой участия"
 
@@ -16,25 +17,6 @@ MAX_DURATION = 10080
 DEFAULT_DESCRIPTION = "Нажмите на кнопку ниже, чтобы принять участие в розыгрыше!"
 GIVEAWAY_IMAGE = "https://i.postimg.cc/vHtwYT81/giveaway.png"
 WINNER_IMAGE = "https://i.postimg.cc/jjSrDb3s/winner.jpg"
-
-def format_remaining_time(remaining_seconds):
-    if remaining_seconds <= 0:
-        return "Завершён"
-    if remaining_seconds < 60:
-        return "несколько секунд"
-    days = remaining_seconds // (24 * 3600)
-    remaining_seconds %= (24 * 3600)
-    hours = remaining_seconds // 3600
-    remaining_seconds %= 3600
-    minutes = remaining_seconds // 60
-    parts = []
-    if days > 0:
-        parts.append(f"{days}д")
-    if hours > 0:
-        parts.append(f"{hours}ч")
-    if minutes > 0 or (days == 0 and hours == 0):
-        parts.append(f"{minutes}м")
-    return " ".join(parts)
 
 def parse_duration(duration_str):
     if not duration_str:
@@ -83,23 +65,21 @@ async def load_giveaways(bot_client):
         current_time = int(time.time())
         expired_giveaways = []
 
-        # Обработка активных розыгрышей
         for custom_id, giveaway_data in data.get("active", {}).items():
             giveaway = Giveaway.from_dict(giveaway_data, bot_client)
             if not giveaway:
                 logger.debug(f"Удаление недоступного активного розыгрыша {custom_id}")
-                expired_giveaways.append(f"giveaways/active/{custom_id}")
+                expired_giveaways.append(f"giveaway/active/{custom_id}")
                 continue
             if current_time >= giveaway.end_time:
                 giveaway.completed_at = current_time
                 completed_giveaways[custom_id] = giveaway
-                expired_giveaways.append(f"giveaways/active/{custom_id}")
+                expired_giveaways.append(f"giveaway/active/{custom_id}")
                 logger.debug(f"Активный розыгрыш {custom_id} истёк, перемещён в завершённые")
             else:
                 active_giveaways[custom_id] = giveaway
 
-        # Обработка завершённых розыгрышей
-        for custom_id, giveaway_data in data.get("completed", {}).items():
+        for custom_id, giveaway_data in data.get("ended", {}).items():
             completed_at = giveaway_data.get("completed_at", 0)
             if current_time - completed_at <= COMPLETED_GIVEAWAY_RETENTION:
                 giveaway = Giveaway.from_dict(giveaway_data, bot_client)
@@ -107,17 +87,14 @@ async def load_giveaways(bot_client):
                     completed_giveaways[custom_id] = giveaway
                 else:
                     logger.debug(f"Удаление недоступного завершённого розыгрыша {custom_id}")
-                    expired_giveaways.append(f"giveaways/completed/{custom_id}")
+                    expired_giveaways.append(f"giveaway/ended/{custom_id}")
             else:
                 logger.debug(f"Завершённый розыгрыш {custom_id} устарел, будет удалён")
-                expired_giveaways.append(f"giveaways/completed/{custom_id}")
+                expired_giveaways.append(f"giveaway/ended/{custom_id}")
 
-        # Удаление недоступных и устаревших розыгрышей из Firebase
         if expired_giveaways:
-            def sync_remove_expired():
-                updates = {path: None for path in expired_giveaways}
-                firebase_manager._db.update(updates)
-            await bot_client._run_sync_in_executor(sync_remove_expired)
+            updates = {path: None for path in expired_giveaways}
+            await asyncio.get_event_loop().run_in_executor(None, lambda: firebase_manager._db.update(updates))
             logger.debug(f"Удалено {len(expired_giveaways)} недоступных или устаревших розыгрышей из Firebase")
 
         logger.info(f"Загружено {len(active_giveaways)} активных и {len(completed_giveaways)} завершённых розыгрышей")
@@ -146,7 +123,6 @@ class Giveaway:
             "prize": self.prize,
             "duration": self.duration,
             "host_id": self.host.id,
-            "guild_id": self.channel.guild.id if self.channel.guild else None,
             "channel_id": self.channel.id,
             "custom_id": self.custom_id,
             "description": self.description,
@@ -162,34 +138,25 @@ class Giveaway:
     @classmethod
     def from_dict(cls, data, bot_client):
         try:
-            guild_id = data.get("guild_id")
             channel_id = data.get("channel_id")
             host_id = data.get("host_id")
             
-            # Проверка сервера
-            guild = bot_client.bot.get_guild(guild_id) if guild_id else None
-            if not guild:
-                logger.warning(f"Сервер {guild_id} не найден для розыгрыша {data.get('custom_id', 'unknown')}")
-                return None
-            
-            # Проверка канала
-            channel = guild.get_channel(channel_id) if channel_id else None
+            channel = bot_client.bot.get_channel(channel_id) if channel_id else None
             if not channel:
-                logger.warning(f"Канал {channel_id} не найден на сервере {guild_id} для розыгрыша {data.get('custom_id', 'unknown')}")
+                logger.warning(f"Канал {channel_id} недоступен для розыгрыша {data.get('custom_id', 'unknown')}")
                 return None
             
-            # Проверка хоста
-            host = bot_client.bot.get_user(host_id) or guild.get_member(host_id)
+            host = bot_client.bot.get_user(host_id)
             if not host:
                 logger.warning(f"Хост {host_id} не найден для розыгрыша {data.get('custom_id', 'unknown')}")
                 return None
             
-            # Загрузка участников
-            participants = {
-                bot_client.bot.get_user(user_id) or guild.get_member(user_id)
-                for user_id in data.get("participant_ids", [])
-            }
-            participants.discard(None)  # Удаляем None из набора
+            participants = set()
+            guild = channel.guild if hasattr(channel, 'guild') else None
+            for user_id in data.get("participant_ids", []):
+                user = bot_client.bot.get_user(user_id) or (guild.get_member(user_id) if guild else None)
+                if user:
+                    participants.add(user)
             
             giveaway = cls(
                 prize=data["prize"],
@@ -206,9 +173,8 @@ class Giveaway:
                 winner_image=data.get("winner_image")
             )
             
-            # Загрузка победителя, если есть
             if data.get("winner_id"):
-                giveaway.winner = bot_client.bot.get_user(data["winner_id"]) or guild.get_member(data["winner_id"])
+                giveaway.winner = bot_client.bot.get_user(data["winner_id"]) or (guild.get_member(data["winner_id"]) if guild else None)
                 if not giveaway.winner:
                     logger.warning(f"Победитель {data['winner_id']} не найден для розыгрыша {data.get('custom_id', 'unknown')}")
             
@@ -268,7 +234,7 @@ class GiveawayView(ui.View):
         self.bot_client = bot_client
         self.custom_id = custom_id
 
-    @ui.button(label="Участвовать", style=discord.ButtonStyle.green, emoji="🎉")
+    @ui.button(label="Участвовать", style=discord.ButtonStyle.green, emoji="🎉", custom_id="participate")
     async def participate(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
         if not hasattr(self.bot_client, 'giveaways') or not hasattr(self.bot_client, 'completed_giveaways'):
@@ -286,31 +252,46 @@ class GiveawayView(ui.View):
             embed = discord.Embed(description="Розыгрыш уже завершён!", color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
+        
         if interaction.user in giveaway.participants:
-            embed = discord.Embed(description="Вы уже участвуете!", color=discord.Color.orange())
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-        try:
-            giveaway.participants.add(interaction.user)
+            giveaway.participants.remove(interaction.user)
             await save_giveaways(self.bot_client.giveaways, self.bot_client.completed_giveaways, self.bot_client)
+            embed = discord.Embed(description="Вы вышли из розыгрыша!", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            message = await giveaway.channel.fetch_message(giveaway.message_id)
+            new_view = GiveawayView(self.bot_client, self.custom_id, (giveaway.end_time - current_time) // 60)
             embed = discord.Embed(
                 title="🎉 Новый розыгрыш!",
                 description=f"**Приз:** {giveaway.prize}\n**Описание:** {giveaway.description}",
                 color=discord.Color.gold()
             )
             embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
-            embed.add_field(name="Заканчивается через:", value=f"> `{format_remaining_time(giveaway.end_time - current_time)}`", inline=True)
+            embed.add_field(name="Заканчивается:", value=f"> <t:{giveaway.end_time}:R>", inline=True)
             embed.add_field(name="Дата окончания:", value=f"> <t:{giveaway.end_time}:F>", inline=True)
             embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
             embed.set_footer(text=f"ID ивента: {self.custom_id} | Участвуют: {len(giveaway.participants)}")
-            message = await giveaway.channel.fetch_message(giveaway.message_id)
-            await message.edit(embed=embed)
+            await message.edit(embed=embed, view=new_view)
+        else:
+            giveaway.participants.add(interaction.user)
+            await save_giveaways(self.bot_client.giveaways, self.bot_client.completed_giveaways, self.bot_client)
             embed = discord.Embed(description="Вы успешно участвуете в розыгрыше!", color=discord.Color.green())
             await interaction.followup.send(embed=embed, ephemeral=True)
-        except Exception as e:
-            logger.error(f"Ошибка при участии в розыгрыше {self.custom_id}: {e}")
-            embed = discord.Embed(description="Ошибка при записи участия.", color=discord.Color.red())
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            message = await giveaway.channel.fetch_message(giveaway.message_id)
+            new_view = GiveawayView(self.bot_client, self.custom_id, (giveaway.end_time - current_time) // 60)
+            new_view.children[0].label = "Выйти"
+            new_view.children[0].style = discord.ButtonStyle.red
+            new_view.children[0].emoji = "🚪"
+            embed = discord.Embed(
+                title="🎉 Новый розыгрыш!",
+                description=f"**Приз:** {giveaway.prize}\n**Описание:** {giveaway.description}",
+                color=discord.Color.gold()
+            )
+            embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
+            embed.add_field(name="Заканчивается:", value=f"> <t:{giveaway.end_time}:R>", inline=True)
+            embed.add_field(name="Дата окончания:", value=f"> <t:{giveaway.end_time}:F>", inline=True)
+            embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
+            embed.set_footer(text=f"ID ивента: {self.custom_id} | Участвуют: {len(giveaway.participants)}")
+            await message.edit(embed=embed, view=new_view)
 
     @ui.button(label="Список участников", style=discord.ButtonStyle.blurple)
     async def show_participants(self, interaction, button):
@@ -355,12 +336,12 @@ async def update_giveaway_message(bot_client, giveaway):
                 color=discord.Color.gold()
             )
             embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
-            embed.add_field(name="Заканчивается через:", value=f"> `{format_remaining_time(giveaway.end_time - current_time)}`", inline=True)
+            embed.add_field(name="Заканчивается:", value=f"> <t:{giveaway.end_time}:R>", inline=True)
             embed.add_field(name="Дата окончания:", value=f"> <t:{giveaway.end_time}:F>", inline=True)
             embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
             embed.set_footer(text=f"ID ивента: {giveaway.custom_id} | Участвуют: {len(giveaway.participants)}")
             await message.edit(embed=embed)
-            await asyncio.sleep(300)  # Обновление каждые 5 минут
+            await asyncio.sleep(300)
     except discord.HTTPException as e:
         logger.error(f"Ошибка обновления сообщения розыгрыша {giveaway.custom_id}: {e}")
     except Exception as e:
@@ -371,37 +352,67 @@ async def resume_giveaways(bot_client):
         logger.error("BotClient не имеет атрибутов giveaways или completed_giveaways")
         return
     try:
-        # Загружаем розыгрыши
         bot_client.giveaways, bot_client.completed_giveaways = await load_giveaways(bot_client)
-
-        # Очистка устаревших розыгрышей
         firebase_manager = await bot_client._ensure_firebase_initialized()
         await firebase_manager.cleanup_expired_giveaways(current_time=int(time.time()))
 
-        # Возобновление активных розыгрышей
         for custom_id, giveaway in list(bot_client.giveaways.items()):
-            guild = bot_client.bot.get_guild(giveaway.channel.guild.id) if giveaway.channel.guild else None
-            if not guild:
-                logger.warning(f"Сервер {giveaway.channel.guild.id} недоступен для розыгрыша {custom_id}")
-                del bot_client.giveaways[custom_id]
-                await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
-                continue
-            channel = guild.get_channel(giveaway.channel.id)
-            if not channel:
-                logger.warning(f"Канал {giveaway.channel.id} недоступен для розыгрыша {custom_id}")
-                del bot_client.giveaways[custom_id]
-                await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
-                continue
-
             current_time = int(time.time())
-            if giveaway.end_time > current_time:
-                remaining_time = giveaway.end_time - current_time
-                logger.debug(f"Возобновление розыгрыша {custom_id} с оставшимся временем {remaining_time} секунд")
-                asyncio.create_task(run_giveaway_timer(bot_client, giveaway, remaining_time))
-                asyncio.create_task(update_giveaway_message(bot_client, giveaway))
-            else:
+            if giveaway.end_time <= current_time:
                 logger.info(f"Розыгрыш {custom_id} истёк, завершаем")
                 asyncio.create_task(end_giveaway(bot_client, giveaway))
+                continue
+
+            # Проверяем и восстанавливаем сообщение розыгрыша
+            remaining_time = giveaway.end_time - current_time
+            try:
+                message = await giveaway.channel.fetch_message(giveaway.message_id)
+                # Обновляем сообщение с новым View для восстановления кнопок
+                embed = discord.Embed(
+                    title="🎉 Новый розыгрыш!",
+                    description=f"**Приз:** {giveaway.prize}\n**Описание:** {giveaway.description}",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
+                embed.add_field(name="Заканчивается:", value=f"> <t:{giveaway.end_time}:R>", inline=True)
+                embed.add_field(name="Дата окончания:", value=f"> <t:{giveaway.end_time}:F>", inline=True)
+                embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
+                embed.set_footer(text=f"ID ивента: {custom_id} | Участвуют: {len(giveaway.participants)}")
+                view = GiveawayView(bot_client, custom_id, remaining_time // 60)
+                await message.edit(embed=embed, view=view)
+                logger.debug(f"Сообщение розыгрыша {custom_id} обновлено с новым View")
+            except discord.NotFound:
+                # Если сообщение не найдено, создаём новое
+                logger.warning(f"Сообщение розыгрыша {giveaway.message_id} не найдено, создаём новое для {custom_id}")
+                embed = discord.Embed(
+                    title="🎉 Новый розыгрыш!",
+                    description=f"**Приз:** {giveaway.prize}\n**Описание:** {giveaway.description}",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
+                embed.add_field(name="Заканчивается:", value=f"> <t:{giveaway.end_time}:R>", inline=True)
+                embed.add_field(name="Дата окончания:", value=f"> <t:{giveaway.end_time}:F>", inline=True)
+                embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
+                embed.set_footer(text=f"ID ивента: {custom_id} | Участвуют: {len(giveaway.participants)}")
+                view = GiveawayView(bot_client, custom_id, remaining_time // 60)
+                new_message = await giveaway.channel.send(embed=embed, view=view)
+                giveaway.message_id = new_message.id
+                await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
+                logger.debug(f"Создано новое сообщение для розыгрыша {custom_id} с ID {new_message.id}")
+            except discord.Forbidden:
+                logger.error(f"Нет прав для отправки/редактирования сообщения в канале {giveaway.channel.id} для розыгрыша {custom_id}")
+                del bot_client.giveaways[custom_id]
+                await firebase_manager._db.update({f"giveaway/active/{custom_id}": None})
+                logger.debug(f"Розыгрыш {custom_id} удалён из Firebase из-за отсутствия прав")
+                continue
+            except Exception as e:
+                logger.error(f"Ошибка при восстановлении сообщения розыгрыша {custom_id}: {e}")
+                continue
+
+            # Запускаем задачи для активного розыгрыша
+            logger.debug(f"Возобновление розыгрыша {custom_id} с оставшимся временем {remaining_time} секунд")
+            asyncio.create_task(run_giveaway_timer(bot_client, giveaway, remaining_time))
+            asyncio.create_task(update_giveaway_message(bot_client, giveaway))
 
         logger.info(f"Возобновлено {len(bot_client.giveaways)} активных розыгрышей")
     except Exception as e:
@@ -410,13 +421,85 @@ async def resume_giveaways(bot_client):
 async def run_giveaway_timer(bot_client, giveaway, remaining_time):
     try:
         await asyncio.sleep(remaining_time)
-        await end_giveaway(bot_client, giveaway)
+        if giveaway.custom_id in bot_client.giveaways:
+            await end_giveaway(bot_client, giveaway)
     except Exception as e:
         logger.error(f"Ошибка таймера розыгрыша {giveaway.custom_id}: {e}")
 
-def generate_custom_id():
-    characters = string.ascii_lowercase + string.digits
-    return ''.join(random.choice(characters) for _ in range(5))
+async def end_giveaway(bot_client, giveaway):
+    if not hasattr(bot_client, 'giveaways') or not hasattr(bot_client, 'completed_giveaways'):
+        logger.error("BotClient не имеет атрибутов giveaways или completed_giveaways")
+        return
+    try:
+        try:
+            message = await giveaway.channel.fetch_message(giveaway.message_id)
+            await message.delete()
+        except discord.NotFound:
+            pass  # Сообщение уже удалено или не найдено, продолжаем
+
+        view = discord.ui.View()
+        view.clear_items()
+        if not giveaway.participants:
+            embed = discord.Embed(
+                title="Розыгрыш завершён",
+                description=f"**Приз:** {giveaway.prize}\n**Никто не участвовал!**",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
+            embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
+            embed.set_footer(text=f"ID ивента: {giveaway.custom_id} | Участвуют: 0")
+            await giveaway.channel.send(embed=embed, view=view)
+        else:
+            giveaway.winner = random.choice(list(giveaway.participants))
+            embed = discord.Embed(
+                title="🎉 Розыгрыш завершён!",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Приз:", value=f"> `{giveaway.prize}`", inline=True)
+            embed.add_field(name="Победитель:", value=f"> {giveaway.winner.mention}", inline=True)
+            embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
+            embed.set_image(url=giveaway.winner_image or WINNER_IMAGE)
+            embed.set_footer(text=f"ID ивента: {giveaway.custom_id} | Участвовали: {len(giveaway.participants)}")
+            await giveaway.channel.send(content=f"{giveaway.host.mention} {giveaway.winner.mention}\n", embed=embed, view=view)
+        
+        giveaway.completed_at = int(time.time())
+        bot_client.completed_giveaways[giveaway.custom_id] = giveaway
+        bot_client.giveaways.pop(giveaway.custom_id, None)
+        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
+    except Exception as e:
+        logger.error(f"Ошибка завершения розыгрыша {giveaway.custom_id}: {e}")
+        # Пытаемся отправить сообщение даже при ошибке
+        try:
+            view = discord.ui.View()
+            view.clear_items()
+            if not giveaway.participants:
+                embed = discord.Embed(
+                    title="Розыгрыш завершён",
+                    description=f"**Приз:** {giveaway.prize}\n**Никто не участвовал!**",
+                    color=discord.Color.red()
+                )
+                embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
+                embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
+                embed.set_footer(text=f"ID ивента: {giveaway.custom_id} | Участвуют: 0")
+                await giveaway.channel.send(embed=embed, view=view)
+            else:
+                giveaway.winner = random.choice(list(giveaway.participants))
+                embed = discord.Embed(
+                    title="🎉 Розыгрыш завершён!",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Приз:", value=f"> `{giveaway.prize}`", inline=True)
+                embed.add_field(name="Победитель:", value=f"> {giveaway.winner.mention}", inline=True)
+                embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
+                embed.set_image(url=giveaway.winner_image or WINNER_IMAGE)
+                embed.set_footer(text=f"ID ивента: {giveaway.custom_id} | Участвовали: {len(giveaway.participants)}")
+                await giveaway.channel.send(content=f"{giveaway.host.mention} {giveaway.winner.mention}\n", embed=embed, view=view)
+            giveaway.completed_at = int(time.time())
+            bot_client.completed_giveaways[giveaway.custom_id] = giveaway
+            bot_client.giveaways.pop(giveaway.custom_id, None)
+            await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
+        except Exception as e2:
+            logger.error(f"Критическая ошибка при попытке отправки сообщения о завершении {giveaway.custom_id}: {e2}")
 
 async def start_giveaway(interaction, prize, duration_str, description, bot_client, giveaway_image=None, winner_image=None):
     await interaction.response.defer(ephemeral=True)
@@ -461,7 +544,7 @@ async def start_giveaway(interaction, prize, duration_str, description, bot_clie
             color=discord.Color.gold()
         )
         embed.add_field(name="Организатор:", value=f"<@{interaction.user.id}>", inline=True)
-        embed.add_field(name="Заканчивается через:", value=f"> `{format_remaining_time(duration * 60)}`", inline=True)
+        embed.add_field(name="Заканчивается:", value=f"> <t:{giveaway.end_time}:R>", inline=True)
         embed.add_field(name="Дата окончания:", value=f"> <t:{giveaway.end_time}:F>", inline=True)
         embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
         embed.set_footer(text=f"ID ивента: {final_custom_id} | Участвуют: 0")
@@ -480,51 +563,6 @@ async def start_giveaway(interaction, prize, duration_str, description, bot_clie
         logger.error(f"Ошибка создания розыгрыша: {e}")
         embed = discord.Embed(description="Ошибка при создании розыгрыша.", color=discord.Color.red())
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-async def end_giveaway(bot_client, giveaway):
-    if not hasattr(bot_client, 'giveaways') or not hasattr(bot_client, 'completed_giveaways'):
-        logger.error("BotClient не имеет атрибутов giveaways или completed_giveaways")
-        return
-    try:
-        message = await giveaway.channel.fetch_message(giveaway.message_id)
-        view = discord.ui.View()
-        view.clear_items()
-        if not giveaway.participants:
-            embed = discord.Embed(
-                title="Розыгрыш завершён",
-                description=f"**Приз:** {giveaway.prize}\n**Никто не участвовал!**",
-                color=discord.Color.red()
-            )
-            embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
-            embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
-            embed.set_footer(text=f"ID ивента: {giveaway.custom_id} | Участвуют: 0")
-            await message.edit(embed=embed, view=view)
-        else:
-            giveaway.winner = random.choice(list(giveaway.participants))
-            embed = discord.Embed(
-                title="🎉 Розыгрыш завершён!",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Приз:", value=f"> `{giveaway.prize}`", inline=True)
-            embed.add_field(name="Победитель:", value=f"> {giveaway.winner.mention}", inline=True)
-            embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
-            embed.set_image(url=giveaway.winner_image or WINNER_IMAGE)
-            embed.set_footer(text=f"ID ивента: {giveaway.custom_id} | Участвовали: {len(giveaway.participants)}")
-            await message.edit(content=f"{giveaway.host.mention} {giveaway.winner.mention}\n", embed=embed, view=view)
-        giveaway.completed_at = int(time.time())
-        bot_client.completed_giveaways[giveaway.custom_id] = giveaway
-        bot_client.giveaways.pop(giveaway.custom_id, None)
-        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
-    except discord.NotFound:
-        logger.error(f"Сообщение розыгрыша {giveaway.message_id} не найдено")
-        bot_client.completed_giveaways[giveaway.custom_id] = giveaway
-        bot_client.giveaways.pop(giveaway.custom_id, None)
-        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
-    except Exception as e:
-        logger.error(f"Ошибка завершения розыгрыша {giveaway.custom_id}: {e}")
-        bot_client.completed_giveaways[giveaway.custom_id] = giveaway
-        bot_client.giveaways.pop(giveaway.custom_id, None)
-        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
 
 async def reroll_giveaway(interaction, custom_id, bot_client):
     await interaction.response.defer(ephemeral=True)
@@ -558,30 +596,32 @@ async def reroll_giveaway(interaction, custom_id, bot_client):
         if not available_participants:
             embed = discord.Embed(description="Нет доступных участников для реролла.", color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-        giveaway.winner = random.choice(list(available_participants))
-        giveaway.completed_at = int(time.time())
-        bot_client.completed_giveaways[custom_id] = giveaway
-        bot_client.giveaways.pop(custom_id, None)
-        await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
-        embed = discord.Embed(
-            title="🎉 Реролл розыгрыша!",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="Приз:", value=f"> `{giveaway.prize}`", inline=True)
-        embed.add_field(name="Новый победитель:", value=f"> {giveaway.winner.mention}", inline=True)
-        embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
-        embed.set_image(url=giveaway.winner_image or WINNER_IMAGE)
-        embed.set_footer(text=f"ID ивента: {custom_id} | Участвовали: {len(giveaway.participants)}")
-        await interaction.followup.send(
-            f"{giveaway.host.mention} {giveaway.winner.mention}\nРеролл! Новый победитель для **{giveaway.prize}** (`{custom_id}`)!",
-            embed=embed
-        )
-        try:
-            message = await giveaway.channel.fetch_message(giveaway.message_id)
-            await message.edit(content=f"{giveaway.host.mention} {giveaway.winner.mention}\n", embed=embed)
-        except discord.NotFound:
-            logger.warning(f"Сообщение розыгрыша {giveaway.message_id} не найдено при реролле")
+        else:
+            giveaway.winner = random.choice(list(available_participants))
+            giveaway.completed_at = int(time.time())
+            bot_client.completed_giveaways[custom_id] = giveaway
+            bot_client.giveaways.pop(custom_id, None)
+            await save_giveaways(bot_client.giveaways, bot_client.completed_giveaways, bot_client)
+            embed = discord.Embed(
+                title="🎉 Реролл розыгрыша!",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Приз:", value=f"> `{giveaway.prize}`", inline=True)
+            embed.add_field(name="Новый победитель:", value=f"> {giveaway.winner.mention}", inline=True)
+            embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
+            embed.set_image(url=giveaway.winner_image or WINNER_IMAGE)
+            embed.set_footer(text=f"ID ивента: {custom_id} | Участвовали: {len(giveaway.participants)}")
+            await interaction.followup.send(
+                f"{giveaway.host.mention} {giveaway.winner.mention}\nРеролл! Новый победитель для **{giveaway.prize}** (`{custom_id}`)!",
+                embed=embed
+            )
+            try:
+                message = await giveaway.channel.fetch_message(giveaway.message_id)
+                await message.delete()
+                await giveaway.channel.send(content=f"{giveaway.host.mention} {giveaway.winner.mention}\n", embed=embed)
+            except discord.NotFound:
+                logger.warning(f"Сообщение розыгрыша {giveaway.message_id} не найдено при реролле")
+                await giveaway.channel.send(content=f"{giveaway.host.mention} {giveaway.winner.mention}\n", embed=embed)
     except Exception as e:
         logger.error(f"Ошибка реролла розыгрыша {custom_id}: {e}")
         embed = discord.Embed(description="Ошибка при реролле.", color=discord.Color.red())
@@ -635,7 +675,7 @@ async def edit_giveaway(interaction, custom_id, prize, duration_str, description
             color=discord.Color.gold()
         )
         embed.add_field(name="Организатор:", value=f"<@{giveaway.host.id}>", inline=True)
-        embed.add_field(name="Заканчивается через:", value=f"> `{format_remaining_time(giveaway.end_time - int(time.time()))}`", inline=True)
+        embed.add_field(name="Заканчивается:", value=f"> <t:{giveaway.end_time}:R>", inline=True)
         embed.add_field(name="Дата окончания:", value=f"> <t:{giveaway.end_time}:F>", inline=True)
         embed.set_image(url=giveaway.giveaway_image or GIVEAWAY_IMAGE)
         embed.set_footer(text=f"ID ивента: {giveaway.custom_id} | Участвуют: {len(giveaway.participants)}")
@@ -655,6 +695,10 @@ async def edit_giveaway(interaction, custom_id, prize, duration_str, description
         logger.error(f"Ошибка редактирования розыгрыша {custom_id}: {e}")
         embed = discord.Embed(description="Ошибка при редактировании.", color=discord.Color.red())
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+def generate_custom_id():
+    characters = string.ascii_lowercase + string.digits
+    return ''.join(random.choice(characters) for _ in range(5))
 
 def create_command(bot_client):
     @app_commands.command(name="giveaway", description="Создать новый розыгрыш")
