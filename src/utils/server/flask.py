@@ -1,8 +1,10 @@
-from flask import Flask, render_template, request, redirect, url_for, session
+from flask import Flask, render_template, request, redirect, url_for, session, Response
 from flask_socketio import SocketIO
 import logging
+from logging.handlers import QueueHandler
 from queue import Queue
 import functools
+import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secure_flask_socketio_key_123'  # Для сессий и SocketIO
@@ -13,8 +15,8 @@ PASSWORD = "_2qgp5m_"
 # Заглушка для BotConfig
 class BotConfig:
     FLASK_HOST = '0.0.0.0'
-    FLASK_PORT = 5000
-    ENV = 'development'
+    FLASK_PORT = int(os.getenv('PORT', 5000))  # Используем PORT из окружения
+    ENV = os.getenv('ENV', 'development')
 
 # Настройка логирования
 logger = logging.getLogger('flask_app')
@@ -87,7 +89,11 @@ def run_flask():
     port = config.FLASK_PORT
     try:
         logger.info(f"Запуск Flask на {host}:{port}")
-        socketio.run(app, host=host, port=port, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
+        if config.ENV == 'production':
+            # В продакшене ожидается запуск через gunicorn
+            logger.info("Продакшен-режим: сервер должен запускаться через gunicorn")
+        else:
+            socketio.run(app, host=host, port=port, debug=True, use_reloader=False)
         logger.info(f"Flask-сервер успешно запущен на {host}:{port}")
     except Exception as e:
         logger.error(f"Ошибка запуска Flask: {e}")
