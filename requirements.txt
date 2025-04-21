@@ -10,3 +10,4 @@ Pillow
 firebase_admin
 backoff
 flask_socketio
+eventlet

@@ -71,6 +71,10 @@ def logout():
 def home():
     return render_template('index.html')
 
+@app.route('/health')
+def health():
+    return "OK", 200  # Health check endpoint для Heroku
+
 @socketio.on('connect', namespace='/console')
 def handle_connect():
     if not session.get('logged_in'):
@@ -88,11 +92,13 @@ def run_flask():
     host = config.FLASK_HOST
     port = config.FLASK_PORT
     try:
-        logger.info(f"Запуск Flask на {host}:{port}")
+        logger.info(f"Попытка запуска Flask на {host}:{port} в режиме {config.ENV}")
         if config.ENV == 'production':
-            # В продакшене ожидается запуск через gunicorn
-            logger.info("Продакшен-режим: сервер должен запускаться через gunicorn")
+            logger.info("Продакшен-режим: запуск через gunicorn/eventlet")
+            # В продакшене gunicorn должен запускать приложение
+            return  # Не запускаем socketio.run
         else:
+            logger.info("Локальный режим: запуск через socketio.run")
             socketio.run(app, host=host, port=port, debug=True, use_reloader=False)
         logger.info(f"Flask-сервер успешно запущен на {host}:{port}")
     except Exception as e:
