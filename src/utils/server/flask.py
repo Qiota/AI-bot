@@ -1,7 +1,6 @@
-from flask import Flask, render_template, request, redirect, url_for, session, Response
+from flask import Flask, render_template, request, redirect, url_for, session
 from flask_socketio import SocketIO
 import logging
-from logging.handlers import QueueHandler
 from queue import Queue
 import functools
 
@@ -88,7 +87,7 @@ def run_flask():
     port = config.FLASK_PORT
     try:
         logger.info(f"Запуск Flask на {host}:{port}")
-        socketio.run(app, host=host, port=port, debug=True, use_reloader=False)
+        socketio.run(app, host=host, port=port, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
         logger.info(f"Flask-сервер успешно запущен на {host}:{port}")
     except Exception as e:
         logger.error(f"Ошибка запуска Flask: {e}")
