@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flask Console</title>
+    <style>
+        :root {
+            --color1: #ea529f; /* Розовый */
+            --color2: #ef9165; /* Персиковый */
+            --color3: #eac748; /* Желтый */
+            --color4: #f1e87c; /* Светло-желтый */
+            --color5: #c6efc5; /* Светло-зеленый */
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(135deg, var(--color5), #f5f5f5);
+            color: #333;
+            padding: min(5vw, 2rem);
+            min-height: 100vh;
+        }
+
+        h1 {
+            text-align: center;
+            color: var(--color1);
+            font-size: min(8vw, 2.2rem);
+            margin-bottom: 1.5rem;
+        }
+
+        .button-container {
+            text-align: center;
+            margin: 1rem 0;
+            display: flex;
+            justify-content: center;
+            gap: min(3vw, 1rem);
+            flex-wrap: wrap;
+        }
+
+        button, .logout-btn {
+            padding: min(3vw, 0.8rem) min(5vw, 1.5rem);
+            background: var(--color3);
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: min(4vw, 1rem);
+            font-weight: bold;
+            text-decoration: none;
+            transition: background 0.3s ease, transform 0.2s ease;
+        }
+
+        button:hover, .logout-btn:hover {
+            background: var(--color2);
+            transform: scale(1.05);
+        }
+
+        #log {
+            font-family: 'Courier New', monospace;
+            background: #fff;
+            color: #333;
+            padding: min(4vw, 1rem);
+            height: min(70vh, 600px);
+            overflow-y: auto;
+            border: 2px solid var(--color4);
+            border-radius: 5px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            margin-top: 1rem;
+            font-size: min(3.5vw, 0.9rem);
+        }
+
+        #log div {
+            margin-bottom: 0.5rem;
+            word-wrap: break-word;
+        }
+
+        @media (max-width: 600px) {
+            body {
+                padding: 1rem;
+            }
+
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            button, .logout-btn {
+                font-size: 0.9rem;
+                padding: 0.7rem 1rem;
+            }
+
+            #log {
+                height: 50vh;
+                font-size: 0.8rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>Консоль Flask</h1>
+    <div class="button-container">
+        <button onclick="clearLog()">Очистить консоль</button>
+        <a href="{{ url_for('logout') }}" class="logout-btn">Выйти</a>
+    </div>
+    <div id="log"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
+    <script>
+        const socket = io('/console');
+        const logDiv = document.getElementById('log');
+
+        socket.on('log', function(data) {
+            const logEntry = document.createElement('div');
+            logEntry.textContent = data.message;
+            logDiv.appendChild(logEntry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        });
+
+        socket.on('connect', function() {
+            console.log('Подключено к серверу логов');
+        });
+
+        socket.on('disconnect', function() {
+            console.log('Отключено от сервера логов');
+        });
+
+        function clearLog() {
+            logDiv.innerHTML = '';
+        }
+    </script>
+</body>
+</html>

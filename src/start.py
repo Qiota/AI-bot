@@ -8,7 +8,7 @@ from aiohttp import ClientSession
 from .config import BotConfig
 from .aichat import BotClient
 from .systemLog import logger
-from .server import run_flask
+from .utils.server.flask import run_flask
 from .commands.restrict import check_bot_access, restrict_command_execution
 from .events.activity import set_bot_activity
 from .utils.checker import checker
