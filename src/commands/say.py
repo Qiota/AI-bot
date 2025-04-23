@@ -1,3 +1,4 @@
+# bot_commands/say.py
 from typing import List, Optional, Tuple
 import discord
 from discord import app_commands
@@ -5,6 +6,7 @@ import aiohttp
 import io
 import re
 import traceback
+import asyncio
 from ..systemLog import logger
 
 DESCRIPTION = "Говорить от имени бота, с файлами или ответом на сообщение"
@@ -28,7 +30,6 @@ async def get_message_reference(interaction: discord.Interaction, reply: Optiona
     if not reply:
         return None, None
 
-    # Проверка, является ли reply URL сообщения
     url_pattern = r"https?://discord\.com/channels/(?:@me|\d+)/(\d+)/(\d+)"
     match = re.match(url_pattern, reply.strip())
     
@@ -42,7 +43,6 @@ async def get_message_reference(interaction: discord.Interaction, reply: Optiona
             logger.error(f"Ошибка получения сообщения {message_id} для {interaction.user.id}: {e}")
             return None, None
 
-    # Проверка, является ли reply числовым ID
     try:
         message_id = int(reply)
         target_message = await interaction.channel.fetch_message(message_id)
@@ -54,28 +54,56 @@ async def get_message_reference(interaction: discord.Interaction, reply: Optiona
         logger.error(f"Ошибка получения сообщения {reply} для {interaction.user.id}: {e}")
         return None, None
 
+async def download_attachment(session: aiohttp.ClientSession, attachment: discord.Attachment, max_size: int) -> Optional[discord.File]:
+    """Асинхронно загружает одно вложение, возвращает discord.File или None при ошибке."""
+    try:
+        if attachment.size > max_size:
+            logger.warning(f"Файл {attachment.filename} слишком большой (макс. {max_size // 1024 // 1024} МБ).")
+            return None
+        async with session.get(attachment.url) as resp:
+            if resp.status != 200:
+                logger.warning(f"Ошибка загрузки файла {attachment.filename}: HTTP {resp.status}")
+                return None
+            data = await resp.read()
+            return discord.File(fp=io.BytesIO(data), filename=attachment.filename)
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке {attachment.filename}: {e}")
+        return None
+
 async def process_attachments(attachments: List[discord.Attachment]) -> List[discord.File]:
-    """Загружает вложения и возвращает список discord.File."""
-    discord_files = []
+    """Параллельно загружает вложения и возвращает список discord.File, игнорируя некритичные ошибки."""
     max_size = 25 * 1024 * 1024  # 25 МБ
     max_files = 10  # Максимум 10 вложений
 
     async with aiohttp.ClientSession() as session:
-        for att in attachments[:max_files]:
-            if att.size > max_size:
-                raise ValueError(f"Файл {att.filename} слишком большой (макс. 25 МБ).")
-            async with session.get(att.url) as resp:
-                if resp.status != 200:
-                    raise ValueError(f"Ошибка загрузки файла {att.filename}: HTTP {resp.status}")
-                data = await resp.read()
-                discord_files.append(discord.File(fp=io.BytesIO(data), filename=att.filename))
+        tasks = [
+            download_attachment(session, att, max_size)
+            for att in attachments[:max_files]
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+        discord_files = [file for file in results if file is not None]
 
+    if not discord_files and attachments:
+        raise ValueError("Не удалось загрузить ни один файл.")
+    
     return discord_files
 
 async def say(interaction: discord.Interaction, message: Optional[str] = None, bot_client=None, reply: Optional[str] = None, attachment: Optional[discord.Attachment] = None) -> None:
     """Команда /say: Отправляет сообщение от имени бота с опциональными файлами и ответом."""
-    # Немедленный defer для предотвращения ошибки 10062
-    await interaction.response.defer(ephemeral=True)
+    # Собираем все вложения
+    attachments = [attachment] if attachment else []
+    additional_attachments = [
+        discord.Attachment(data=att, state=interaction._state)
+        for att in interaction.data.get('resolved', {}).get('attachments', {}).values()
+        if not attachment or str(att.get('id')) != str(attachment.id)
+    ]
+    attachments.extend(additional_attachments)
+
+    # Определяем, нужно ли делать команду эфемерной
+    is_ephemeral = bool(attachments)
+
+    # Немедленный defer
+    await interaction.response.defer(ephemeral=is_ephemeral)
 
     try:
         # Проверка прав
@@ -84,15 +112,6 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
                 "Нет прав для выполнения команды.", ephemeral=True, delete_after=10
             )
             return
-
-        # Собираем все вложения
-        attachments = [attachment] if attachment else []
-        additional_attachments = [
-            discord.Attachment(data=att, state=interaction._state)
-            for att in interaction.data.get('resolved', {}).get('attachments', {}).values()
-            if not attachment or str(att.get('id')) != str(attachment.id)
-        ]
-        attachments.extend(additional_attachments)
 
         # Проверяем наличие контента
         if not message and not attachments and not reply:
@@ -106,23 +125,25 @@ async def say(interaction: discord.Interaction, message: Optional[str] = None, b
         # Обрабатываем вложения
         discord_files = await process_attachments(attachments) if attachments else None
 
-        # Отправляем сообщение
+        # Отправляем сообщение публично
         try:
-            await interaction.channel.send(
+            sent_message = await interaction.channel.send(
                 content=message[:2000] if message else None,
                 files=discord_files or None,
                 reference=reference
             )
         except discord.HTTPException as e:
             if e.code == 50035 and reference and target_message:  # Слишком длинное сообщение
-                await target_message.reply(
+                sent_message = await target_message.reply(
                     content=message[:2000] if message else None,
                     files=discord_files or None
                 )
             else:
                 raise e
 
-        await interaction.delete_original_response()
+        # Удаляем исходное взаимодействие, если оно было эфемерным
+        if is_ephemeral:
+            await interaction.delete_original_response()
 
     except ValueError as e:
         await interaction.followup.send(str(e), ephemeral=True, delete_after=10)
