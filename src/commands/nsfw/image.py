@@ -13,7 +13,7 @@ import PIL.ImageEnhance
 import io
 import os
 import re
-from ..systemLog import logger
+from ...systemLog import logger
 
 description = "Генерирует изображение, вдохновлённое editor.imagelabs.net"
 command_lock = Lock()
