@@ -392,8 +392,8 @@ class NavigationView(View):
         except discord.DiscordException as e:
             logger.error(f"Ошибка при отключении view по таймауту: {e}")
 
-async def aihentai(interaction: discord.Interaction, query: Optional[str] = None) -> None:
-    """Команда /aihentai: Поиск по AnimeIdHentai."""
+async def aidhentai(interaction: discord.Interaction, query: Optional[str] = None) -> None:
+    """Команда /aidhentai: Поиск по AnimeIdHentai."""
     if interaction.guild is not None and not interaction.channel.nsfw:
         await interaction.response.send_message(
             "Эта команда доступна только в NSFW-каналах или ЛС.",
@@ -427,7 +427,7 @@ async def aihentai(interaction: discord.Interaction, query: Optional[str] = None
         logger.error(f"Ошибка парсинга для {interaction.user.id}: {e}")
         await interaction.followup.send("Ошибка при обработке данных.", ephemeral=False)
     except Exception as e:
-        logger.error(f"Неизвестная ошибка /aihentai для {interaction.user.id}: {e}")
+        logger.error(f"Неизвестная ошибка /aidhentai для {interaction.user.id}: {e}")
         await interaction.followup.send("Произошла неизвестная ошибка.", ephemeral=False)
 
 @lru_cache(maxsize=1000)
@@ -628,15 +628,15 @@ def translate_field_name(field_name: str) -> str:
     return translations.get(field_name, field_name)
 
 def create_command(bot_client=None):
-    """Создает слеш-команду /aihentai."""
-    @app_commands.command(name="aidHentai", description=description)
+    """Создает слеш-команду /aidhentai."""
+    @app_commands.command(name="aidhentai", description=description)
     @app_commands.describe(query="Поисковый запрос")
     async def wrapper(interaction: discord.Interaction, query: Optional[str] = None) -> None:
-        await aihentai(interaction, query)
+        await aidhentai(interaction, query)
 
     @wrapper.error
     async def command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-        logger.error(f"Ошибка /aihentai для {interaction.user.id}: {error}")
+        logger.error(f"Ошибка /aidhentai для {interaction.user.id}: {error}")
         try:
             await interaction.response.send_message("Ошибка при выполнении команды.", ephemeral=False)
         except discord.DiscordException:
