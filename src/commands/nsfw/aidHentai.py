@@ -257,7 +257,17 @@ class NavigationView(View):
         self.last_interaction = asyncio.get_event_loop().time()
         self.update_buttons()
 
-        await interaction.response.defer()
+        try:
+            await interaction.response.defer()
+        except discord.errors.InteractionResponded:
+            logger.debug("Взаимодействие уже обработано, продолжаем")
+        except discord.errors.NotFound as e:
+            logger.error(f"Взаимодействие не найдено: {e}")
+            self.is_loading = False
+            self.loading_button = None
+            self.update_buttons()
+            await interaction.followup.send("Взаимодействие устарело. Попробуйте снова.", ephemeral=True)
+            return
 
         new_index = self.current_index + direction
         if new_index < 0 and self.current_page > 1:
@@ -385,6 +395,13 @@ class NavigationView(View):
         except discord.DiscordException as e:
             logger.error(f"Ошибка при отключении view: {e}\n{traceback.format_exc()}")
 
+@backoff.on_exception(
+    backoff.expo,
+    (aiohttp.ClientError, asyncio.TimeoutError, discord.errors.NotFound),
+    max_tries=3,
+    max_time=10,
+    jitter=backoff.full_jitter
+)
 async def aidhentai(interaction: discord.Interaction, bot_client, query: Optional[str] = None) -> None:
     """Команда /aidhentai: Поиск по AnimeIdHentai."""
     guild_id = str(interaction.guild.id) if interaction.guild else "DM"
@@ -419,7 +436,15 @@ async def aidhentai(interaction: discord.Interaction, bot_client, query: Optiona
     logger.debug(f"Все проверки пройдены, выполняется команда /aidhentai в гильдии {guild_id}, канал {channel_id}")
 
     # Отложить ответ немедленно
-    await interaction.response.defer(ephemeral=False)
+    try:
+        await interaction.response.defer(ephemeral=False)
+    except discord.errors.NotFound as e:
+        logger.error(f"Взаимодействие не найдено при defer: {e}")
+        await interaction.followup.send("Взаимодействие устарело. Попробуйте снова.", ephemeral=True)
+        return
+    except discord.errors.InteractionResponded:
+        logger.debug("Взаимодействие уже обработано")
+        pass
 
     try:
         async with aiohttp_session() as session:
@@ -444,6 +469,9 @@ async def aidhentai(interaction: discord.Interaction, bot_client, query: Optiona
     except ParseError as e:
         logger.error(f"Ошибка парсинга при выполнении /aidhentai: {e}\n{traceback.format_exc()}")
         await interaction.followup.send("Ошибка при обработке данных. Попробуйте другой запрос.", ephemeral=False)
+    except discord.errors.NotFound as e:
+        logger.error(f"Взаимодействие не найдено: {e}\n{traceback.format_exc()}")
+        await interaction.followup.send("Взаимодействие устарело. Попробуйте снова.", ephemeral=True)
     except Exception as e:
         logger.error(f"Неизвестная ошибка /aidhentai: {e}\n{traceback.format_exc()}")
         await interaction.followup.send("Произошла неизвестная ошибка. Обратитесь к администратору.", ephemeral=False)
