@@ -5,7 +5,7 @@ from g4f.client import AsyncClient
 from g4f.Provider import ImageLabs, Websim
 from io import BytesIO
 import aiohttp
-from asyncio import Lock
+from asyncio import Lock, Queue
 import asyncio
 from typing import Tuple
 import PIL.Image
@@ -18,6 +18,7 @@ from ..restrict import check_bot_access, restrict_command_execution
 
 description = "Генерирует изображение, вдохновлённое editor.imagelabs.net"
 command_lock = Lock()
+generation_queue = Queue(maxsize=5)  # Ограничение на 5 одновременных генераций
 MAX_FILE_SIZE = 8 * 1024 * 1024
 TEMP_DIR = os.path.join("src", "temp_images")
 
@@ -106,6 +107,7 @@ async def generate_image(
     view: View
 ) -> None:
     """Генерирует изображение с заданными параметрами."""
+    await generation_queue.put(interaction)  # Добавляем в очередь
     client = AsyncClient(provider=ImageLabs)
     success = False
     try:
@@ -187,14 +189,19 @@ async def generate_image(
 
     except Exception as e:
         view.enable_all_buttons()
-        if "20009" in str(e):
-            embed = Embed(title="❌ Ошибка", description="Запрос содержит явный контент.", color=0xE74C3C)
+        error_str = str(e)
+        if "400 Bad Request (error code: 20009)" in error_str or "20009" in error_str:
+            embed = Embed(
+                title="❌ Ошибка",
+                description="Запрос содержит явный контент, который не может быть отправлен. Пожалуйста, измените промпт.",
+                color=0xE74C3C
+            )
             await interaction.followup.send(embed=embed, ephemeral=True)
             logger.error(f"Ошибка /image для {interaction.user.id}: Явный контент (20009)")
         else:
-            embed = Embed(title="❌ Ошибка генерации", description=str(e), color=0xE74C3C)
+            embed = Embed(title="❌ Ошибка генерации", description=error_str[:1000], color=0xE74C3C)
             await interaction.followup.send(embed=embed, ephemeral=True)
-            logger.error(f"Ошибка /image для {interaction.user.id}: {e}")
+            logger.error(f"Ошибка /image для {interaction.user.id}: {error_str}")
         if not ephemeral:
             embed = Embed(title="⚙️ Текущие настройки", color=0x3498DB)
             embed.add_field(name="📝 Промпт", value=f"```{prompt[:1000]}[...]```" if len(prompt) > 1000 else f"```{prompt}```", inline=False)
@@ -205,6 +212,8 @@ async def generate_image(
             await interaction.followup.edit_message(interaction.message.id, embed=embed, view=view)
 
     finally:
+        await generation_queue.get()  # Удаляем из очереди
+        generation_queue.task_done()
         if (ephemeral or (not ephemeral and success)) and interaction.message is not None:
             await asyncio.sleep(0.1)
             try:
@@ -543,19 +552,39 @@ class SettingsView(View):
                 await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
                 return
 
-            async with command_lock:
-                await generate_image(
-                    interaction,
-                    self.prompt,
-                    ASPECT_RATIOS[self.aspect_ratio],
-                    self.negative_prompt,
-                    self.model,
-                    self.steps,
-                    self.cfg_scale,
-                    self.improve_prompt_flag,
-                    self.ephemeral,
-                    self
+            try:
+                if generation_queue.full():
+                    await interaction.followup.send(
+                        embed=Embed(
+                            title="⌛ Очередь заполнена",
+                            description="Пожалуйста, подождите, пока текущие генерации завершатся.",
+                            color=0x3498DB
+                        ),
+                        ephemeral=True
+                    )
+                    await generation_queue.put(interaction)  # Ждём в очереди
+
+                async with command_lock:
+                    await generate_image(
+                        interaction,
+                        self.prompt,
+                        ASPECT_RATIOS[self.aspect_ratio],
+                        self.negative_prompt,
+                        self.model,
+                        self.steps,
+                        self.cfg_scale,
+                        self.improve_prompt_flag,
+                        self.ephemeral,
+                        self
+                    )
+            except asyncio.QueueFull:
+                embed = Embed(
+                    title="❌ Ошибка",
+                    description="Очередь генерации заполнена. Пожалуйста, попробуйте позже.",
+                    color=0xE74C3C
                 )
+                self.enable_all_buttons()
+                await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
 
 def create_command(bot_client):
     """Создаёт группу команд /image."""
