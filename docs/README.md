@@ -12,8 +12,10 @@ DEVELOPER_ID=ваш_id_разработчика
 FLASK_PORT=порт_для_flask_сервера
 G_SEARCH_KEY=ключ_для_google_search_api
 G_CSE=идентификатор_поисковой_системы_google
-FIREBASE_KEY_PATH=путь_к_файлу_ключа_firebase
+FIREBASE_CREDENTIALS=ваш_json_ключ_firebase
 FIREBASE_DATABASE_URL=ваш_url_firebase_database
+FIREBASE_CREDENTIALS_URL=опциональный_url_для_загрузки_ключа
+FIREBASE_CREDENTIALS_HEADERS=опциональные_заголовки_для_запроса_ключа
 ```
 
 ### Описание параметров
@@ -23,8 +25,10 @@ FIREBASE_DATABASE_URL=ваш_url_firebase_database
 - `FLASK_PORT`: Порт для запуска Flask-сервера (например, `5000`).
 - `G_SEARCH_KEY`: API-ключ для Google Custom Search (для поиска).
 - `G_CSE`: Идентификатор поисковой системы Google Custom Search.
-- `FIREBASE_KEY_PATH`: Путь к JSON-файлу с ключом Firebase для работы с базой данных.
+- `FIREBASE_CREDENTIALS`: JSON-объект с учетными данными Firebase для работы с базой данных (в формате `{"type": "service_account", ...}`).
 - `FIREBASE_DATABASE_URL`: URL вашей Firebase Realtime Database (например, `https://your-project-id.firebaseio.com/`).
+- `FIREBASE_CREDENTIALS_URL`: Опциональный URL для загрузки учетных данных Firebase через HTTP (например, хранилище секретов).
+- `FIREBASE_CREDENTIALS_HEADERS`: Опциональные HTTP-заголовки в формате JSON для запроса учетных данных (например, `{"Authorization": "Bearer token"}`).
 
 ## Установка зависимостей
 
@@ -44,4 +48,4 @@ python start.py
 
 ## Условия использования
 
-Пожалуйста, ознакомьтесь с условиями использования в файле [TERMS.md](docs/TERMS.md) перед использованием бота или его исходного кода.
+Пожалуйста, ознакомьтесь с условиями использования в файле [TERMS.md](TERMS.md) перед использованием бота или его исходного кода.
