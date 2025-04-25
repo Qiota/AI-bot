@@ -9,6 +9,7 @@ import asyncio
 import json
 import aiohttp
 from contextlib import asynccontextmanager
+from io import StringIO
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ class FirebaseManager:
     """Менеджер для работы с Firebase Realtime Database."""
     _instance: Optional['FirebaseManager'] = None
     _file_cache: Dict[str, str] = {}
+    _credentials_cache: Optional[Dict] = None
     _initialized: bool = False
     _init_lock: asyncio.Lock = asyncio.Lock()
     _db_url: str = config('FIREBASE_DATABASE_URL')
@@ -65,6 +67,64 @@ class FirebaseManager:
             logger.error(f"Ошибка при поиске файла {filename}: {e}")
             return None
 
+    @staticmethod
+    async def fetch_credentials_from_url(url: str, headers: Optional[Dict] = None) -> Optional[Dict]:
+        """Получение учетных данных Firebase через HTTP-запрос."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        logger.info("Учетные данные успешно загружены через HTTP")
+                        return data
+                    else:
+                        logger.error(f"Ошибка загрузки учетных данных через HTTP: {response.status}")
+                        return None
+        except Exception as e:
+            logger.error(f"Ошибка при HTTP-запросе учетных данных: {e}")
+            return None
+
+    @classmethod
+    async def get_credentials(cls) -> Optional[credentials.Certificate]:
+        """Получение учетных данных Firebase из файла, переменной окружения или URL."""
+        if cls._credentials_cache:
+            logger.debug("Использование кэшированных учетных данных Firebase")
+            return credentials.Certificate(cls._credentials_cache)
+
+        firebase_key_filename = 'serviceAccountKey.json'
+        firebase_key_path = cls.find_file(firebase_key_filename)
+
+        # 1. Проверка файла
+        if firebase_key_path:
+            logger.info(f"Использование учетных данных из файла: {firebase_key_path}")
+            return credentials.Certificate(firebase_key_path)
+
+        # 2. Проверка переменной окружения FIREBASE_CREDENTIALS
+        firebase_credentials_json = config('FIREBASE_CREDENTIALS', default=None)
+        if firebase_credentials_json:
+            try:
+                credentials_dict = json.loads(firebase_credentials_json)
+                cls._credentials_cache = credentials_dict
+                logger.info("Учетные данные загружены из переменной окружения FIREBASE_CREDENTIALS")
+                return credentials.Certificate(credentials_dict)
+            except json.JSONDecodeError as e:
+                logger.error(f"Ошибка парсинга FIREBASE_CREDENTIALS: {e}")
+                return None
+
+        # 3. Проверка загрузки через HTTP
+        credentials_url = config('FIREBASE_CREDENTIALS_URL', default=None)
+        if credentials_url:
+            headers = config('FIREBASE_CREDENTIALS_HEADERS', default=None)
+            headers = json.loads(headers) if headers else None
+            credentials_dict = await cls.fetch_credentials_from_url(credentials_url, headers)
+            if credentials_dict:
+                cls._credentials_cache = credentials_dict
+                logger.info("Учетные данные загружены через HTTP")
+                return credentials.Certificate(credentials_dict)
+
+        logger.error("Не удалось найти учетные данные Firebase: файл, FIREBASE_CREDENTIALS или FIREBASE_CREDENTIALS_URL отсутствуют")
+        return None
+
     @classmethod
     async def initialize(cls) -> 'FirebaseManager':
         """Инициализация подключения к Firebase Realtime Database с использованием asyncio.Lock."""
@@ -76,20 +136,17 @@ class FirebaseManager:
                 try:
                     firebase_admin.get_app(name='[DEFAULT]')
                 except ValueError:
-                    firebase_key_filename = 'serviceAccountKey.json'
-                    firebase_key_path = cls.find_file(firebase_key_filename)
-                    
-                    if not firebase_key_path:
+                    cred = await cls.get_credentials()
+                    if not cred:
                         raise FileNotFoundError(
-                            f"Файл ключа Firebase '{firebase_key_filename}' не найден в проекте и не указан в FIREBASE_KEY_PATH"
+                            "Не удалось инициализировать Firebase: учетные данные не найдены"
                         )
                     
-                    cred = credentials.Certificate(firebase_key_path)
                     firebase_admin.initialize_app(cred, {
                         'databaseURL': cls._db_url,
                         'httpTimeout': 30
                     })
-                    logger.success("Firebase Realtime Database успешно инициализирован")
+                    logger.info("Firebase Realtime Database успешно инициализирован")
 
                 cls._instance = cls()
                 cls._instance._db = db.reference()
@@ -301,7 +358,7 @@ class FirebaseManager:
             logger.debug(f"Разговор {conversation_id} загружен из Realtime Database для пользователя {user_id}")
             return data
         except Exception as e:
-            logger.error(f"Ошибка загрузки разговора {conversation_id} из Realtime Database: {e}")
+            logger.error(f"Ошибка загрузки разговора {conversation_id} в Realtime Database: {e}")
             raise Exception(f"Ошибка загрузки разговора: {e}")
 
     @backoff.on_exception(
