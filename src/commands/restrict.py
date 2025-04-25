@@ -589,22 +589,18 @@ async def check_bot_access(obj: discord.Interaction | discord.Message, bot_clien
         logger.error(f"Ошибка в check_bot_access для гильдии {obj.guild.id if obj.guild else 'DM'}: {e}\n{traceback.format_exc()}")
         return False, "Ошибка при проверке доступа! Обратитесь к администратору."
 
-async def restrict_command_execution(obj: discord.Interaction, bot_client) -> bool:
+async def restrict_command_execution(obj: discord.Interaction, bot_client) -> tuple[bool, Optional[str]]:
     """Проверка выполнения команды /restrict."""
     try:
         if not bot_client.bot.is_ready():
             logger.debug("Бот не готов")
-            if not obj.response.is_done():
-                await obj.response.send_message("Бот еще не готов.", ephemeral=True)
-            return False
+            return False, "Бот еще не готов."
 
         if obj.guild:
             guild_ids = [guild.id for guild in bot_client.bot.guilds]
             if obj.guild.id not in guild_ids:
                 logger.warning(f"Гильдия {obj.guild.id} не найдена в списке гильдий бота")
-                if not obj.response.is_done():
-                    await obj.response.send_message("Бот отсутствует на этом сервере!", ephemeral=True)
-                return False
+                return False, "Бот отсутствует на этом сервере!"
 
             config = (guild_config_cache.get(str(obj.guild.id)) or (None, 0))[0]
             if config is None:
@@ -615,17 +611,13 @@ async def restrict_command_execution(obj: discord.Interaction, bot_client) -> bo
 
             if config is None:
                 logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена")
-                if not obj.response.is_done():
-                    await obj.response.send_message("Конфигурация сервера не найдена! Настройте через /restrict.", ephemeral=True)
-                return False
+                return False, "Конфигурация сервера не найдена! Настройте через /restrict."
 
         logger.debug(f"restrict_command_execution разрешил выполнение для гильдии {obj.guild.id if obj.guild else 'DM'}")
-        return True
+        return True, None
     except Exception as e:
         logger.error(f"Ошибка в restrict_command_execution: {e}\n{traceback.format_exc()}")
-        if not obj.response.is_done():
-            await obj.response.send_message("Ошибка при проверке доступа.", ephemeral=True)
-        return False
+        return False, "Ошибка при проверке доступа."
 
 async def handle_mention(message: discord.Message, bot_client) -> bool:
     """Обработка упоминания бота."""
@@ -655,17 +647,23 @@ async def handle_mention(message: discord.Message, bot_client) -> bool:
 
 async def restrict(interaction: discord.Interaction, bot_client):
     """Логика команды /restrict."""
-    if not await restrict_command_execution(interaction, bot_client):
+    # Check permissions first
+    if not interaction.user.guild_permissions.administrator and str(interaction.user.id) != str(DEVELOPER_ID):
+        if not interaction.response.is_done():
+            await interaction.response.send_message("Требуются права администратора или статус разработчика.", ephemeral=True)
+        logger.debug(f"Пользователь {interaction.user.id} не имеет прав для команды /restrict в гильдии {interaction.guild.id}")
+        return
+
+    # Validate command execution
+    result, reason = await restrict_command_execution(interaction, bot_client)
+    if not result:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(reason or "Не удалось выполнить команду.", ephemeral=True)
         return
 
     if not interaction.guild:
         if not interaction.response.is_done():
             await interaction.response.send_message("Команда только для серверов!", ephemeral=True)
-        return
-
-    if not interaction.user.guild_permissions.administrator and str(interaction.user.id) != str(DEVELOPER_ID):
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Требуются права администратора.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
@@ -689,7 +687,6 @@ async def restrict(interaction: discord.Interaction, bot_client):
 def create_command(bot_client):
     """Создание команды /restrict."""
     @app_commands.command(name="restrict", description=DESCRIPTION)
-    @app_commands.check(lambda i: i.user.guild_permissions.administrator or str(i.user.id) == str(DEVELOPER_ID))
     async def wrapper(interaction: discord.Interaction):
         await restrict(interaction, bot_client)
     wrapper.guild_only = True

@@ -14,6 +14,7 @@ from ...systemLog import logger
 from ..restrict import check_bot_access, restrict_command_execution
 import traceback
 from ...utils.checker import checker
+import backoff
 
 description = "Поиск по AnimeIdHentai"
 
@@ -40,7 +41,7 @@ class SearchResult:
 @asynccontextmanager
 async def aiohttp_session():
     """Контекстный менеджер для aiohttp сессии."""
-    timeout = aiohttp.ClientTimeout(total=20, connect=10)
+    timeout = aiohttp.ClientTimeout(total=30, connect=15)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         yield session
 
@@ -142,7 +143,7 @@ class NavigationView(View):
                     break
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
-            logger.debug(f"Задача проверки бездействия отменена")
+            logger.debug("Задача проверки бездействия отменена")
 
     def disable_navigation_buttons(self) -> None:
         """Отключает навигационные кнопки."""
@@ -203,7 +204,7 @@ class NavigationView(View):
         try:
             await interaction.response.send_modal(modal)
         except discord.DiscordException as e:
-            logger.error(f"Ошибка при открытии модального окна для пользователя {interaction.user.id}: {e}\n{traceback.format_exc()}")
+            logger.error(f"Ошибка при открытии модального окна: {e}\n{traceback.format_exc()}")
             await interaction.followup.send(
                 "Не удалось открыть окно ввода. Попробуйте снова.",
                 ephemeral=True
@@ -214,7 +215,7 @@ class NavigationView(View):
         if not url:
             return False
         parsed = urlparse(url)
-        return parsed.scheme in ('http', 'https', 'discord')
+        return parsed.scheme in ('http', 'https')
 
     async def load_page(self, target_page: int) -> bool:
         """Загружает результаты для указанной страницы."""
@@ -224,21 +225,18 @@ class NavigationView(View):
                 html = await fetch_html(session, url)
                 soup = BeautifulSoup(html, 'html.parser')
                 new_results = await parse_search_results(session, soup)
-
                 if not new_results:
                     logger.info(f"Нет результатов на странице {target_page} для запроса '{self.query}'")
                     return False
-
                 self.results = new_results
                 self.current_page = target_page
                 self.embed_cache.clear()
                 return True
-
         except (HttpError, ParseError) as e:
-            logger.error(f"Ошибка при загрузке страницы {target_page} для запроса '{self.query}': {e}\n{traceback.format_exc()}")
+            logger.error(f"Ошибка при загрузке страницы {target_page}: {e}\n{traceback.format_exc()}")
             return False
         except Exception as e:
-            logger.error(f"Неизвестная ошибка при загрузке страницы {target_page} для запроса '{self.query}': {e}\n{traceback.format_exc()}")
+            logger.error(f"Неизвестная ошибка при загрузке страницы {target_page}: {e}\n{traceback.format_exc()}")
             return False
 
     async def navigate(self, interaction: Interaction, direction: int, button: str) -> None:
@@ -262,7 +260,6 @@ class NavigationView(View):
         await interaction.response.defer()
 
         new_index = self.current_index + direction
-
         if new_index < 0 and self.current_page > 1:
             if await self.load_page(self.current_page - 1):
                 self.current_index = len(self.results) - 1
@@ -282,7 +279,7 @@ class NavigationView(View):
         try:
             await interaction.edit_original_response(embed=self.create_embed(), view=self)
         except discord.DiscordException as e:
-            logger.error(f"Ошибка при обновлении сообщения для пользователя {interaction.user.id}: {e}\n{traceback.format_exc()}")
+            logger.error(f"Ошибка при обновлении сообщения: {e}\n{traceback.format_exc()}")
             await interaction.followup.send(
                 "Не удалось обновить сообщение. Попробуйте снова.",
                 ephemeral=True
@@ -333,7 +330,7 @@ class NavigationView(View):
             if self.message:
                 await self.message.edit(embed=self.create_embed(), view=self)
         except discord.DiscordException as e:
-            logger.error(f"Ошибка при редактировании сообщения для пользователя {interaction.user.id}: {e}\n{traceback.format_exc()}")
+            logger.error(f"Ошибка при редактировании сообщения: {e}\n{traceback.format_exc()}")
             await interaction.followup.send(
                 "Не удалось обновить сообщение. Попробуйте снова.",
                 ephemeral=True
@@ -345,18 +342,16 @@ class NavigationView(View):
             return self.embed_cache[self.current_index]
 
         result = self.results[self.current_index]
-        # Ограничение длины описания с учётом тегов
         description = result.description[:300] + ("..." if len(result.description) > 300 else "")
         if result.tags:
             tag_links = [f"[{tag['name']}]({tag['url']})" for tag in result.tags if tag.get('name') and tag.get('url')]
             tags_text = f"\n\n🏷 Теги: {', '.join(tag_links)}"
-            # Убедимся, что общее описание не превышает лимит Discord (4096 символов)
             if len(description) + len(tags_text) > 4000:
                 description = description[:4000 - len(tags_text) - 3] + "..."
             description += tags_text
 
         embed = Embed(
-            title=f"🎬 {result.title}",
+            title=f"🎬 {result.title}"[:256],
             url=result.url,
             description=description,
             color=0xFF5733
@@ -366,7 +361,6 @@ class NavigationView(View):
         if result.image_url:
             embed.set_image(url=result.image_url)
 
-        # Ограничение количества полей для избежания превышения лимита Discord
         for field in result.additional_info[:12]:
             embed.add_field(
                 name=f"🔹 {field['name']}"[:256],
@@ -391,17 +385,17 @@ class NavigationView(View):
         except discord.DiscordException as e:
             logger.error(f"Ошибка при отключении view: {e}\n{traceback.format_exc()}")
 
-async def aidhentai(interaction: discord.Interaction, cog, query: Optional[str] = None) -> None:
+async def aidhentai(interaction: discord.Interaction, bot_client, query: Optional[str] = None) -> None:
     """Команда /aidhentai: Поиск по AnimeIdHentai."""
-    bot_client = cog  # cog теперь напрямую bot_client
     guild_id = str(interaction.guild.id) if interaction.guild else "DM"
     channel_id = str(interaction.channel.id) if interaction.channel else "DM"
 
     logger.debug(f"Попытка выполнения команды /aidhentai для пользователя {interaction.user.id} в гильдии {guild_id}, канал {channel_id}")
 
     # Проверка состояния бота и гильдии
-    if not await restrict_command_execution(interaction, bot_client):
-        await interaction.response.send_message("Конфигурация сервера не найдена! Настройте через /restrict.", ephemeral=True)
+    result, reason = await restrict_command_execution(interaction, bot_client)
+    if not result:
+        await interaction.response.send_message(reason or "Конфигурация сервера не найдена! Настройте через /restrict.", ephemeral=True)
         return
 
     # Проверка доступа бота к каналу
@@ -424,6 +418,7 @@ async def aidhentai(interaction: discord.Interaction, cog, query: Optional[str] 
 
     logger.debug(f"Все проверки пройдены, выполняется команда /aidhentai в гильдии {guild_id}, канал {channel_id}")
 
+    # Отложить ответ немедленно
     await interaction.response.defer(ephemeral=False)
 
     try:
@@ -444,13 +439,13 @@ async def aidhentai(interaction: discord.Interaction, cog, query: Optional[str] 
             view.message = message
 
     except HttpError as e:
-        logger.error(f"HTTP ошибка для {interaction.user.id} при выполнении /aidhentai в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
-        await interaction.followup.send("Ошибка при запросе к сайту. Попробуйте позже.", ephemeral=False)
+        logger.error(f"HTTP ошибка при выполнении /aidhentai: {e}\n{traceback.format_exc()}")
+        await interaction.followup.send("Сайт не отвечает. Попробуйте позже.", ephemeral=False)
     except ParseError as e:
-        logger.error(f"Ошибка парсинга для {interaction.user.id} при выполнении /aidhentai в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
+        logger.error(f"Ошибка парсинга при выполнении /aidhentai: {e}\n{traceback.format_exc()}")
         await interaction.followup.send("Ошибка при обработке данных. Попробуйте другой запрос.", ephemeral=False)
     except Exception as e:
-        logger.error(f"Неизвестная ошибка /aidhentai для {interaction.user.id} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
+        logger.error(f"Неизвестная ошибка /aidhentai: {e}\n{traceback.format_exc()}")
         await interaction.followup.send("Произошла неизвестная ошибка. Обратитесь к администратору.", ephemeral=False)
 
 @lru_cache(maxsize=1000)
@@ -471,6 +466,13 @@ def construct_url(query: Optional[str], page: int) -> str:
     query_string = urlencode(params, quote_via=quote)
     return f"{base_url}/?{query_string}"
 
+@backoff.on_exception(
+    backoff.expo,
+    (aiohttp.ClientError, asyncio.TimeoutError),
+    max_tries=3,
+    max_time=30,
+    jitter=backoff.full_jitter
+)
 async def fetch_html(session: aiohttp.ClientSession, url: str) -> str:
     """Получает HTML страницы."""
     try:
@@ -505,7 +507,13 @@ async def parse_search_results(session: aiohttp.ClientSession, soup: BeautifulSo
     if not elements:
         return []
 
-    tasks = [process_search_element(session, soup, i, e) for i, e in enumerate(elements)]
+    # Ограничение числа одновременно обрабатываемых элементов
+    semaphore = asyncio.Semaphore(5)
+    async def process_with_semaphore(i: int, e: BeautifulSoup) -> Optional[SearchResult]:
+        async with semaphore:
+            return await process_search_element(session, soup, i, e)
+
+    tasks = [process_with_semaphore(i, e) for i, e in enumerate(elements)]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return [r for r in results if not isinstance(r, Exception) and r]
 
@@ -531,11 +539,15 @@ async def process_search_element(session: aiohttp.ClientSession, soup: Beautiful
         meta_elements = soup.select('p.meta.df.fww.aic.mgt.fz12.link-co.op05')
         meta = '•'.join(item.strip() for item in meta_elements[index].get_text().split('•') if item.strip()) if index < len(meta_elements) else ''
 
-        async with session.get(url) as response:
-            if response.status != 200:
-                logger.warning(f"Элемент {index}: HTTP ошибка {response.status}")
-                return None
-            detail_html = await response.text()
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logger.warning(f"Элемент {index}: HTTP ошибка {response.status}")
+                    return None
+                detail_html = await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(f"Элемент {index}: Ошибка запроса деталей: {e}")
+            return None
 
         detail_soup = BeautifulSoup(detail_html, 'html.parser')
         iframe = detail_soup.select_one('iframe')
@@ -545,7 +557,7 @@ async def process_search_element(session: aiohttp.ClientSession, soup: Beautiful
             parsed = urlparse(video_link)
             if not parsed.scheme and video_link.startswith('//'):
                 video_link = f"https:{video_link}"
-            elif parsed.scheme not in ('http', 'https', 'discord'):
+            elif parsed.scheme not in ('http', 'https'):
                 video_link = None
 
         image_url = await fetch_image_url(session, video_link) if video_link else None
@@ -570,14 +582,21 @@ async def process_search_element(session: aiohttp.ClientSession, soup: Beautiful
         )
 
     except Exception as e:
-        logger.warning(f"Элемент {index}: Ошибка обработки: {str(e)}\n{traceback.format_exc()}")
+        logger.warning(f"Элемент {index}: Ошибка обработки: {e}\n{traceback.format_exc()}")
         return None
 
-@lru_cache(maxsize=100)
+# Кэш для изображений
+_image_cache: Dict[str, Optional[str]] = {}
+_image_cache_lock = asyncio.Lock()
+
 async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[str]) -> Optional[str]:
     """Получает URL изображения."""
     if not video_url or urlparse(video_url).scheme not in ('http', 'https'):
         return None
+
+    async with _image_cache_lock:
+        if video_url in _image_cache:
+            return _image_cache[video_url]
 
     try:
         async with session.get(video_url) as response:
@@ -590,11 +609,19 @@ async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[st
         backdrop = soup.select_one('div.backdrop')
         if backdrop and backdrop.get('style'):
             match = re.search(r'url\(["\']?(https:\/\/nhplayer\.com\/content\/previews\/[^"\']+\.jpg)["\']?\)', backdrop.get('style'))
-            return match.group(1) if match else None
-        return None
+            image_url = match.group(1) if match else None
+        else:
+            image_url = None
 
-    except aiohttp.ClientError as e:
-        logger.debug(f"Сетевая ошибка при запросе изображения: {e}\n{traceback.format_exc()}")
+        async with _image_cache_lock:
+            _image_cache[video_url] = image_url
+            if len(_image_cache) > 100:  # Ограничение размера кэша
+                _image_cache.pop(next(iter(_image_cache)))
+
+        return image_url
+
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.debug(f"Сетевая ошибка при запросе изображения: {e}")
         return None
     except Exception as e:
         logger.warning(f"Неизвестная ошибка при запросе изображения: {e}\n{traceback.format_exc()}")
@@ -624,12 +651,12 @@ def translate_field_name(field_name: str) -> str:
     }
     return translations.get(field_name, field_name)
 
-def create_command(cog) -> app_commands.Command:
+def create_command(bot_client) -> app_commands.Command:
     """Создает слеш-команду /aidhentai."""
     @app_commands.command(name="aidhentai", description=description)
     @app_commands.describe(query="Поисковый запрос")
     async def wrapper(interaction: discord.Interaction, query: Optional[str] = None) -> None:
-        await aidhentai(interaction, cog, query)
+        await aidhentai(interaction, bot_client, query)
 
     @wrapper.error
     async def command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -637,8 +664,11 @@ def create_command(cog) -> app_commands.Command:
         channel_id = str(interaction.channel.id) if interaction.channel else "DM"
         logger.error(f"Ошибка /aidhentai для {interaction.user.id} в гильдии {guild_id}, канал {channel_id}: {error}\n{traceback.format_exc()}")
         try:
-            await interaction.response.send_message("Ошибка при выполнении команды.", ephemeral=True)
-        except discord.DiscordException:
-            await interaction.followup.send("Ошибка при выполнении команды.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Ошибка при выполнении команды. Попробуйте снова.", ephemeral=True)
+            else:
+                await interaction.followup.send("Ошибка при выполнении команды. Попробуйте снова.", ephemeral=True)
+        except discord.DiscordException as e:
+            logger.error(f"Не удалось отправить сообщение об ошибке: {e}\n{traceback.format_exc()}")
 
     return wrapper
