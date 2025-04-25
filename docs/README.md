@@ -13,6 +13,7 @@ FLASK_PORT=порт_для_flask_сервера
 G_SEARCH_KEY=ключ_для_google_search_api
 G_CSE=идентификатор_поисковой_системы_google
 FIREBASE_KEY_PATH=путь_к_файлу_ключа_firebase
+FIREBASE_DATABASE_URL=ваш_url_firebase_database
 ```
 
 ### Описание параметров
@@ -23,6 +24,7 @@ FIREBASE_KEY_PATH=путь_к_файлу_ключа_firebase
 - `G_SEARCH_KEY`: API-ключ для Google Custom Search (для поиска).
 - `G_CSE`: Идентификатор поисковой системы Google Custom Search.
 - `FIREBASE_KEY_PATH`: Путь к JSON-файлу с ключом Firebase для работы с базой данных.
+- `FIREBASE_DATABASE_URL`: URL вашей Firebase Realtime Database (например, `https://your-project-id.firebaseio.com/`).
 
 ## Установка зависимостей
 
@@ -42,4 +44,4 @@ python start.py
 
 ## Условия использования
 
-Пожалуйста, ознакомьтесь с условиями использования в файле [TERMS.md](TERMS.md) перед использованием бота или его исходного кода.
+Пожалуйста, ознакомьтесь с условиями использования в файле [TERMS.md](docs/TERMS.md) перед использованием бота или его исходного кода.

@@ -19,7 +19,7 @@ class FirebaseManager:
     _file_cache: Dict[str, str] = {}
     _initialized: bool = False
     _init_lock: asyncio.Lock = asyncio.Lock()
-    _db_url: str = "https://ai-assist-fe86c-default-rtdb.europe-west1.firebasedatabase.app/"
+    _db_url: str = config('FIREBASE_DATABASE_URL')
 
     @staticmethod
     def find_file(filename: str) -> Optional[str]:

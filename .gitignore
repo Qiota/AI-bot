@@ -1,6 +1,14 @@
-# Кэш
-har_and_cookies/
+# Кэш и временные файлы
 *.cache
+*.tmp
+*.bak
+*.swp
+*~
+*.orig
+*.rej
+*.out
+*.prof
+har_and_cookies/
 
 # Файлы Python
 __pycache__/
@@ -9,19 +17,57 @@ __pycache__/
 
 # Файлы окружения
 .env
+.env.*
+!.env.example
 
 # Логи
 *.log
+*.log.*
+logs/
 
-# Временные файлы
-*.tmp
-*.bak
-
-# Файлы IDE
+# Файлы IDE и редакторов
 .idea/
 .vscode/
+*.sublime-project
+*.sublime-workspace
 
-# Зависимости
+# Виртуальные окружения
 venv/
 env/
 virtualenv/
+ENV/
+.python-version
+
+# Зависимости и сборки
+/dist/
+/build/
+/*.egg
+*.egg-info/
+
+# Системные файлы и ключи
+/src/utils/firebase/serviceAccountKey.json
+*.pem
+*.key
+*.crt
+
+# Тестовые файлы и отчёты
+/pytest_cache/
+*.pytest_cache
+/htmlcov/
+.coverage
+coverage.xml
+*.cover
+tox/
+nox/
+
+# Файлы macOS
+.DS_Store
+
+# Файлы Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Документация и артефакты
+/docs/_build/
+/site/
