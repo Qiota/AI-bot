@@ -175,13 +175,14 @@ async def generate_image(
         embed.set_footer(text="Сгенерировано с помощью ImageLabs")
 
         response_view = ImageResponseView(interaction.user.id, ephemeral)
-        await interaction.followup.send(
+        message = await interaction.followup.send(
             content=f"{interaction.user.mention}",
             embed=embed,
             file=file,
             view=response_view,
             ephemeral=ephemeral
         )
+        response_view.message = message
         success = True
 
     except Exception as e:
@@ -311,11 +312,25 @@ class ImageResponseView(View):
         super().__init__(timeout=300)
         self.user_id = user_id
         self.ephemeral = ephemeral
+        self.message = None
 
         if not ephemeral:
             self.delete_button = Button(label="🗑️", style=ButtonStyle.danger, custom_id="delete_image")
             self.delete_button.callback = self.delete_message_callback
             self.add_item(self.delete_button)
+            asyncio.create_task(self.disable_delete_button())
+
+    async def disable_delete_button(self):
+        """Отключает кнопку удаления через 1 минуту."""
+        await asyncio.sleep(60)
+        self.delete_button.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except discord.errors.NotFound:
+            pass
+        except Exception as e:
+            logger.error(f"Ошибка при отключении кнопки удаления: {e}")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Проверяет, может ли пользователь взаимодействовать с view."""
@@ -556,11 +571,9 @@ def create_command(bot_client):
             await interaction.response.send_message("Ошибка конфигурации бота.", ephemeral=True)
             return
 
-        # Проверка выполнения команды
         if not await restrict_command_execution(interaction, bot_client):
             return
 
-        # Проверка доступа к каналу
         access_result, access_reason = await check_bot_access(interaction, bot_client)
         if not access_result:
             await interaction.response.send_message(
@@ -569,7 +582,6 @@ def create_command(bot_client):
             )
             return
 
-        # Проверка NSFW-канала
         if interaction.guild is not None and not interaction.channel.nsfw:
             embed = Embed(
                 title="❌ Ошибка",
