@@ -9,7 +9,6 @@ import asyncio
 import json
 import aiohttp
 from contextlib import asynccontextmanager
-from io import StringIO
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -103,7 +102,16 @@ class FirebaseManager:
         firebase_credentials_json = config('FIREBASE_CREDENTIALS', default=None)
         if firebase_credentials_json:
             try:
+                # Проверка, является ли строка валидным JSON
+                if not firebase_credentials_json.strip():
+                    logger.error("FIREBASE_CREDENTIALS пустая строка")
+                    return None
                 credentials_dict = json.loads(firebase_credentials_json)
+                # Проверка наличия необходимых полей
+                required_fields = ["type", "project_id", "private_key", "client_email"]
+                if not all(field in credentials_dict for field in required_fields):
+                    logger.error(f"FIREBASE_CREDENTIALS не содержит всех необходимых полей: {required_fields}")
+                    return None
                 cls._credentials_cache = credentials_dict
                 logger.info("Учетные данные загружены из переменной окружения FIREBASE_CREDENTIALS")
                 return credentials.Certificate(credentials_dict)
@@ -115,9 +123,18 @@ class FirebaseManager:
         credentials_url = config('FIREBASE_CREDENTIALS_URL', default=None)
         if credentials_url:
             headers = config('FIREBASE_CREDENTIALS_HEADERS', default=None)
-            headers = json.loads(headers) if headers else None
+            try:
+                headers = json.loads(headers) if headers else None
+            except json.JSONDecodeError as e:
+                logger.error(f"Ошибка парсинга FIREBASE_CREDENTIALS_HEADERS: {e}")
+                return None
             credentials_dict = await cls.fetch_credentials_from_url(credentials_url, headers)
             if credentials_dict:
+                # Проверка наличия необходимых полей
+                required_fields = ["type", "project_id", "private_key", "client_email"]
+                if not all(field in credentials_dict for field in required_fields):
+                    logger.error(f"Учетные данные из FIREBASE_CREDENTIALS_URL не содержат всех необходимых полей: {required_fields}")
+                    return None
                 cls._credentials_cache = credentials_dict
                 logger.info("Учетные данные загружены через HTTP")
                 return credentials.Certificate(credentials_dict)
