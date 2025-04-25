@@ -6,11 +6,13 @@ from decouple import config
 from io import BytesIO
 from mimetypes import guess_extension
 from pathlib import Path
-from typing import Optional, List, Tuple, TYPE_CHECKING
+from typing import Optional, List, Tuple, TYPE_CHECKING, Dict
 from ..systemLog import logger
 from ..commands.restrict import check_bot_access, restrict_command_execution
 import traceback
 import asyncio
+import backoff
+import aiohttp
 
 if TYPE_CHECKING:
     from ..client import BotClient
@@ -196,24 +198,8 @@ class SearchView(ui.View):
                 cached_urls = {url for _, url in self.image_cache}
                 start_index = len(self.image_cache) + 1
 
-                while len(image_files) < 10 and start_index <= self.total_results:
-                    data = await self.cog._fetch_google_results(self.query, search_type="image", start=start_index)
-                    items = data.get("items", [])
-                    if not items:
-                        break
-
-                    for item in items:
-                        image_url = item["link"]
-                        if image_url in cached_urls:
-                            continue
-                        image_file = await self.cog._fetch_image(image_url)
-                        if image_file:
-                            image_files.append(image_file)
-                            cached_urls.add(image_url)
-                        if len(image_files) >= 10:
-                            break
-
-                    start_index += len(items)
+                image_files, new_cached_urls = await self.cog.fetch_images(self.query, start_index, self.total_results, cached_urls)
+                cached_urls.update(new_cached_urls)
 
                 if self.button_state:
                     label, style, disabled, index = self.button_state
@@ -366,16 +352,23 @@ class GoogleSearch:
     SVG_MIME: str = "image/svg+xml"
     MAX_FILE_SIZE: int = 8 * 1024 * 1024  # 8 МБ
 
-    def __init__(self, bot_client: 'BotClient', session: ClientSession) -> None:
+    def __init__(self, bot_client: 'BotClient') -> None:
         self.bot_client: BotClient = bot_client
-        self.session: ClientSession = session
         self.G_SEARCH_KEY: Optional[str] = config("G_SEARCH_KEY", default=None)
         self.G_CSE: Optional[str] = config("G_CSE", default=None)
         if not (self.G_SEARCH_KEY and self.G_CSE):
             logger.error("Отсутствуют ключи Google API (G_SEARCH_KEY, G_CSE)")
             raise ValueError("Требуются ключи Google API (G_SEARCH_KEY, G_CSE).")
+        self.page_cache: Dict[int, dict] = {}  # Кэш страниц результатов
 
-    async def _fetch_google_results(self, query: str, search_type: Optional[str] = None, start: int = 1) -> dict:
+    @backoff.on_exception(
+        backoff.expo,
+        (aiohttp.ClientError, asyncio.TimeoutError),
+        max_tries=2,  # Уменьшено с 3 до 2
+        max_time=15,  # Уменьшено с 30 до 15
+        jitter=backoff.full_jitter
+    )
+    async def _fetch_google_results(self, session: ClientSession, query: str, search_type: Optional[str] = None, start: int = 1) -> dict:
         """Запрашивает результаты поиска через Google Custom Search API."""
         if not query.strip():
             raise ValueError("Запрос не может быть пустым")
@@ -395,7 +388,7 @@ class GoogleSearch:
             params["searchType"] = search_type
 
         try:
-            async with self.session.get(self.GSEARCH_BASE_URL, params=params, timeout=ClientTimeout(total=10)) as response:
+            async with session.get(self.GSEARCH_BASE_URL, params=params) as response:
                 response.raise_for_status()
                 return await response.json()
         except ClientResponseError as e:
@@ -409,12 +402,18 @@ class GoogleSearch:
             logger.error(f"Ошибка соединения с Google API: {e}\n{traceback.format_exc()}")
             raise ValueError(f"Ошибка соединения с Google API: {e}") from e
 
-    async def _fetch_image(self, image_url: str) -> Optional[File]:
+    @backoff.on_exception(
+        backoff.expo,
+        (aiohttp.ClientError, asyncio.TimeoutError),
+        max_tries=2,  # Уменьшено с 3 до 2
+        max_time=10,  # Уменьшено с 15 до 10
+        jitter=backoff.full_jitter
+    )
+    async def _fetch_image(self, session: ClientSession, image_url: str, semaphore: asyncio.Semaphore) -> Optional[Tuple[File, str]]:
         """Загружает изображение по URL."""
-        timeouts = [3.0, 4.0, 5.0]
-        for attempt, timeout in enumerate(timeouts, 1):
+        async with semaphore:
             try:
-                async with self.session.get(image_url, timeout=ClientTimeout(total=timeout)) as resp:
+                async with session.get(image_url, timeout=ClientTimeout(total=3)) as resp:
                     if not resp.ok or not resp.content_type.startswith("image/") or resp.content_type == self.SVG_MIME:
                         return None
                     image = await resp.read()
@@ -422,15 +421,59 @@ class GoogleSearch:
                         logger.warning(f"Изображение {image_url} превышает 8 МБ, пропущено")
                         return None
                     filename = self._extract_filename(resp)
-                    return File(BytesIO(image), filename=filename)
+                    return File(BytesIO(image), filename=filename), image_url
             except (asyncio.TimeoutError, ClientError) as e:
-                if attempt == len(timeouts):
-                    logger.error(f"Не удалось загрузить изображение {image_url} после {len(timeouts)} попыток: {e}")
+                logger.debug(f"Не удалось загрузить изображение {image_url}: {e}")
                 return None
             except UnicodeEncodeError as e:
                 logger.error(f"Ошибка кодирования IDNA для URL {image_url}: {e}")
                 return None
-        return None
+
+    async def fetch_images(self, query: str, start_index: int, total_results: int, cached_urls: set) -> Tuple[List[File], set]:
+        """Загружает изображения с предварительной загрузкой страниц."""
+        image_files = []
+        new_cached_urls = set()
+        pages_to_fetch = min(3, (total_results - start_index + 9) // 10)  # Загружаем до 3 страниц
+        start_indices = [start_index + i * 10 for i in range(pages_to_fetch)]
+
+        async with ClientSession(timeout=ClientTimeout(total=10)) as session:
+            # Предварительная загрузка страниц
+            page_tasks = [
+                self._fetch_google_results(session, query, search_type="image", start=start)
+                for start in start_indices
+                if start <= total_results
+            ]
+            page_results = await asyncio.gather(*page_tasks, return_exceptions=True)
+
+            items = []
+            for idx, result in enumerate(page_results):
+                if isinstance(result, Exception):
+                    logger.error(f"Ошибка загрузки страницы {start_indices[idx]}: {result}\n{traceback.format_exc()}")
+                    continue
+                self.page_cache[start_indices[idx]] = result
+                items.extend(result.get("items", []))
+
+            # Параллельная загрузка изображений
+            semaphore = asyncio.Semaphore(5)  # Ограничение на 5 одновременных запросов
+            image_tasks = [
+                self._fetch_image(session, item["link"], semaphore)
+                for item in items
+                if item["link"] not in cached_urls and len(image_files) < 10
+            ]
+            image_results = await asyncio.gather(*image_tasks, return_exceptions=True)
+
+            for result in image_results:
+                if isinstance(result, Exception):
+                    logger.debug(f"Ошибка загрузки изображения: {result}")
+                    continue
+                if result:
+                    image_file, image_url = result
+                    image_files.append(image_file)
+                    new_cached_urls.add(image_url)
+                if len(image_files) >= 10:
+                    break
+
+        return image_files, new_cached_urls
 
     @staticmethod
     def _extract_filename(response) -> str:
@@ -474,98 +517,82 @@ async def google(interaction: discord.Interaction, cog: 'GoogleSearch', query: s
     await interaction.response.defer(ephemeral=True)
 
     try:
-        if image:
-            data = await cog._fetch_google_results(query, search_type="image")
-            items = data.get("items", [])
-            total_results = int(data.get("searchInformation", {}).get("totalResults", "0"))
-            if not items:
-                await interaction.followup.send("Изображения не найдены", ephemeral=True)
-                return
+        async with ClientSession(timeout=ClientTimeout(total=10)) as session:
+            if image:
+                # Первая загрузка страницы
+                data = await cog._fetch_google_results(session, query, search_type="image")
+                total_results = int(data.get("searchInformation", {}).get("totalResults", "0"))
+                if not data.get("items", []):
+                    await interaction.followup.send("Изображения не найдены", ephemeral=True)
+                    return
 
-            image_files = []
-            view = SearchView(cog, query, image, total_results)
-            cached_urls = {url for _, url in view.image_cache}
-            start_index = len(view.image_cache) + 1
+                view = SearchView(cog, query, image, total_results)
+                cached_urls = {url for _, url in view.image_cache}
+                start_index = len(view.image_cache) + 1
 
-            while len(image_files) < 10 and start_index <= total_results:
-                if start_index != 1:
-                    data = await cog._fetch_google_results(query, search_type="image", start=start_index)
-                    items = data.get("items", [])
-                    if not items:
-                        break
+                # Загрузка изображений
+                image_files, new_cached_urls = await cog.fetch_images(query, start_index, total_results, cached_urls)
+                cached_urls.update(new_cached_urls)
 
-                for item in items:
-                    image_url = item["link"]
-                    if image_url in cached_urls:
-                        continue
-                    image_file = await cog._fetch_image(image_url)
-                    if image_file:
-                        image_files.append(image_file)
-                        cached_urls.add(image_url)
-                    if len(image_files) >= 10:
-                        break
+                if not image_files:
+                    await interaction.followup.send("Не удалось загрузить изображения", ephemeral=True)
+                    return
 
-                start_index += len(items)
+                if len(image_files) < 10:
+                    content = "Больше изображений не найдено" if len(view.image_cache) + len(image_files) < total_results else "Все изображения просмотрены"
+                    embed = Embed(
+                        title="Google Images",
+                        description=f"Найдено: {total_results} изображений\nЗапрос: `{query}`\nПоказано: {len(view.image_cache) + len(image_files)} из {total_results}",
+                        colour=Colour.blue(),
+                    )
+                    embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
+                    view.children[2].style = ButtonStyle.grey
+                    view.children[2].label = "🔄"
+                    view.children[2].disabled = True
+                    view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"
+                    await interaction.followup.send(content=content, embed=embed, files=image_files, view=view, ephemeral=True)
+                    return
 
-            if not image_files:
-                await interaction.followup.send("Не удалось загрузить изображения", ephemeral=True)
-                return
-
-            if len(image_files) < 10:
-                content = "Больше изображений не найдено" if len(view.image_cache) + len(image_files) < total_results else "Все изображения просмотрены"
                 embed = Embed(
                     title="Google Images",
                     description=f"Найдено: {total_results} изображений\nЗапрос: `{query}`\nПоказано: {len(view.image_cache) + len(image_files)} из {total_results}",
                     colour=Colour.blue(),
                 )
                 embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
-                view.children[2].style = ButtonStyle.grey
-                view.children[2].label = "🔄"
-                view.children[2].disabled = True
                 view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"
-                await interaction.followup.send(content=content, embed=embed, files=image_files, view=view, ephemeral=True)
-                return
+                await interaction.followup.send(embed=embed, files=image_files, view=view, ephemeral=True)
 
-            embed = Embed(
-                title="Google Images",
-                description=f"Найдено: {total_results} изображений\nЗапрос: `{query}`\nПоказано: {len(view.image_cache) + len(image_files)} из {total_results}",
-                colour=Colour.blue(),
-            )
-            embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
-            view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"
-            await interaction.followup.send(embed=embed, files=image_files, view=view, ephemeral=True)
+            else:
+                data = await cog._fetch_google_results(session, query)
+                items = data.get("items", [])
+                total_results = int(data.get("searchInformation", {}).get("totalResults", "0"))
 
-        else:
-            data = await cog._fetch_google_results(query)
-            items = data.get("items", [])
-            total_results = int(data.get("searchInformation", {}).get("totalResults", "0"))
+                if not items:
+                    await interaction.followup.send("Результаты не найдены", ephemeral=True)
+                    return
 
-            if not items:
-                await interaction.followup.send("Результаты не найдены", ephemeral=True)
-                return
-
-            embed = Embed(
-                title="Google (Страница 1)",
-                description=f"Найдено результатов: {total_results}\nЗапрос: `{query}`",
-                colour=Colour.blue(),
-            )
-            embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
-            embed.set_footer(text="Страница 1")
-
-            for i, hit in enumerate(items, 1):
-                url = hit["link"]
-                title = cog.truncate_text(hit.get("title", "Без заголовка"), cog.MAX_TITLE_LENGTH)
-                snippet = cog.truncate_text(hit.get("snippet", "Без описания"), cog.MAX_SNIPPET_LENGTH)
-                breadcrumbs = cog.generate_breadcrumbs(url)
-                embed.add_field(
-                    name=f"{i}. {title}",
-                    value=f"[{breadcrumbs}]({url})\n{snippet}",
-                    inline=False
+                embed = Embed(
+                    title="Google (Страница 1)",
+                    description=f"Найдено результатов: {total_results}\nЗапрос: `{query}`",
+                    colour=Colour.blue(),
                 )
+                embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
+                embed.set_footer(text="Страница 1")
 
-            view = SearchView(cog, query, image, total_results)
-            view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+                for i, hit in enumerate(items, 1):
+                    url = hit["link"]
+                    title = cog.truncate_text(hit.get("title", "Без заголовка"), cog.MAX_TITLE_LENGTH)
+                    snippet = cog.truncate_text(hit.get("snippet", "Без описания"), cog.MAX_SNIPPET_LENGTH)
+                    breadcrumbs = cog.generate_breadcrumbs(url)
+                    embed.add_field(
+                        name=f"{i}. {title}",
+                        value=f"[{breadcrumbs}]({url})\n{snippet}",
+                        inline=False
+                    )
+
+                view = SearchView(cog, query, image, total_results)
+                view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"
+                await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     except ValueError as e:
         logger.error(f"Ошибка при выполнении /google: {e}\n{traceback.format_exc()}")
         await interaction.followup.send(str(e), ephemeral=True)

@@ -94,8 +94,7 @@ async def load_command_module(file_path: Path, commands_dir: Path, bot_client: B
         cog = bot_client
         if module_name == "src.commands.google":
             try:
-                async with ClientSession() as session:
-                    cog = module.GoogleSearch(bot_client, session)
+                cog = module.GoogleSearch(bot_client)  # Убрана передача session
             except TypeError as e:
                 logger.error(f"Ошибка создания GoogleSearch для {module_name}: {e}\n{traceback.format_exc()}")
                 return None
