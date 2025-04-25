@@ -70,13 +70,11 @@ class FirebaseManager:
         """Инициализация подключения к Firebase Realtime Database с использованием asyncio.Lock."""
         async with cls._init_lock:
             if cls._instance and cls._initialized:
-                logger.debug("Firebase уже инициализирован")
                 return cls._instance
 
             try:
                 try:
                     firebase_admin.get_app(name='[DEFAULT]')
-                    logger.debug("Приложение Firebase уже инициализировано")
                 except ValueError:
                     firebase_key_filename = 'serviceAccountKey.json'
                     firebase_key_path = cls.find_file(firebase_key_filename)
@@ -91,7 +89,7 @@ class FirebaseManager:
                         'databaseURL': cls._db_url,
                         'httpTimeout': 30
                     })
-                    logger.info("Firebase Realtime Database успешно инициализирован")
+                    logger.success("Firebase Realtime Database успешно инициализирован")
 
                 cls._instance = cls()
                 cls._instance._db = db.reference()

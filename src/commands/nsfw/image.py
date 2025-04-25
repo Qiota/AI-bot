@@ -14,6 +14,7 @@ import io
 import os
 import re
 from ...systemLog import logger
+from ..restrict import check_bot_access, restrict_command_execution
 
 description = "Генерирует изображение, вдохновлённое editor.imagelabs.net"
 command_lock = Lock()
@@ -50,6 +51,7 @@ MODELS = {
 FORBIDDEN_WORDS = ["loli"]
 
 async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
+    """Улучшает промпт для генерации изображения."""
     client = AsyncClient(provider=Websim)
     for model in ["gemini-1.5-pro", "gemini-1.5-flash"]:
         try:
@@ -103,6 +105,7 @@ async def generate_image(
     ephemeral: bool,
     view: View
 ) -> None:
+    """Генерирует изображение с заданными параметрами."""
     client = AsyncClient(provider=ImageLabs)
     success = False
     try:
@@ -199,7 +202,7 @@ async def generate_image(
             embed.add_field(name="🔄 Шаги", value=f"> `{steps}`", inline=True)
             embed.add_field(name="⚖️ CFG Scale", value=f"> `{cfg_scale}`", inline=True)
             await interaction.followup.edit_message(interaction.message.id, embed=embed, view=view)
-    
+
     finally:
         if (ephemeral or (not ephemeral and success)) and interaction.message is not None:
             await asyncio.sleep(0.1)
@@ -211,6 +214,7 @@ async def generate_image(
                 logger.error(f"Ошибка при удалении сообщения настроек: {e}")
 
 class SettingsModal(Modal):
+    """Модальное окно для настройки параметров генерации изображения."""
     def __init__(self, bot_client, view: 'SettingsView', user_id: int):
         super().__init__(title="Настройки генерации изображения")
         self.bot_client = bot_client
@@ -251,6 +255,7 @@ class SettingsModal(Modal):
         self.add_item(self.cfg_scale_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        """Обрабатывает отправку настроек из модального окна."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "❌ Вы не можете использовать эту панель, так как не являетесь автором команды.",
@@ -279,6 +284,7 @@ class SettingsModal(Modal):
             await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self.view)
 
     async def on_timeout(self):
+        """Обрабатывает таймаут модального окна."""
         async with self.view.view_lock:
             if self.view.ephemeral:
                 return
@@ -297,9 +303,10 @@ class SettingsModal(Modal):
                     view=self.view
                 )
             except Exception as e:
-                logger.error(f"Ошибка при обновлении сообщения после отмены модального окна: {e}")
+                logger.error(f"Ошибка при обновлении сообщения после таймаута: {e}")
 
 class ImageResponseView(View):
+    """View для управления сгенерированным изображением."""
     def __init__(self, user_id: int, ephemeral: bool):
         super().__init__(timeout=300)
         self.user_id = user_id
@@ -311,6 +318,7 @@ class ImageResponseView(View):
             self.add_item(self.delete_button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Проверяет, может ли пользователь взаимодействовать с view."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "❌ Вы не можете использовать эту кнопку, так как не являетесь автором команды.",
@@ -320,6 +328,7 @@ class ImageResponseView(View):
         return True
 
     async def delete_message_callback(self, interaction: discord.Interaction):
+        """Удаляет сообщение с изображением."""
         await interaction.response.defer(ephemeral=self.ephemeral)
         try:
             await interaction.message.delete()
@@ -331,6 +340,7 @@ class ImageResponseView(View):
             logger.error(f"Ошибка при удалении сообщения с изображением: {e}")
 
 class SettingsView(View):
+    """View для настройки параметров генерации изображения."""
     def __init__(self, bot_client, ephemeral: bool, user_id: int, channel_id: int, message_id: int):
         super().__init__(timeout=300)
         self.bot_client = bot_client
@@ -378,6 +388,7 @@ class SettingsView(View):
         self.add_item(self.settings_button)
 
     def disable_all_buttons(self):
+        """Отключает все элементы управления."""
         self.model_select.disabled = True
         self.aspect_ratio_select.disabled = True
         self.improve_prompt_button.disabled = True
@@ -385,6 +396,7 @@ class SettingsView(View):
         self.settings_button.disabled = True
 
     def enable_all_buttons(self):
+        """Включает все элементы управления."""
         self.model_select.disabled = False
         self.aspect_ratio_select.disabled = False
         self.improve_prompt_button.disabled = False
@@ -394,6 +406,7 @@ class SettingsView(View):
         self.settings_button.disabled = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Проверяет, может ли пользователь взаимодействовать с view."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "❌ Вы не можете использовать эту панель, так как не являетесь автором команды.",
@@ -403,6 +416,7 @@ class SettingsView(View):
         return True
 
     async def model_select_callback(self, interaction: discord.Interaction):
+        """Обрабатывает выбор модели."""
         async with self.view_lock:
             self.disable_all_buttons()
             await interaction.response.edit_message(view=self)
@@ -417,6 +431,7 @@ class SettingsView(View):
             await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
 
     async def aspect_ratio_select_callback(self, interaction: discord.Interaction):
+        """Обрабатывает выбор соотношения сторон."""
         async with self.view_lock:
             self.disable_all_buttons()
             await interaction.response.edit_message(view=self)
@@ -431,11 +446,13 @@ class SettingsView(View):
             await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
 
     async def open_settings_button(self, interaction: discord.Interaction):
+        """Открывает модальное окно настроек."""
         async with self.view_lock:
             modal = SettingsModal(self.bot_client, self, self.user_id)
             await interaction.response.send_modal(modal)
 
     async def improve_prompt_button_callback(self, interaction: discord.Interaction):
+        """Улучшает текущий промпт."""
         async with self.view_lock:
             self.disable_all_buttons()
             self.improve_prompt_button.label = "⌛"
@@ -452,6 +469,7 @@ class SettingsView(View):
             await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
 
     async def generate_button_callback(self, interaction: discord.Interaction):
+        """Запускает генерацию изображения."""
         async with self.view_lock:
             self.disable_all_buttons()
             self.generate_button.label = "⌛"
@@ -525,12 +543,33 @@ class SettingsView(View):
                 )
 
 def create_command(bot_client):
+    """Создаёт группу команд /image."""
     group = app_commands.Group(name="image", description="Работа с изображениями")
     group.dm_only = False
 
     @group.command(name="generate", description="Создаёт изображение с настройками")
     @app_commands.describe(ephemeral="Скрыть сообщения (по умолчанию публичные)")
     async def generate(interaction: discord.Interaction, ephemeral: bool = False):
+        """Команда /image generate для генерации изображений."""
+        if bot_client is None:
+            logger.error("bot_client не предоставлен для команды /image generate")
+            await interaction.response.send_message("Ошибка конфигурации бота.", ephemeral=True)
+            return
+
+        # Проверка выполнения команды
+        if not await restrict_command_execution(interaction, bot_client):
+            return
+
+        # Проверка доступа к каналу
+        access_result, access_reason = await check_bot_access(interaction, bot_client)
+        if not access_result:
+            await interaction.response.send_message(
+                access_reason or "Бот не имеет доступа к этому каналу.",
+                ephemeral=True
+            )
+            return
+
+        # Проверка NSFW-канала
         if interaction.guild is not None and not interaction.channel.nsfw:
             embed = Embed(
                 title="❌ Ошибка",

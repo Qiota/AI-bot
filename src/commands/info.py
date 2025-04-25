@@ -2,11 +2,31 @@ import discord
 from discord import app_commands, Embed
 from datetime import datetime
 from ..systemLog import logger
+from .restrict import check_bot_access, restrict_command_execution
 
 description = "Отображает информацию о боте"
 
-async def info(interaction: discord.Interaction, bot_client) -> None:
+async def info(interaction: discord.Interaction, bot_client):
+
     """Команда /info: Отображает информацию о боте в виде Embed."""
+    if bot_client is None:
+        logger.error("bot_client не предоставлен для команды /info")
+        await interaction.response.send_message("Ошибка конфигурации бота.", ephemeral=True)
+        return
+
+    # Проверка выполнения команды
+    if not await restrict_command_execution(interaction, bot_client):
+        return
+
+    # Проверка доступа к каналу
+    access_result, access_reason = await check_bot_access(interaction, bot_client)
+    if not access_result:
+        await interaction.response.send_message(
+            access_reason or "Бот не имеет доступа к этому каналу.",
+            ephemeral=True
+        )
+        return
+
     await interaction.response.defer(ephemeral=True)
 
     try:
@@ -55,6 +75,7 @@ async def info(interaction: discord.Interaction, bot_client) -> None:
         await interaction.followup.send("Ошибка при получении информации.", ephemeral=True)
 
 def create_command(bot_client):
+    """Создаёт команду /info."""
     @app_commands.command(name="info", description=description)
     async def wrapper(interaction: discord.Interaction) -> None:
         await info(interaction, bot_client)

@@ -7,6 +7,7 @@ from ..utils.firebase.firebase_manager import FirebaseManager
 from ..utils.checker import checker
 from typing import Dict, List, Optional
 import asyncio
+import traceback
 
 DEVELOPER_ID = config("DEVELOPER_ID", cast=int)
 DESCRIPTION = "Настройка бота: каналы (whitelist), пользователи (blacklist). Только для админов."
@@ -160,7 +161,7 @@ class SelectView(BaseView):
             logger.debug(f"Загружена конфигурация для гильдии {self.guild_id}")
             return config
         except Exception as e:
-            logger.error(f"Ошибка загрузки конфигурации гильдии {self.guild_id}: {e}")
+            logger.error(f"Ошибка загрузки конфигурации гильдии {self.guild_id}: {e}\n{traceback.format_exc()}")
             return {}
 
     async def setup_items(self):
@@ -257,7 +258,7 @@ class SelectView(BaseView):
             self.add_item(search_btn)
 
         confirm_btn = Button(label="Принять ✅", style=ButtonStyle.green, custom_id=f"{self.action}_confirm")
-        confirm_btn.callback = self.confirm_callback
+        confirm_btn.callback = self.confirm_callback   
         self.add_item(confirm_btn)
 
     async def update_view(self, interaction: discord.Interaction):
@@ -296,7 +297,7 @@ class SelectView(BaseView):
             await interaction.edit_original_response(embed=embed, view=self)
             logger.debug(f"Меню {self.action} обновлено для пользователя {self.user_id}")
         except discord.HTTPException as e:
-            logger.error(f"Ошибка обновления меню для гильдии {self.guild_id}: {e}")
+            logger.error(f"Ошибка обновления меню для гильдии {self.guild_id}: {e}\n{traceback.format_exc()}")
             await interaction.followup.send("Ошибка отображения меню. Попробуйте снова.", ephemeral=True)
 
     async def select_callback(self, interaction: discord.Interaction):
@@ -352,7 +353,7 @@ class SelectView(BaseView):
             logger.warning(f"Взаимодействие уже обработано для {interaction.user.id}")
             await interaction.followup.send("Ошибка: взаимодействие уже обработано.", ephemeral=True)
         except Exception as e:
-            logger.error(f"Ошибка отправки модального окна для {interaction.user.id}: {e}")
+            logger.error(f"Ошибка отправки модального окна для {interaction.user.id}: {e}\n{traceback.format_exc()}")
             await interaction.followup.send("Ошибка открытия окна поиска.", ephemeral=True)
 
     async def confirm_callback(self, interaction: discord.Interaction):
@@ -385,10 +386,8 @@ class SelectView(BaseView):
                 update_data["restricted_users"] = [
                     uid for uid in self.config.get("restricted_users", []) if uid not in self.selected_values
                 ]
-                # Очистка кэша для разблокированных пользователей
                 for uid in self.selected_values:
                     checker.clear_cache(user_id=uid)
-                logger.info(f"Удалены из blacklist гильдии {self.guild.id}: {set(self.selected_values)}")
 
             if "restricted_users" in update_data:
                 update_data["restricted_users"] = [uid for uid in update_data["restricted_users"] if uid.isdigit()]
@@ -397,14 +396,13 @@ class SelectView(BaseView):
 
             firebase_manager = await self.bot_client._ensure_firebase_initialized()
             await firebase_manager.update_guild_fields(str(self.guild.id), update_data)
-            guild_config_cache.pop(str(self.guild.id), None)  # Очистка кэша после обновления
+            guild_config_cache.pop(str(self.guild.id), None)
             await interaction.followup.send("✅ Настройки сохранены!", ephemeral=True)
-            logger.info(f"Настройки для гильдии {self.guild.id} сохранены: {update_data}")
         except ValueError as ve:
-            logger.error(f"Ошибка валидации для гильдии {self.guild.id}: {ve}")
+            logger.error(f"Ошибка валидации гильдии {self.guild.id}: {ve}\n{traceback.format_exc()}")
             await interaction.followup.send(f"❌ Ошибка: {ve}", ephemeral=True)
         except Exception as e:
-            logger.error(f"Ошибка сохранения настроек гильдии {self.guild.id}: {e}")
+            logger.error(f"Ошибка сохранения настроек гильдии {self.guild.id}: {e}\n{traceback.format_exc()}")
             await interaction.followup.send("❌ Ошибка сохранения.", ephemeral=True)
 
         try:
@@ -529,11 +527,10 @@ async def check_channels_setup(obj: discord.Interaction | discord.Message) -> tu
         allowed_channels = config.get("bot_allowed_channels", [])
         if not allowed_channels:
             logger.debug(f"Каналы не настроены для гильдии {guild_id_str}")
-            return False, "Каналы не настроены."
-
+            return True, None
         return True, None
     except Exception as e:
-        logger.error(f"Ошибка в check_channels_setup для гильдии {obj.guild.id if obj.guild else 'DM'}: {e}")
+        logger.error(f"Ошибка в check_channels_setup для гильдии {obj.guild.id if obj.guild else 'DM'}: {e}\n{traceback.format_exc()}")
         return False, "Ошибка при проверке конфигурации."
 
 async def check_bot_access(obj: discord.Interaction | discord.Message, bot_client) -> tuple[bool, Optional[str]]:
@@ -546,12 +543,30 @@ async def check_bot_access(obj: discord.Interaction | discord.Message, bot_clien
             logger.debug("Интеракция в DM, доступ разрешён")
             return True, None
 
+        channel = obj.channel if isinstance(obj, discord.Message) else obj.channel
+        guild_id_str = str(obj.guild.id)
+        channel_id = str(obj.channel_id if isinstance(obj, discord.Interaction) else obj.channel.id)
+
+        # Проверка прав бота в канале
+        permissions = channel.permissions_for(obj.guild.me)
+        required_permissions = (
+            permissions.read_messages and
+            permissions.send_messages and
+            permissions.embed_links
+        )
+        if not required_permissions:
+            logger.error(f"Бот не имеет необходимых прав в канале {channel_id} гильдии {guild_id_str}: "
+                        f"read_messages={permissions.read_messages}, "
+                        f"send_messages={permissions.send_messages}, "
+                        f"embed_links={permissions.embed_links}")
+            return False, "Бот не имеет необходимых прав в этом канале! Проверьте настройки разрешений в Discord."
+
+        # Проверка конфигурации
         result, reason = await check_channels_setup(obj)
         if not result:
-            logger.debug(f"check_channels_setup вернул False: {reason}")
+            logger.debug(f"check_channels_setup вернул False для гильдии {guild_id_str}: {reason}")
             return False, reason
 
-        guild_id_str = str(obj.guild.id)
         config = (guild_config_cache.get(guild_id_str) or (None, 0))[0]
         if config is None:
             firebase_manager = await bot_client._ensure_firebase_initialized()
@@ -561,19 +576,18 @@ async def check_bot_access(obj: discord.Interaction | discord.Message, bot_clien
 
         if config is None:
             logger.warning(f"Конфигурация для гильдии {guild_id_str} не найдена")
-            return False, "Конфигурация сервера не найдена."
+            return False, "Конфигурация сервера не найдена! Настройте через /restrict."
 
         allowed_channels = config.get("bot_allowed_channels", [])
-        channel_id = str(obj.channel_id if isinstance(obj, discord.Interaction) else obj.channel.id)
-        if channel_id not in allowed_channels:
-            logger.debug(f"Канал {channel_id} не разрешён для гильдии {guild_id_str}")
-            return False, "Бот не работает в этом канале."
 
-        logger.debug(f"Доступ к каналу {channel_id} разрешён для гильдии {guild_id_str}")
+        if allowed_channels and channel_id not in allowed_channels:
+            return False, f"Бот не имеет доступа к этому каналу! Добавьте канал через /restrict."
+
+        logger.debug(f"Бот имеет доступ к каналу {channel_id} в гильдии {guild_id_str}")
         return True, None
     except Exception as e:
-        logger.error(f"Ошибка в check_bot_access для гильдии {obj.guild.id if obj.guild else 'DM'}: {e}")
-        return False, "Ошибка при проверке доступа."
+        logger.error(f"Ошибка в check_bot_access для гильдии {obj.guild.id if obj.guild else 'DM'}: {e}\n{traceback.format_exc()}")
+        return False, "Ошибка при проверке доступа! Обратитесь к администратору."
 
 async def restrict_command_execution(obj: discord.Interaction, bot_client) -> bool:
     """Проверка выполнения команды /restrict."""
@@ -602,13 +616,13 @@ async def restrict_command_execution(obj: discord.Interaction, bot_client) -> bo
             if config is None:
                 logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена")
                 if not obj.response.is_done():
-                    await obj.response.send_message("Конфигурация сервера не найдена!", ephemeral=True)
+                    await obj.response.send_message("Конфигурация сервера не найдена! Настройте через /restrict.", ephemeral=True)
                 return False
 
         logger.debug(f"restrict_command_execution разрешил выполнение для гильдии {obj.guild.id if obj.guild else 'DM'}")
         return True
     except Exception as e:
-        logger.error(f"Ошибка в restrict_command_execution: {e}")
+        logger.error(f"Ошибка в restrict_command_execution: {e}\n{traceback.format_exc()}")
         if not obj.response.is_done():
             await obj.response.send_message("Ошибка при проверке доступа.", ephemeral=True)
         return False
@@ -636,7 +650,7 @@ async def handle_mention(message: discord.Message, bot_client) -> bool:
         logger.debug(f"Упоминание в разрешённом канале {message.channel.id} для гильдии {message.guild.id}")
         return True
     except Exception as e:
-        logger.error(f"Ошибка в handle_mention для гильдии {message.guild.id}: {e}")
+        logger.error(f"Ошибка в handle_mention для гильдии {message.guild.id}: {e}\n{traceback.format_exc()}")
         return False
 
 async def restrict(interaction: discord.Interaction, bot_client):
