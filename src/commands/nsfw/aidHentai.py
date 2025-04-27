@@ -6,15 +6,18 @@ from bs4 import BeautifulSoup
 from urllib.parse import quote, urlencode, urlparse
 import asyncio
 import re
-from typing import List, Optional, Dict
+import socket
+from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass
 from functools import lru_cache
 from contextlib import asynccontextmanager
+from collections import OrderedDict
 from ...systemLog import logger
 from ..restrict import check_bot_access, restrict_command_execution
 import traceback
 from ...utils.checker import checker
 import backoff
+import math
 
 description = "Поиск по AnimeIdHentai"
 
@@ -77,16 +80,15 @@ class PageSelectModal(Modal, title="Перейти к странице и тай
             )
             return
 
-        try:
-            page = int(self.page_input.value)
-            title_index = int(self.title_input.value) - 1
-        except ValueError:
+        page_str, title_str = self.page_input.value, self.title_input.value
+        if not (re.match(r'^\d+$', page_str) and re.match(r'^\d+$', title_str)):
             await interaction.response.send_message(
-                "Пожалуйста, введите корректные числа для страницы и тайтла.",
+                "Введите только числа для страницы и тайтла.",
                 ephemeral=True
             )
             return
 
+        page, title_index = int(page_str), int(title_str) - 1
         if page < 1 or title_index < 0:
             await interaction.response.send_message(
                 "Номер страницы и тайтла должны быть положительными.",
@@ -97,7 +99,7 @@ class PageSelectModal(Modal, title="Перейти к странице и тай
         await self.view.navigate_to_page_and_title(interaction, page, title_index)
 
 class NavigationView(View):
-    """Кастомный View для навигации по результатам поиска."""
+    """Кастомный View для навигации по результатам поиска с динамическими зонами."""
     def __init__(
         self,
         results: List[SearchResult],
@@ -125,10 +127,20 @@ class NavigationView(View):
         self.update_buttons()
         self.start_inactivity_timer()
 
+    def get_zones(self) -> Tuple[List[SearchResult], int, int]:
+        """Динамически разделяет результаты на 3 зоны, возвращает текущую зону, индекс в зоне и номер зоны."""
+        if not self.results:
+            return [], 0, 0
+        zone_size = math.ceil(len(self.results) / 3)
+        zone_idx = self.current_index // zone_size
+        zone_start = zone_idx * zone_size
+        zone_end = min((zone_idx + 1) * zone_size, len(self.results))
+        zone_index = self.current_index % zone_size
+        return self.results[zone_start:zone_end], zone_index, zone_idx
+
     def start_inactivity_timer(self) -> None:
         """Запускает таймер бездействия."""
         self.inactivity_task = asyncio.create_task(self.check_inactivity())
-        logger.debug(f"Таймер бездействия запущен для view с {len(self.results)} результатами")
 
     async def check_inactivity(self) -> None:
         """Проверяет бездействие и отключает кнопки через 2 минуты."""
@@ -139,11 +151,10 @@ class NavigationView(View):
                     self.disable_navigation_buttons()
                     if self.message:
                         await self.message.edit(view=self)
-                        logger.info(f"Кнопки отключены по таймауту для сообщения {self.message.id}")
                     break
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
-            logger.debug("Задача проверки бездействия отменена")
+            pass
 
     def disable_navigation_buttons(self) -> None:
         """Отключает навигационные кнопки."""
@@ -151,44 +162,44 @@ class NavigationView(View):
             if isinstance(item, Button) and item.label in ["⬅️", "➡️", "⌛", "🔢"]:
                 item.disabled = True
 
+    def _create_button(self, label: str, style: ButtonStyle, disabled: bool, callback=None, url: Optional[str] = None):
+        """Создает кнопку с заданными параметрами."""
+        button = Button(label=label, style=style, disabled=disabled, url=url)
+        if callback:
+            button.callback = callback
+        return button
+
     def update_buttons(self) -> None:
         """Обновляет состояние кнопок."""
         self.clear_items()
 
+        current_zone, zone_index, zone_idx = self.get_zones()
         back_label = "⌛" if self.is_loading and self.loading_button == "back" else "⬅️"
-        back_button = Button(
-            label=back_label,
-            style=ButtonStyle.gray,
-            disabled=(self.current_index == 0 and self.current_page == 1) or self.is_loading
-        )
-        back_button.callback = lambda i: self.navigate(i, -1, "back")
-        self.add_item(back_button)
+        self.add_item(self._create_button(
+            back_label, ButtonStyle.gray,
+            disabled=(self.current_index == 0 and self.current_page == 1) or self.is_loading,
+            callback=lambda i: self.navigate(i, -1, "back")
+        ))
 
         video_link = self.results[self.current_index].video_link
-        watch_button = Button(
-            label="📺 Смотреть онлайн",
-            style=ButtonStyle.link,
-            url=video_link,
-            disabled=not video_link or not self.is_valid_url(video_link)
-        )
-        self.add_item(watch_button)
+        self.add_item(self._create_button(
+            "📺 Смотреть онлайн", ButtonStyle.link,
+            disabled=not video_link or not self.is_valid_url(video_link),
+            url=video_link
+        ))
 
         next_label = "⌛" if self.is_loading and self.loading_button == "next" else "➡️"
-        next_button = Button(
-            label=next_label,
-            style=ButtonStyle.gray,
-            disabled=self.is_loading or (self.current_page >= self.total_pages and self.current_index >= len(self.results) - 1)
-        )
-        next_button.callback = lambda i: self.navigate(i, 1, "next")
-        self.add_item(next_button)
+        self.add_item(self._create_button(
+            next_label, ButtonStyle.gray,
+            disabled=self.is_loading or (self.current_page >= self.total_pages and self.current_index >= len(self.results) - 1),
+            callback=lambda i: self.navigate(i, 1, "next")
+        ))
 
-        page_select_button = Button(
-            label="🔢",
-            style=ButtonStyle.gray,
-            disabled=self.is_loading
-        )
-        page_select_button.callback = self.show_page_select_modal
-        self.add_item(page_select_button)
+        self.add_item(self._create_button(
+            "🔢", ButtonStyle.gray,
+            disabled=self.is_loading,
+            callback=self.show_page_select_modal
+        ))
 
     async def show_page_select_modal(self, interaction: Interaction) -> None:
         """Открывает модальное окно для выбора страницы и тайтла."""
@@ -199,7 +210,6 @@ class NavigationView(View):
             )
             return
 
-        logger.debug(f"Открытие модального окна для пользователя {interaction.user.id}")
         modal = PageSelectModal(self)
         try:
             await interaction.response.send_modal(modal)
@@ -226,21 +236,18 @@ class NavigationView(View):
                 soup = BeautifulSoup(html, 'html.parser')
                 new_results = await parse_search_results(session, soup)
                 if not new_results:
-                    logger.info(f"Нет результатов на странице {target_page} для запроса '{self.query}'")
                     return False
                 self.results = new_results
                 self.current_page = target_page
+                self.current_index = 0
                 self.embed_cache.clear()
                 return True
-        except (HttpError, ParseError) as e:
+        except (HttpError, ParseError, Exception) as e:
             logger.error(f"Ошибка при загрузке страницы {target_page}: {e}\n{traceback.format_exc()}")
-            return False
-        except Exception as e:
-            logger.error(f"Неизвестная ошибка при загрузке страницы {target_page}: {e}\n{traceback.format_exc()}")
             return False
 
     async def navigate(self, interaction: Interaction, direction: int, button: str) -> None:
-        """Обрабатывает навигацию по результатам."""
+        """Обрабатывает навигацию по результатам с автоматическим переключением зон."""
         if interaction.user != self.original_user:
             await interaction.response.send_message(
                 "Только пользователь, вызвавший команду, может её использовать.",
@@ -249,7 +256,6 @@ class NavigationView(View):
             return
 
         if self.is_loading:
-            logger.debug("Навигация заблокирована: is_loading=True")
             return
 
         self.is_loading = True
@@ -260,7 +266,7 @@ class NavigationView(View):
         try:
             await interaction.response.defer()
         except discord.errors.InteractionResponded:
-            logger.debug("Взаимодействие уже обработано, продолжаем")
+            pass
         except discord.errors.NotFound as e:
             logger.error(f"Взаимодействие не найдено: {e}")
             self.is_loading = False
@@ -270,12 +276,15 @@ class NavigationView(View):
             return
 
         new_index = self.current_index + direction
+        current_zone, zone_index, zone_idx = self.get_zones()
+
         if new_index < 0 and self.current_page > 1:
             if await self.load_page(self.current_page - 1):
+                zone_size = math.ceil(len(self.results) / 3)
                 self.current_index = len(self.results) - 1
             else:
                 self.current_index = 0
-        elif new_index >= len(self.results):
+        elif new_index >= len(self.results) and self.current_page < self.total_pages:
             if await self.load_page(self.current_page + 1):
                 self.current_index = 0
             else:
@@ -298,7 +307,6 @@ class NavigationView(View):
     async def navigate_to_page_and_title(self, interaction: Interaction, page: int, title_index: int) -> None:
         """Переходит к указанной странице и тайтлу."""
         if self.is_loading:
-            logger.debug("Навигация заблокирована: is_loading=True")
             return
 
         self.is_loading = True
@@ -306,12 +314,23 @@ class NavigationView(View):
         self.last_interaction = asyncio.get_event_loop().time()
         self.update_buttons()
 
+        try:
+            await interaction.response.defer()
+        except discord.errors.NotFound as e:
+            logger.error(f"Взаимодействие не найдено при defer: {e}")
+            self.is_loading = False
+            self.loading_button = None
+            self.update_buttons()
+            await interaction.followup.send("Взаимодействие устарело. Попробуйте снова.", ephemeral=True)
+            return
+        except discord.errors.InteractionResponded:
+            pass
+
         if page != self.current_page:
             if not await self.load_page(page):
                 self.is_loading = False
                 self.loading_button = None
                 self.update_buttons()
-                await interaction.response.defer()
                 await interaction.followup.send(
                     f"Не удалось загрузить страницу {page}. Возможно, она не существует.",
                     ephemeral=True
@@ -322,19 +341,16 @@ class NavigationView(View):
             self.is_loading = False
             self.loading_button = None
             self.update_buttons()
-            await interaction.response.defer()
             await interaction.followup.send(
                 f"На странице {page} только {len(self.results)} тайтлов. Введите номер от 1 до {len(self.results)}.",
                 ephemeral=True
             )
             return
 
-        self.current_index = min(title_index, len(self.results) - 1)
+        self.current_index = title_index
         self.is_loading = False
         self.loading_button = None
         self.update_buttons()
-
-        await interaction.response.defer()
 
         try:
             if self.message:
@@ -352,10 +368,12 @@ class NavigationView(View):
             return self.embed_cache[self.current_index]
 
         result = self.results[self.current_index]
+        current_zone, zone_index, zone_idx = self.get_zones()
         description = result.description[:300] + ("..." if len(result.description) > 300 else "")
+        if not result.image_url:
+            description += "\n⚠️ Не удалось загрузить изображение."
         if result.tags:
-            tag_links = [f"[{tag['name']}]({tag['url']})" for tag in result.tags if tag.get('name') and tag.get('url')]
-            tags_text = f"\n\n🏷 Теги: {', '.join(tag_links)}"
+            tags_text = f"\n\n🏷 Теги: {', '.join(f'[{tag['name']}]({tag['url']})' for tag in result.tags if tag.get('name') and tag.get('url'))}"
             if len(description) + len(tags_text) > 4000:
                 description = description[:4000 - len(tags_text) - 3] + "..."
             description += tags_text
@@ -378,7 +396,7 @@ class NavigationView(View):
                 inline=True
             )
 
-        embed.set_footer(text=f"{self.current_index + 1}/{len(self.results)} | Страница {self.current_page} из {self.total_pages} • {result.meta}")
+        embed.set_footer(text=f"{self.current_index + 1}/{len(self.results)} | Страница {self.current_page}/{self.total_pages} • {result.meta}")
 
         self.embed_cache[self.current_index] = embed
         return embed
@@ -386,12 +404,12 @@ class NavigationView(View):
     async def on_timeout(self) -> None:
         """Обрабатывает таймаут view."""
         self.disable_navigation_buttons()
+        self.embed_cache.clear()
         if self.inactivity_task:
             self.inactivity_task.cancel()
         try:
             if self.message:
                 await self.message.edit(view=self)
-                logger.info(f"View отключен по таймауту для сообщения {self.message.id}")
         except discord.DiscordException as e:
             logger.error(f"Ошибка при отключении view: {e}\n{traceback.format_exc()}")
 
@@ -407,35 +425,26 @@ async def aidhentai(interaction: discord.Interaction, bot_client, query: Optiona
     guild_id = str(interaction.guild.id) if interaction.guild else "DM"
     channel_id = str(interaction.channel.id) if interaction.channel else "DM"
 
-    logger.debug(f"Попытка выполнения команды /aidhentai для пользователя {interaction.user.id} в гильдии {guild_id}, канал {channel_id}")
-
-    # Проверка состояния бота и гильдии
     result, reason = await restrict_command_execution(interaction, bot_client)
     if not result:
         await interaction.response.send_message(reason or "Конфигурация сервера не найдена! Настройте через /restrict.", ephemeral=True)
         return
 
-    # Проверка доступа бота к каналу
     result, reason = await check_bot_access(interaction, bot_client)
     if not result:
         await interaction.response.send_message(reason, ephemeral=True)
         return
 
-    # Проверка NSFW-статуса канала
     if interaction.guild and not interaction.channel.nsfw:
         await interaction.response.send_message("Эта команда доступна только в NSFW-каналах или ЛС.", ephemeral=True)
         return
 
-    # Проверка ограничений пользователя
     if interaction.guild:
         restriction, restriction_reason = await checker.check_user_restriction(interaction)
         if not restriction:
             await interaction.response.send_message(restriction_reason or "Ваш доступ к боту ограничен.", ephemeral=True)
             return
 
-    logger.debug(f"Все проверки пройдены, выполняется команда /aidhentai в гильдии {guild_id}, канал {channel_id}")
-
-    # Отложить ответ немедленно
     try:
         await interaction.response.defer(ephemeral=False)
     except discord.errors.NotFound as e:
@@ -443,7 +452,6 @@ async def aidhentai(interaction: discord.Interaction, bot_client, query: Optiona
         await interaction.followup.send("Взаимодействие устарело. Попробуйте снова.", ephemeral=True)
         return
     except discord.errors.InteractionResponded:
-        logger.debug("Взаимодействие уже обработано")
         pass
 
     try:
@@ -481,6 +489,8 @@ def construct_url(query: Optional[str], page: int) -> str:
     """Формирует URL для запроса."""
     if page < 1:
         raise ValueError("Номер страницы должен быть положительным")
+    if query and len(query.strip()) > 200:
+        raise ValueError("Запрос слишком длинный")
 
     base_url = "https://animeidhentai.com"
     if page > 1:
@@ -494,11 +504,12 @@ def construct_url(query: Optional[str], page: int) -> str:
     query_string = urlencode(params, quote_via=quote)
     return f"{base_url}/?{query_string}"
 
+@lru_cache(maxsize=500)
 @backoff.on_exception(
     backoff.expo,
     (aiohttp.ClientError, asyncio.TimeoutError),
-    max_tries=3,
-    max_time=30,
+    max_tries=2,  # Уменьшено до 2 для DNS-ошибок
+    max_time=20,
     jitter=backoff.full_jitter
 )
 async def fetch_html(session: aiohttp.ClientSession, url: str) -> str:
@@ -506,7 +517,7 @@ async def fetch_html(session: aiohttp.ClientSession, url: str) -> str:
     try:
         async with session.get(url) as response:
             if response.status != 200:
-                raise HttpError(f"HTTP error! Status: {response.status}")
+                raise HttpError(f"HTTP error! Status: {response.status} for {url}")
             return await response.text()
     except aiohttp.ClientError as e:
         raise HttpError(f"Ошибка при запросе {url}: {e}")
@@ -515,72 +526,62 @@ def parse_total_pages(soup: BeautifulSoup) -> int:
     """Парсит общее количество страниц."""
     pagination = soup.select_one('div.pagination-wrapper')
     if not pagination:
-        logger.warning("Пагинация не найдена")
         return 1
 
     page_numbers = pagination.select('a.page-numbers, span.page-numbers.current')
-    if not page_numbers:
-        logger.warning("Номера страниц не найдены")
-        return 1
-
     try:
         return max(int(elem.get_text()) for elem in page_numbers if elem.get_text().isdigit())
     except ValueError:
-        logger.warning("Ошибка парсинга страниц")
         return 1
 
+@lru_cache(maxsize=100)
 async def parse_search_results(session: aiohttp.ClientSession, soup: BeautifulSoup) -> List[SearchResult]:
     """Парсит результаты поиска."""
-    elements = soup.select('a.lnk-blk')
-    if not elements:
+    try:
+        elements = soup.select('a.lnk-blk[href][aria-label]')
+        if not elements:
+            return []
+
+        banners = soup.select('div.anime-tb.pctr.rad1.por img[src]')
+        descriptions = soup.select('div.description.dn p')
+        metas = soup.select('p.meta.df.fww.aic.mgt.fz12.link-co.op05')
+
+        semaphore = asyncio.Semaphore(8)
+        async def process_with_semaphore(i: int, e: BeautifulSoup) -> Optional[SearchResult]:
+            async with semaphore:
+                return await process_search_element(session, e, i, banners, descriptions, metas)
+
+        tasks = [process_with_semaphore(i, e) for i, e in enumerate(elements)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [r for r in results if not isinstance(r, Exception) and r]
+    except Exception as e:
+        logger.error(f"Ошибка парсинга результатов: {e}\n{traceback.format_exc()}")
         return []
 
-    # Ограничение числа одновременно обрабатываемых элементов
-    semaphore = asyncio.Semaphore(5)
-    async def process_with_semaphore(i: int, e: BeautifulSoup) -> Optional[SearchResult]:
-        async with semaphore:
-            return await process_search_element(session, soup, i, e)
-
-    tasks = [process_with_semaphore(i, e) for i, e in enumerate(elements)]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    return [r for r in results if not isinstance(r, Exception) and r]
-
-async def process_search_element(session: aiohttp.ClientSession, soup: BeautifulSoup, index: int, element: BeautifulSoup) -> Optional[SearchResult]:
+async def process_search_element(
+    session: aiohttp.ClientSession,
+    element: BeautifulSoup,
+    index: int,
+    banners: List[BeautifulSoup],
+    descriptions: List[BeautifulSoup],
+    metas: List[BeautifulSoup]
+) -> Optional[SearchResult]:
     """Обрабатывает элемент поиска."""
     try:
         title = element.get('aria-label')
-        if not title:
-            logger.warning(f"Элемент {index}: Отсутствует title")
-            return None
-
         url = element.get('href')
-        if not url:
-            logger.warning(f"Элемент {index}: Отсутствует URL")
+        if not (title and url and urlparse(url).scheme in ('http', 'https')):
             return None
 
-        banner_elements = soup.select('div.anime-tb.pctr.rad1.por img')
-        banner_url = banner_elements[index].get('src') or "https://via.placeholder.com/100" if index < len(banner_elements) else "https://via.placeholder.com/100"
+        banner_url = banners[index].get('src') or "https://via.placeholder.com/100" if index < len(banners) else "https://via.placeholder.com/100"
+        description = descriptions[index].get_text(strip=True) or 'Описание отсутствует.' if index < len(descriptions) else 'Описание отсутствует.'
+        meta = '•'.join(item.strip() for item in metas[index].get_text().split('•') if item.strip()) if index < len(metas) else ''
 
-        description_elements = soup.select('div.description.dn p')
-        description = description_elements[index].get_text(strip=True) or 'Описание отсутствует.' if index < len(description_elements) else 'Описание отсутствует.'
-
-        meta_elements = soup.select('p.meta.df.fww.aic.mgt.fz12.link-co.op05')
-        meta = '•'.join(item.strip() for item in meta_elements[index].get_text().split('•') if item.strip()) if index < len(meta_elements) else ''
-
-        try:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    logger.warning(f"Элемент {index}: HTTP ошибка {response.status}")
-                    return None
-                detail_html = await response.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.warning(f"Элемент {index}: Ошибка запроса деталей: {e}")
-            return None
-
+        detail_html = await fetch_html(session, url)
         detail_soup = BeautifulSoup(detail_html, 'html.parser')
-        iframe = detail_soup.select_one('iframe')
-        video_link = iframe.get('src') if iframe else None
 
+        iframe = detail_soup.select_one('iframe[src]')
+        video_link = iframe.get('src') if iframe else None
         if video_link:
             parsed = urlparse(video_link)
             if not parsed.scheme and video_link.startswith('//'):
@@ -588,13 +589,16 @@ async def process_search_element(session: aiohttp.ClientSession, soup: Beautiful
             elif parsed.scheme not in ('http', 'https'):
                 video_link = None
 
+        # Попытка извлечь изображение из страницы тайтла, если video_url недоступен
         image_url = await fetch_image_url(session, video_link) if video_link else None
-        additional_info = parse_additional_info(detail_soup)
+        if not image_url:
+            img_element = detail_soup.select_one('img[src*="content/previews"]')
+            image_url = img_element.get('src') if img_element and urlparse(img_element.get('src')).scheme in ('http', 'https') else None
 
+        additional_info = parse_additional_info(detail_soup)
         tags = [
             {'name': tag.get('aria-label'), 'url': tag.get('href')}
-            for tag in detail_soup.select('div.genres.mgt.df.fww.por a.btn.fz12.rad1.mgr.mgb.gray-bg')
-            if tag.get('aria-label') and tag.get('href')
+            for tag in detail_soup.select('div.genres.mgt.df.fww.por a.btn.fz12.rad1.mgr.mgb.gray-bg[href][aria-label]')
         ]
 
         return SearchResult(
@@ -608,13 +612,12 @@ async def process_search_element(session: aiohttp.ClientSession, soup: Beautiful
             additional_info=additional_info,
             tags=tags
         )
-
     except Exception as e:
-        logger.warning(f"Элемент {index}: Ошибка обработки: {e}\n{traceback.format_exc()}")
+        logger.error(f"Ошибка обработки элемента {index} ({url}): {e}\n{traceback.format_exc()}")
         return None
 
 # Кэш для изображений
-_image_cache: Dict[str, Optional[str]] = {}
+_image_cache: OrderedDict[str, tuple[Optional[str], float]] = OrderedDict()
 _image_cache_lock = asyncio.Lock()
 
 async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[str]) -> Optional[str]:
@@ -624,36 +627,59 @@ async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[st
 
     async with _image_cache_lock:
         if video_url in _image_cache:
-            return _image_cache[video_url]
+            image_url, timestamp = _image_cache[video_url]
+            if asyncio.get_event_loop().time() - timestamp < 7200:  # Увеличено до 2 часов
+                return image_url
+
+    # Проверка доступности домена
+    parsed = urlparse(video_url)
+    try:
+        socket.getaddrinfo(parsed.hostname, 443, socket.AF_INET, socket.SOCK_STREAM)
+    except socket.gaierror:
+        async with _image_cache_lock:
+            _image_cache[video_url] = (None, asyncio.get_event_loop().time())
+            if len(_image_cache) > 100:
+                _image_cache.popitem(last=False)
+        return None
 
     try:
-        async with session.get(video_url) as response:
-            if response.status != 200:
-                logger.debug(f"Не удалось загрузить изображение: HTTP {response.status}")
-                return None
-            body = await response.text()
-
-        soup = BeautifulSoup(body, 'html.parser')
-        backdrop = soup.select_one('div.backdrop')
+        html = await fetch_html(session, video_url)
+        soup = BeautifulSoup(html, 'html.parser')
+        backdrop = soup.select_one('div.backdrop[style]')
+        image_url = None
         if backdrop and backdrop.get('style'):
             match = re.search(r'url\(["\']?(https:\/\/nhplayer\.com\/content\/previews\/[^"\']+\.jpg)["\']?\)', backdrop.get('style'))
             image_url = match.group(1) if match else None
-        else:
-            image_url = None
 
         async with _image_cache_lock:
-            _image_cache[video_url] = image_url
-            if len(_image_cache) > 100:  # Ограничение размера кэша
-                _image_cache.pop(next(iter(_image_cache)))
+            _image_cache[video_url] = (image_url, asyncio.get_event_loop().time())
+            if len(_image_cache) > 100:
+                _image_cache.popitem(last=False)
 
         return image_url
-
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.debug(f"Сетевая ошибка при запросе изображения: {e}")
+        async with _image_cache_lock:
+            _image_cache[video_url] = (None, asyncio.get_event_loop().time())
+            if len(_image_cache) > 100:
+                _image_cache.popitem(last=False)
         return None
     except Exception as e:
-        logger.warning(f"Неизвестная ошибка при запросе изображения: {e}\n{traceback.format_exc()}")
+        logger.error(f"Неизвестная ошибка при запросе изображения для {video_url}: {e}\n{traceback.format_exc()}")
+        async with _image_cache_lock:
+            _image_cache[video_url] = (None, asyncio.get_event_loop().time())
+            if len(_image_cache) > 100:
+                _image_cache.popitem(last=False)
         return None
+
+async def clear_image_cache_periodically():
+    """Периодическая очистка кэша изображений."""
+    while True:
+        await asyncio.sleep(7200)
+        async with _image_cache_lock:
+            current_time = asyncio.get_event_loop().time()
+            for key in list(_image_cache.keys()):
+                if current_time - _image_cache[key][1] > 7200:
+                    _image_cache.pop(key)
 
 def parse_additional_info(soup: BeautifulSoup) -> List[Dict[str, str]]:
     """Парсит дополнительную информацию."""
@@ -663,7 +689,7 @@ def parse_additional_info(soup: BeautifulSoup) -> List[Dict[str, str]]:
             'value': row.select_one('td.value').get_text(strip=True),
             'inline': True
         }
-        for row in soup.select('tbody tr')
+        for row in soup.select('tbody tr:has(th.field, td.value)')[:12]
         if row.select_one('th.field') and row.select_one('td.value') and translate_field_name(row.select_one('th.field').get_text(strip=True))
     ]
 
@@ -699,4 +725,5 @@ def create_command(bot_client) -> app_commands.Command:
         except discord.DiscordException as e:
             logger.error(f"Не удалось отправить сообщение об ошибке: {e}\n{traceback.format_exc()}")
 
+    asyncio.create_task(clear_image_cache_periodically())
     return wrapper
