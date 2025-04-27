@@ -245,10 +245,18 @@ async def run_bot() -> None:
         @bot_client.bot.event
         async def on_ready() -> None:
             """Обработчик события готовности бота."""
-            await bot_client.bot.wait_until_ready()
-            await set_bot_activity(bot_client.bot)
-            await register_commands(bot_client.tree, bot_client)
-            logger.success(f"Бот {bot_client.bot.user} запущен и готов к работе!")
+            logger.debug("Событие on_ready вызвано")
+            try:
+                # Запуск активности как фоновой задачи
+                bot_client.bot.loop.create_task(set_bot_activity(bot_client.bot))
+                logger.debug("set_bot_activity запущена как фоновая задача")
+                
+                # Регистрация команд
+                await register_commands(bot_client.tree, bot_client)
+                logger.success(f"Бот {bot_client.bot.user} запущен и готов к работе!")
+            except Exception as e:
+                logger.error(f"Ошибка в on_ready: {e}\n{traceback.format_exc()}")
+                raise
 
         # Запуск Flask-сервера в отдельном потоке
         logger.debug(f"Запуск Flask-сервера на порту {config.FLASK_PORT}")

@@ -29,14 +29,12 @@ class BaseView(View):
         """Обработка таймаута представления."""
         if self.user_id in active_views:
             del active_views[self.user_id]
-            logger.debug(f"Таймаут представления для пользователя {self.user_id} в гильдии {self.guild_id}")
 
     async def restrict_interaction(self, interaction: discord.Interaction) -> bool:
         """Ограничение взаимодействия для других пользователей."""
         if interaction.user.id != self.user_id:
             if not interaction.response.is_done():
                 await interaction.response.send_message("Это меню только для вас!", ephemeral=True)
-            logger.debug(f"Несанкционированное взаимодействие от {interaction.user.id} в меню пользователя {self.user_id}")
             return True
         return False
 
@@ -80,12 +78,10 @@ class SearchModal(Modal, title="Поиск пользователей"):
         
         if not queries:
             await interaction.followup.send("Ошибка: укажите хотя бы одно имя или ID.", ephemeral=True)
-            logger.debug(f"Пустой поисковый запрос от {interaction.user.id}")
             return
 
         self.view.search_queries = queries
         self.view.current_page = 0
-        logger.debug(f"Поисковые запросы от {interaction.user.id}: {queries}")
         await self.view.update_view(interaction)
 
 class SelectView(BaseView):
@@ -139,7 +135,6 @@ class SelectView(BaseView):
         await self.setup_items()
         if not self.is_finished():
             self.setup_select()
-        logger.debug(f"Инициализировано SelectView для действия {self.action} в гильдии {self.guild_id}")
 
     async def load_config(self) -> Dict:
         """Загрузка конфигурации гильдии с кэшированием."""
@@ -148,7 +143,6 @@ class SelectView(BaseView):
         if guild_id_str in guild_config_cache:
             config, timestamp = guild_config_cache[guild_id_str]
             if current_time - timestamp < CONFIG_CACHE_TTL:
-                logger.debug(f"Использован кэш конфигурации для гильдии {self.guild_id}")
                 return config
 
         try:
@@ -158,7 +152,6 @@ class SelectView(BaseView):
                 logger.warning(f"Конфигурация для гильдии {self.guild_id} не найдена")
                 config = {}
             guild_config_cache[guild_id_str] = (config, current_time)
-            logger.debug(f"Загружена конфигурация для гильдии {self.guild_id}")
             return config
         except Exception as e:
             logger.error(f"Ошибка загрузки конфигурации гильдии {self.guild_id}: {e}\n{traceback.format_exc()}")
@@ -193,7 +186,6 @@ class SelectView(BaseView):
 
         if not self.all_items and self.action == "unrestrict_users":
             self.stop()
-            logger.debug(f"Blacklist пуст для гильдии {self.guild_id}, SelectView остановлен")
 
     def get_paginated_items(self) -> List[Dict]:
         """Получение элементов для текущей страницы."""
@@ -208,7 +200,6 @@ class SelectView(BaseView):
                     for query in self.search_queries
                 )
             ]
-            logger.debug(f"Найдено {len(items)} пользователей по запросам: {self.search_queries}")
         start = self.current_page * self.items_per_page
         return items[start:start + self.items_per_page]
 
@@ -295,7 +286,6 @@ class SelectView(BaseView):
         )
         try:
             await interaction.edit_original_response(embed=embed, view=self)
-            logger.debug(f"Меню {self.action} обновлено для пользователя {self.user_id}")
         except discord.HTTPException as e:
             logger.error(f"Ошибка обновления меню для гильдии {self.guild_id}: {e}\n{traceback.format_exc()}")
             await interaction.followup.send("Ошибка отображения меню. Попробуйте снова.", ephemeral=True)
@@ -310,7 +300,6 @@ class SelectView(BaseView):
         preserved_values = [value for value in self.selected_values if value not in current_page_values]
         new_values = self.children[0].values
         self.selected_values = list(set(preserved_values + new_values))
-        logger.debug(f"Выбрано {len(self.selected_values)} элементов для {self.action} пользователем {self.user_id}")
         await self.update_view(interaction)
 
     async def prev_page(self, interaction: discord.Interaction):
@@ -320,7 +309,6 @@ class SelectView(BaseView):
         await interaction.response.defer(ephemeral=True)
         if self.current_page > 0:
             self.current_page -= 1
-            logger.debug(f"Переход на страницу {self.current_page + 1} для {self.action}")
         await self.update_view(interaction)
 
     async def next_page(self, interaction: discord.Interaction):
@@ -338,7 +326,6 @@ class SelectView(BaseView):
         ]) + self.items_per_page - 1) // self.items_per_page
         if self.current_page < total_pages - 1:
             self.current_page += 1
-            logger.debug(f"Переход на страницу {self.current_page + 1} для {self.action}")
         await self.update_view(interaction)
 
     async def search_callback(self, interaction: discord.Interaction):
@@ -348,9 +335,7 @@ class SelectView(BaseView):
         try:
             modal = SearchModal(self)
             await interaction.response.send_modal(modal)
-            logger.debug(f"Модальное окно поиска отправлено для {interaction.user.id}")
         except discord.InteractionResponded:
-            logger.warning(f"Взаимодействие уже обработано для {interaction.user.id}")
             await interaction.followup.send("Ошибка: взаимодействие уже обработано.", ephemeral=True)
         except Exception as e:
             logger.error(f"Ошибка отправки модального окна для {interaction.user.id}: {e}\n{traceback.format_exc()}")
@@ -376,12 +361,10 @@ class SelectView(BaseView):
             update_data = {}
             if self.action == "bot_access":
                 update_data["bot_allowed_channels"] = self.selected_values
-                logger.debug(f"Обновление bot_allowed_channels: {self.selected_values}")
             elif self.action == "restrict_users":
                 current_restricted = set(self.config.get("restricted_users", []))
                 new_restricted = set(self.selected_values)
                 update_data["restricted_users"] = list(current_restricted | new_restricted)
-                logger.info(f"Добавлены в blacklist гильдии {self.guild.id}: {new_restricted - current_restricted}")
             elif self.action == "unrestrict_users":
                 update_data["restricted_users"] = [
                     uid for uid in self.config.get("restricted_users", []) if uid not in self.selected_values
@@ -429,13 +412,11 @@ class SelectView(BaseView):
         )
         try:
             await main_view.message.edit(embed=embed, view=main_view)
-            logger.debug(f"Возврат к главному меню для {self.user_id}")
         except (discord.NotFound, discord.Forbidden):
             new_main_view = ActionSelectView(self.user_id, self.guild_id, self.bot_client)
             msg = await interaction.followup.send(embed=embed, view=new_main_view, ephemeral=True)
             new_main_view.message = msg
             active_views[self.user_id] = new_main_view
-            logger.debug(f"Создано новое главное меню для {self.user_id}")
 
 class ActionSelectView(BaseView):
     """Главное меню выбора действий."""
@@ -478,7 +459,6 @@ class ActionSelectView(BaseView):
                 ),
                 ephemeral=True
             )
-            logger.debug(f"Действие {action} не выполнено: пустой blacklist")
             return
 
         embed = discord.Embed(
@@ -488,19 +468,15 @@ class ActionSelectView(BaseView):
         )
         msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         view.messages.append(msg)
-        logger.debug(f"Открыто меню {action} для {self.user_id}")
 
 async def check_channels_setup(obj: discord.Interaction | discord.Message) -> tuple[bool, Optional[str]]:
     """Проверка настройки каналов для гильдии."""
     try:
         if isinstance(obj, discord.Message) and isinstance(obj.channel, discord.DMChannel):
-            logger.debug("DM-канал, проверки каналов не требуются")
             return True, None
         if isinstance(obj, discord.Interaction) and obj.guild is None:
-            logger.debug("Интеракция в DM, проверки каналов не требуются")
             return True, None
         if isinstance(obj, discord.Interaction) and obj.command.name == "restrict":
-            logger.debug("Команда /restrict, пропуск проверки каналов")
             return True, None
 
         guild_id_str = str(obj.guild.id)
@@ -508,9 +484,8 @@ async def check_channels_setup(obj: discord.Interaction | discord.Message) -> tu
         if guild_id_str in guild_config_cache:
             config, timestamp = guild_config_cache[guild_id_str]
             if current_time - timestamp < CONFIG_CACHE_TTL:
-                logger.debug(f"Использован кэш конфигурации для проверки каналов гильдии {guild_id_str}")
-            else:
-                config = None
+                return config, None
+            config = None
         else:
             config = None
 
@@ -518,7 +493,6 @@ async def check_channels_setup(obj: discord.Interaction | discord.Message) -> tu
             firebase_manager = await FirebaseManager.initialize()
             config = await firebase_manager.load_guild_config(guild_id_str)
             guild_config_cache[guild_id_str] = (config or {}, current_time)
-            logger.debug(f"Загружена конфигурация для проверки каналов гильдии {guild_id_str}")
 
         if config is None:
             logger.warning(f"Конфигурация для гильдии {guild_id_str} не найдена")
@@ -526,7 +500,6 @@ async def check_channels_setup(obj: discord.Interaction | discord.Message) -> tu
 
         allowed_channels = config.get("bot_allowed_channels", [])
         if not allowed_channels:
-            logger.debug(f"Каналы не настроены для гильдии {guild_id_str}")
             return True, None
         return True, None
     except Exception as e:
@@ -537,10 +510,8 @@ async def check_bot_access(obj: discord.Interaction | discord.Message, bot_clien
     """Проверка доступа бота к каналу."""
     try:
         if isinstance(obj, discord.Message) and isinstance(obj.channel, discord.DMChannel):
-            logger.debug("DM-канал, доступ разрешён")
             return True, None
         if isinstance(obj, discord.Interaction) and obj.guild is None:
-            logger.debug("Интеракция в DM, доступ разрешён")
             return True, None
 
         channel = obj.channel if isinstance(obj, discord.Message) else obj.channel
@@ -564,7 +535,6 @@ async def check_bot_access(obj: discord.Interaction | discord.Message, bot_clien
         # Проверка конфигурации
         result, reason = await check_channels_setup(obj)
         if not result:
-            logger.debug(f"check_channels_setup вернул False для гильдии {guild_id_str}: {reason}")
             return False, reason
 
         config = (guild_config_cache.get(guild_id_str) or (None, 0))[0]
@@ -572,7 +542,6 @@ async def check_bot_access(obj: discord.Interaction | discord.Message, bot_clien
             firebase_manager = await bot_client._ensure_firebase_initialized()
             config = await firebase_manager.load_guild_config(guild_id_str)
             guild_config_cache[guild_id_str] = (config or {}, asyncio.get_event_loop().time())
-            logger.debug(f"Загружена конфигурация для проверки доступа гильдии {guild_id_str}")
 
         if config is None:
             logger.warning(f"Конфигурация для гильдии {guild_id_str} не найдена")
@@ -583,7 +552,6 @@ async def check_bot_access(obj: discord.Interaction | discord.Message, bot_clien
         if allowed_channels and channel_id not in allowed_channels:
             return False, f"Бот не имеет доступа к этому каналу! Добавьте канал через /restrict."
 
-        logger.debug(f"Бот имеет доступ к каналу {channel_id} в гильдии {guild_id_str}")
         return True, None
     except Exception as e:
         logger.error(f"Ошибка в check_bot_access для гильдии {obj.guild.id if obj.guild else 'DM'}: {e}\n{traceback.format_exc()}")
@@ -593,27 +561,29 @@ async def restrict_command_execution(obj: discord.Interaction, bot_client) -> tu
     """Проверка выполнения команды /restrict."""
     try:
         if not bot_client.bot.is_ready():
-            logger.debug("Бот не готов")
             return False, "Бот еще не готов."
 
         if obj.guild:
             guild_ids = [guild.id for guild in bot_client.bot.guilds]
             if obj.guild.id not in guild_ids:
-                logger.warning(f"Гильдия {obj.guild.id} не найдена в списке гильдий бота")
-                return False, "Бот отсутствует на этом сервере!"
+                logger.warning(f"Бот отсутствует на сервере {obj.guild.id}")
+                try:
+                    dm_channel = await obj.user.create_dm()
+                    await dm_channel.send("❌ Бот отсутствует на этом сервере. Пригласите бота на сервер, чтобы использовать команды.")
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    logger.error(f"Не удалось отправить сообщение в ЛС пользователю {obj.user.id}: {e}")
+                return False, None
 
             config = (guild_config_cache.get(str(obj.guild.id)) or (None, 0))[0]
             if config is None:
                 firebase_manager = await bot_client._ensure_firebase_initialized()
                 config = await firebase_manager.load_guild_config(str(obj.guild.id))
                 guild_config_cache[str(obj.guild.id)] = (config or {}, asyncio.get_event_loop().time())
-                logger.debug(f"Загружена конфигурация для проверки выполнения команды в гильдии {obj.guild.id}")
 
             if config is None:
                 logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена")
                 return False, "Конфигурация сервера не найдена! Настройте через /restrict."
 
-        logger.debug(f"restrict_command_execution разрешил выполнение для гильдии {obj.guild.id if obj.guild else 'DM'}")
         return True, None
     except Exception as e:
         logger.error(f"Ошибка в restrict_command_execution: {e}\n{traceback.format_exc()}")
@@ -623,15 +593,12 @@ async def handle_mention(message: discord.Message, bot_client) -> bool:
     """Обработка упоминания бота."""
     try:
         if isinstance(message.channel, discord.DMChannel):
-            logger.debug("Упоминание в DM, доступ разрешён")
             return True
         if bot_client.bot.user not in message.mentions:
-            logger.debug("Бот не упомянут")
             return False
 
         result, reason = await check_bot_access(message, bot_client)
         if not result:
-            logger.debug(f"Упоминание отклонено для канала {message.channel.id}: {reason}")
             if reason:
                 await message.channel.send(
                     f"{message.author.mention}, {reason}",
@@ -639,7 +606,6 @@ async def handle_mention(message: discord.Message, bot_client) -> bool:
                 )
             return False
 
-        logger.debug(f"Упоминание в разрешённом канале {message.channel.id} для гильдии {message.guild.id}")
         return True
     except Exception as e:
         logger.error(f"Ошибка в handle_mention для гильдии {message.guild.id}: {e}\n{traceback.format_exc()}")
@@ -651,14 +617,13 @@ async def restrict(interaction: discord.Interaction, bot_client):
     if not interaction.user.guild_permissions.administrator and str(interaction.user.id) != str(DEVELOPER_ID):
         if not interaction.response.is_done():
             await interaction.response.send_message("Требуются права администратора или статус разработчика.", ephemeral=True)
-        logger.debug(f"Пользователь {interaction.user.id} не имеет прав для команды /restrict в гильдии {interaction.guild.id}")
         return
 
     # Validate command execution
     result, reason = await restrict_command_execution(interaction, bot_client)
     if not result:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(reason or "Не удалось выполнить команду.", ephemeral=True)
+        if reason and not interaction.response.is_done():
+            await interaction.response.send_message(reason, ephemeral=True)
         return
 
     if not interaction.guild:
@@ -682,7 +647,6 @@ async def restrict(interaction: discord.Interaction, bot_client):
     msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     view.message = msg
     active_views[interaction.user.id] = view
-    logger.debug(f"Команда /restrict вызвана пользователем {interaction.user.id} в гильдии {interaction.guild.id}")
 
 def create_command(bot_client):
     """Создание команды /restrict."""
