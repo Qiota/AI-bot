@@ -22,35 +22,28 @@ async def precheck_command_execution(interaction: discord.Interaction, command_n
     guild_id = str(interaction.guild.id) if interaction.guild else "DM"
     channel_id = str(interaction.channel.id) if interaction.channel else "DM"
     
-    # Проверка готовности бота
     if not bot_client.bot or not bot_client.bot.is_ready():
         logger.error(f"Бот не готов для команды {command_name} в гильдии {guild_id}, канал {channel_id}: bot_client.bot отсутствует или не инициализирован")
         return False, "Бот ещё не готов."
     
-    # Проверка конфигурации сервера
     if not await restrict_command_execution(interaction, bot_client):
         logger.error(f"Конфигурация сервера не найдена для команды {command_name} в гильдии {guild_id}, канал {channel_id}")
         return False, "Конфигурация сервера не найдена! Настройте через /restrict."
     
-    # Проверка команды /restrict в DM
     if command_name == "restrict" and not interaction.guild:
         logger.error(f"Команда /restrict вызвана в DM (канал {channel_id})")
         return False, "Команда только для серверов!"
     
-    # Проверка NSFW-канала для команды /aidhentai
     if command_name == "aidhentai" and interaction.guild and not interaction.channel.nsfw:
         logger.error(f"Команда /aidhentai вызвана в не-NSFW канале {channel_id} для гильдии {guild_id}")
         return False, "Эта команда доступна только в NSFW-каналах или ЛС."
     
-    # Проверки для гильдий (кроме команды /restrict)
     if interaction.guild and command_name != "restrict":
-        # Проверка доступа к каналу
         access_result, access_reason = await check_bot_access(interaction, bot_client)
         if not access_result:
             logger.error(f"Бот не имеет доступа к каналу {channel_id} для команды {command_name} в гильдии {guild_id}: {access_reason}")
             return False, access_reason or f"Команда заблокирована: бот не имеет доступа к каналу {channel_id}! Добавьте канал через /restrict или проверьте права бота."
         
-        # Проверка ограничений пользователя
         restriction, restriction_reason = await checker.check_user_restriction(interaction)
         if not restriction:
             logger.error(f"Пользователь {interaction.user.id} ограничен для команды {command_name} в гильдии {guild_id}, канал {channel_id}: {restriction_reason}")
@@ -75,8 +68,8 @@ async def should_execute_command(interaction: discord.Interaction, command_name:
         return False
     return True
 
-async def load_command_module(file_path: Path, commands_dir: Path, bot_client: BotClient) -> Optional[List[Tuple[Union[app_commands.Command, app_commands.Group], str]]]:
-    """Загрузка модуля команд."""
+async def load_command_module(file_path: Path, commands_dir: Path, bot_client: BotClient, tree: app_commands.CommandTree) -> Optional[List[Tuple[Union[app_commands.Command, app_commands.Group], str]]]:
+    """Загрузка модуля команд с проверкой дубликатов."""
     if not bot_client:
         logger.error(f"BotClient не инициализирован для загрузки модуля {file_path.stem}")
         return None
@@ -90,11 +83,10 @@ async def load_command_module(file_path: Path, commands_dir: Path, bot_client: B
             logger.warning(f"create_command не найден в {module_name}")
             return None
 
-        # Обработка модулей
         cog = bot_client
         if module_name == "src.commands.google":
             try:
-                cog = module.GoogleSearch(bot_client)  # Убрана передача session
+                cog = module.GoogleSearch(bot_client)
             except TypeError as e:
                 logger.error(f"Ошибка создания GoogleSearch для {module_name}: {e}\n{traceback.format_exc()}")
                 return None
@@ -105,7 +97,14 @@ async def load_command_module(file_path: Path, commands_dir: Path, bot_client: B
         result = []
         loaded_commands = []
 
+        # Проверка существующих команд в дереве
+        existing_commands = {cmd.name for cmd in tree.get_commands()}
+
         for cmd in commands:
+            if cmd.name in existing_commands:
+                logger.warning(f"Команда {cmd.name} уже зарегистрирована, пропуск")
+                continue
+
             dm_only = getattr(cmd, "dm_only", False)
             guild_only = getattr(cmd, "guild_only", False)
             if dm_only and guild_only:
@@ -115,7 +114,7 @@ async def load_command_module(file_path: Path, commands_dir: Path, bot_client: B
             context = f"[{'ЛС' if dm_only else 'серверов' if guild_only else 'ЛС и серверов'}]"
             settings = {
                 "name": cmd.name,
-                "type": "group" if isinstance(command, app_commands.Group) else "command",
+                "type": "group" if isinstance(cmd, app_commands.Group) else "command",
                 "dm_only": dm_only,
                 "guild_only": guild_only
             }
@@ -129,7 +128,7 @@ async def load_command_module(file_path: Path, commands_dir: Path, bot_client: B
             result.append((cmd, context))
 
         if loaded_commands:
-            logger.info(f"Загружены команды: {', '.join(loaded_commands)}")
+            logger.info(f"Загружены команды из {module_name}: {', '.join(loaded_commands)}")
         return result
     except ImportError as e:
         logger.error(f"Ошибка импорта модуля {file_path.stem}: {e}\n{traceback.format_exc()}")
@@ -146,13 +145,16 @@ async def register_commands(tree: app_commands.CommandTree, bot_client: BotClien
             if item.is_dir():
                 await scan_commands(item)
             elif item.suffix == ".py" and item.stem != "__init__":
-                commands = await load_command_module(item, commands_dir, bot_client)
+                logger.debug(f"Сканирование файла: {item}")
+                commands = await load_command_module(item, commands_dir, bot_client, tree)
                 if commands:
-                    for command, _ in commands:
+                    for command, context in commands:
+                        logger.info(f"Добавление команды {command.name} {context}")
                         tree.add_command(command)
 
     try:
         tree.clear_commands(guild=None)
+        logger.info("Глобальные команды очищены")
         await scan_commands(commands_dir)
         synced = await tree.sync(guild=None)
         logger.success(f"Синхронизировано {len(synced)} глобальных команд")
@@ -181,7 +183,6 @@ async def run_bot() -> None:
 
             try:
                 if isinstance(error, app_commands.CheckFailure):
-                    # Проверяем причину ошибки
                     can_execute, reason = await precheck_command_execution(interaction, command_name, bot_client)
                     if not can_execute and reason:
                         logger.error(f"CheckFailure для команды {command_name} в гильдии {guild_id}, канал {channel_id}: {reason}")
@@ -194,7 +195,6 @@ async def run_bot() -> None:
                             logger.error(f"Ошибка отправки сообщения об ошибке для команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
                         return
 
-                    # Проверка ограничений пользователя
                     if interaction.guild:
                         restriction, restriction_reason = await checker.check_user_restriction(interaction)
                         if not restriction:
@@ -214,7 +214,6 @@ async def run_bot() -> None:
                                 logger.error(f"Ошибка отправки сообщения об ошибке команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
                             return
                     
-                    # Неизвестная причина CheckFailure
                     logger.error(f"CheckFailure для команды {command_name} в гильдии {guild_id}, канал {channel_id}: Неизвестная причина\n{traceback.format_exc()}")
                     try:
                         if not interaction.response.is_done():
@@ -230,7 +229,6 @@ async def run_bot() -> None:
                     except Exception as e:
                         logger.error(f"Ошибка отправки сообщения об ошибке команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
                 else:
-                    # Другие ошибки
                     logger.error(f"Ошибка команды {command_name} для пользователя {user_id} в гильдии {guild_id}, канал {channel_id}: {error}\n{traceback.format_exc()}")
                     try:
                         if not interaction.response.is_done():
@@ -247,22 +245,16 @@ async def run_bot() -> None:
             """Обработчик события готовности бота."""
             logger.debug("Событие on_ready вызвано")
             try:
-                # Запуск активности как фоновой задачи
                 bot_client.bot.loop.create_task(set_bot_activity(bot_client.bot))
                 logger.debug("set_bot_activity запущена как фоновая задача")
                 
-                # Регистрация команд
                 await register_commands(bot_client.tree, bot_client)
                 logger.success(f"Бот {bot_client.bot.user} запущен и готов к работе!")
             except Exception as e:
                 logger.error(f"Ошибка в on_ready: {e}\n{traceback.format_exc()}")
                 raise
 
-        # Запуск Flask-сервера в отдельном потоке
-        logger.debug(f"Запуск Flask-сервера на порту {config.FLASK_PORT}")
         Thread(target=run_flask, daemon=True).start()
-
-        # Запуск бота
         session = ClientSession()
         bot_client.bot.session = session
         await bot_client.bot.start(config.TOKEN)

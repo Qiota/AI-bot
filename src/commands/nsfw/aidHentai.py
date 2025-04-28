@@ -45,7 +45,8 @@ class SearchResult:
 async def aiohttp_session():
     """Контекстный менеджер для aiohttp сессии."""
     timeout = aiohttp.ClientTimeout(total=30, connect=15)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    connector = aiohttp.TCPConnector(limit=12)  # Оптимизирован лимит соединений
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         yield session
 
 class PageSelectModal(Modal, title="Перейти к странице и тайтлу"):
@@ -128,7 +129,7 @@ class NavigationView(View):
         self.start_inactivity_timer()
 
     def get_zones(self) -> Tuple[List[SearchResult], int, int]:
-        """Динамически разделяет результаты на 3 зоны, возвращает текущую зону, индекс в зоне и номер зоны."""
+        """Динамически разделяет результаты на 3 зоны."""
         if not self.results:
             return [], 0, 0
         zone_size = math.ceil(len(self.results) / 3)
@@ -233,17 +234,17 @@ class NavigationView(View):
             async with aiohttp_session() as session:
                 url = construct_url(self.query, target_page)
                 html = await fetch_html(session, url)
-                soup = BeautifulSoup(html, 'html.parser')
+                soup = await asyncio.to_thread(BeautifulSoup, html, 'html.parser')  # Асинхронный парсинг
                 new_results = await parse_search_results(session, soup)
                 if not new_results:
                     return False
                 self.results = new_results
                 self.current_page = target_page
                 self.current_index = 0
-                self.embed_cache.clear()
+                self.embed_cache.clear()  # Очистка кэша при смене страницы
                 return True
         except (HttpError, ParseError, Exception) as e:
-            logger.error(f"Ошибка при загрузке страницы {target_page}: {e}\n{traceback.format_exc()}")
+            logger.error(f"Ошибка при загрузке страницы {target_page} для URL {url}: {e}\n{traceback.format_exc()}")
             return False
 
     async def navigate(self, interaction: Interaction, direction: int, button: str) -> None:
@@ -372,6 +373,7 @@ class NavigationView(View):
         description = result.description[:300] + ("..." if len(result.description) > 300 else "")
         if not result.image_url:
             description += "\n⚠️ Не удалось загрузить изображение."
+
         if result.tags:
             tags_text = f"\n\n🏷 Теги: {', '.join(f'[{tag['name']}]({tag['url']})' for tag in result.tags if tag.get('name') and tag.get('url'))}"
             if len(description) + len(tags_text) > 4000:
@@ -381,7 +383,7 @@ class NavigationView(View):
         embed = Embed(
             title=f"🎬 {result.title}"[:256],
             url=result.url,
-            description=description,
+            description=description[:4096],  # Ограничение длины
             color=0xFF5733
         )
 
@@ -458,7 +460,7 @@ async def aidhentai(interaction: discord.Interaction, bot_client, query: Optiona
         async with aiohttp_session() as session:
             url = construct_url(query, page=1)
             html = await fetch_html(session, url)
-            soup = BeautifulSoup(html, 'html.parser')
+            soup = await asyncio.to_thread(BeautifulSoup, html, 'html.parser')
             new_results = await parse_search_results(session, soup)
             total_pages = parse_total_pages(soup)
 
@@ -472,7 +474,7 @@ async def aidhentai(interaction: discord.Interaction, bot_client, query: Optiona
             view.message = message
 
     except HttpError as e:
-        logger.error(f"HTTP ошибка при выполнении /aidhentai: {e}\n{traceback.format_exc()}")
+        logger.error(f"HTTP ошибка при выполнении /aidhentai для URL {url}: {e}\n{traceback.format_exc()}")
         await interaction.followup.send("Сайт не отвечает. Попробуйте позже.", ephemeral=False)
     except ParseError as e:
         logger.error(f"Ошибка парсинга при выполнении /aidhentai: {e}\n{traceback.format_exc()}")
@@ -508,7 +510,7 @@ def construct_url(query: Optional[str], page: int) -> str:
 @backoff.on_exception(
     backoff.expo,
     (aiohttp.ClientError, asyncio.TimeoutError),
-    max_tries=2,  # Уменьшено до 2 для DNS-ошибок
+    max_tries=2,
     max_time=20,
     jitter=backoff.full_jitter
 )
@@ -546,7 +548,7 @@ async def parse_search_results(session: aiohttp.ClientSession, soup: BeautifulSo
         descriptions = soup.select('div.description.dn p')
         metas = soup.select('p.meta.df.fww.aic.mgt.fz12.link-co.op05')
 
-        semaphore = asyncio.Semaphore(8)
+        semaphore = asyncio.Semaphore(12)  # Увеличен лимит для ускорения
         async def process_with_semaphore(i: int, e: BeautifulSoup) -> Optional[SearchResult]:
             async with semaphore:
                 return await process_search_element(session, e, i, banners, descriptions, metas)
@@ -571,6 +573,7 @@ async def process_search_element(
         title = element.get('aria-label')
         url = element.get('href')
         if not (title and url and urlparse(url).scheme in ('http', 'https')):
+            logger.warning(f"Некорректный элемент {index}: title={title}, url={url}")
             return None
 
         banner_url = banners[index].get('src') or "https://via.placeholder.com/100" if index < len(banners) else "https://via.placeholder.com/100"
@@ -578,7 +581,7 @@ async def process_search_element(
         meta = '•'.join(item.strip() for item in metas[index].get_text().split('•') if item.strip()) if index < len(metas) else ''
 
         detail_html = await fetch_html(session, url)
-        detail_soup = BeautifulSoup(detail_html, 'html.parser')
+        detail_soup = await asyncio.to_thread(BeautifulSoup, detail_html, 'html.parser')
 
         iframe = detail_soup.select_one('iframe[src]')
         video_link = iframe.get('src') if iframe else None
@@ -589,7 +592,6 @@ async def process_search_element(
             elif parsed.scheme not in ('http', 'https'):
                 video_link = None
 
-        # Попытка извлечь изображение из страницы тайтла, если video_url недоступен
         image_url = await fetch_image_url(session, video_link) if video_link else None
         if not image_url:
             img_element = detail_soup.select_one('img[src*="content/previews"]')
@@ -599,6 +601,7 @@ async def process_search_element(
         tags = [
             {'name': tag.get('aria-label'), 'url': tag.get('href')}
             for tag in detail_soup.select('div.genres.mgt.df.fww.por a.btn.fz12.rad1.mgr.mgb.gray-bg[href][aria-label]')
+            if tag.get('aria-label') and tag.get('href')
         ]
 
         return SearchResult(
@@ -613,11 +616,11 @@ async def process_search_element(
             tags=tags
         )
     except Exception as e:
-        logger.error(f"Ошибка обработки элемента {index} ({url}): {e}\n{traceback.format_exc()}")
+        logger.error(f"Ошибка обработки элемента {index} (URL: {url}): {e}\n{traceback.format_exc()}")
         return None
 
 # Кэш для изображений
-_image_cache: OrderedDict[str, tuple[Optional[str], float]] = OrderedDict()
+_image_cache: OrderedDict[str, Tuple[Optional[str], float]] = OrderedDict()
 _image_cache_lock = asyncio.Lock()
 
 async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[str]) -> Optional[str]:
@@ -628,10 +631,9 @@ async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[st
     async with _image_cache_lock:
         if video_url in _image_cache:
             image_url, timestamp = _image_cache[video_url]
-            if asyncio.get_event_loop().time() - timestamp < 7200:  # Увеличено до 2 часов
+            if asyncio.get_event_loop().time() - timestamp < 14400:  # Увеличено до 4 часов
                 return image_url
 
-    # Проверка доступности домена
     parsed = urlparse(video_url)
     try:
         socket.getaddrinfo(parsed.hostname, 443, socket.AF_INET, socket.SOCK_STREAM)
@@ -644,7 +646,7 @@ async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[st
 
     try:
         html = await fetch_html(session, video_url)
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = await asyncio.to_thread(BeautifulSoup, html, 'html.parser')
         backdrop = soup.select_one('div.backdrop[style]')
         image_url = None
         if backdrop and backdrop.get('style'):
@@ -658,6 +660,7 @@ async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[st
 
         return image_url
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.error(f"Ошибка сети при запросе изображения для {video_url}: {e}")
         async with _image_cache_lock:
             _image_cache[video_url] = (None, asyncio.get_event_loop().time())
             if len(_image_cache) > 100:
@@ -674,11 +677,11 @@ async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[st
 async def clear_image_cache_periodically():
     """Периодическая очистка кэша изображений."""
     while True:
-        await asyncio.sleep(7200)
+        await asyncio.sleep(14400)  # Очистка каждые 4 часа
         async with _image_cache_lock:
             current_time = asyncio.get_event_loop().time()
             for key in list(_image_cache.keys()):
-                if current_time - _image_cache[key][1] > 7200:
+                if current_time - _image_cache[key][1] > 14400:
                     _image_cache.pop(key)
 
 def parse_additional_info(soup: BeautifulSoup) -> List[Dict[str, str]]:
@@ -686,7 +689,7 @@ def parse_additional_info(soup: BeautifulSoup) -> List[Dict[str, str]]:
     return [
         {
             'name': translate_field_name(row.select_one('th.field').get_text(strip=True)),
-            'value': row.select_one('td.value').get_text(strip=True),
+            'value': row.select_one('td.value').get_text(strip=True)[:1024],  # Ограничение длины
             'inline': True
         }
         for row in soup.select('tbody tr:has(th.field, td.value)')[:12]
