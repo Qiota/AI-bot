@@ -1,7 +1,7 @@
 import discord
 from discord import Forbidden, HTTPException
 import asyncio
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from .systemLog import logger
 import time
 import json
@@ -19,6 +19,13 @@ from .client import BotClient
 # Фиксированные промпты
 DEFAULT_PROMPT = "Ты полезный и дружелюбный ассистент. Отвечай кратко, по делу, на русском языке. Учитывай контекст и предоставляй точные ответы. Время: {now}"
 DEFAULT_VISION_PROMPT = "Ты эксперт по анализу изображений. Опиши изображение кратко и точно, отвечая на запрос пользователя. Время: {now}"
+
+# Триггерные слова для веб-поиска
+SEARCH_TRIGGER_WORDS = [
+    "найди", "отыщи", "поищи", "поиск", "разыщи",
+    "найди мне", "отыщи мне", "поищи мне",
+    "ищи", "найди-ка", "отыщи-ка", "поищи-ка"
+]
 
 class AIChat:
     """Класс для обработки сообщений и генерации AI-ответов для BotClient."""
@@ -128,7 +135,11 @@ class AIChat:
         """Обработка сообщения с генерацией ответа."""
         async with message.channel.typing():
             text = message.content.replace(f"<@{self.bot_client.bot.user.id}>", "").strip()
-            parts = await self.generate_response(str(message.author.id), str(message.id), text, message)
+            use_search, query = self._check_trigger_words(text)
+            user_id = str(message.author.id)
+            message_id = str(message.id)
+            parts = await (self.generate_response(user_id, message_id, query, message) if use_search
+                          else self.generate_response_no_search(user_id, message_id, text, message))
             if parts:
                 await self._send_split_message(message, parts)
 
@@ -139,9 +150,25 @@ class AIChat:
         
         async with after.channel.typing():
             text = after.content.replace(f"<@{self.bot_client.bot.user.id}>", "").strip()
-            parts = await self.generate_response(str(after.author.id), str(after.id), text, after, is_edit=True)
+            use_search, query = self._check_trigger_words(text)
+            user_id = str(after.author.id)
+            message_id = str(after.id)
+            parts = await (self.generate_response(user_id, message_id, query, after, is_edit=True) if use_search
+                          else self.generate_response_no_search(user_id, message_id, text, after, is_edit=True))
             if parts:
                 await self._send_split_message(after, parts)
+
+    def _check_trigger_words(self, text: str) -> Tuple[bool, str]:
+        """Проверка наличия триггерных слов для веб-поиска и извлечение запроса."""
+        text_lower = text.lower().strip()
+        for trigger in SEARCH_TRIGGER_WORDS:
+            if text_lower.startswith(trigger):
+                # Extract the query by removing the trigger word
+                query = text[len(trigger):].strip()
+                if not query and not text[len(trigger):]:  # Handle case where trigger is the entire text
+                    return False, text
+                return True, query
+        return False, text
 
     def _split_response(self, response: str, max_length: int = 2000) -> List[str]:
         """Разделение длинного ответа на части."""
@@ -185,7 +212,7 @@ class AIChat:
                 await self._send_temp_message(message.channel, "Ошибка отправки.", str(message.author.id), ephemeral=True)
 
     async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message, is_edit: bool = False) -> Optional[List[str]]:
-        """Генерация ответа."""
+        """Генерация ответа с использованием search_tool."""
         try:
             if not (text or message.attachments):
                 return ["Введите текст или прикрепите изображение."]
@@ -197,14 +224,19 @@ class AIChat:
             has_image = any(a.content_type and a.content_type.startswith("image/") for a in message.attachments)
             system_prompt = await self._build_system_prompt(has_image)
             
-            attachments = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
-            user_content = [{"type": "text", "text": text}] if text else []
-            user_content.extend({"type": "image_url", "image_url": {"url": url}} for url in attachments)
+            # Prepare user content
+            user_content = text if text else ""
+            image_urls = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
             
-            messages = [{"role": "system", "content": system_prompt}] + context + [{"role": "user", "content": user_content}]
+            # Construct messages
+            messages = [{"role": "system", "content": system_prompt}] + context
+            if user_content:
+                messages.append({"role": "user", "content": user_content})
+            for url in image_urls:
+                messages.append({"role": "user", "content": f"Image: {url}"})
             
             model_type = "vision" if has_image else "text"
-            response = await self._try_generate_response(messages, has_image, 2000, user_id, channel_type, channel_id)
+            response = await self._generate_response_internal(messages, has_image, 2000, user_id, channel_type, channel_id, use_search=True, query=text)
             if not response:
                 return [f"Не удалось обработать {'изображение' if has_image else 'текст'}."]
             
@@ -213,72 +245,44 @@ class AIChat:
             logger.error(f"Ошибка генерации ответа для {message_id}: {e}\n{traceback.format_exc()}")
             return ["Ошибка генерации ответа."]
 
+    async def generate_response_no_search(self, user_id: str, message_id: str, text: str, message: discord.Message, is_edit: bool = False) -> Optional[List[str]]:
+        """Генерация ответа без использования веб-поиска."""
+        try:
+            if not (text or message.attachments):
+                return ["Введите текст или прикрепите изображение."]
+            
+            channel_type = "DM" if isinstance(message.channel, discord.DMChannel) else "guild"
+            channel_id = str(message.channel.id)
+            
+            context = await self.get_context(user_id, message.channel)
+            has_image = any(a.content_type and a.content_type.startswith("image/") for a in message.attachments)
+            system_prompt = await self._build_system_prompt(has_image)
+            
+            # Prepare user content
+            user_content = text if text else ""
+            image_urls = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+            
+            # Construct messages
+            messages = [{"role": "system", "content": system_prompt}] + context
+            if user_content:
+                messages.append({"role": "user", "content": user_content})
+            for url in image_urls:
+                messages.append({"role": "user", "content": f"Image: {url}"})
+            
+            model_type = "vision" if has_image else "text"
+            response = await self._generate_response_internal(messages, has_image, 2000, user_id, channel_type, channel_id, use_search=False)
+            if not response:
+                return [f"Не удалось обработать {'изображение' if has_image else 'текст'}."]
+            
+            return self._split_response(response, self.bot_client.user_settings[user_id]["max_response_length"])
+        except Exception as e:
+            logger.error(f"Ошибка генерации ответа без поиска для {message_id}: {e}\n{traceback.format_exc()}")
+            return ["Ошибка генерации ответа."]
+
     def _generate_cache_key(self, messages: List[Dict], model_type: str, user_id: str, channel_type: str, channel_id: str) -> str:
         """Генерация ключа кэша."""
         message_data = json.dumps(messages, sort_keys=True)
         return f"{user_id}:{channel_type}:{channel_id}:{model_type}:{hashlib.sha256(message_data.encode()).hexdigest()}"
-
-    async def _enqueue_request(self, model: str, messages: List[Dict], max_tokens: int, session: ClientSession) -> Optional[str]:
-        """Добавление запроса в очередь модели."""
-        queue = self.bot_client.model_queues.get(model)
-        if not queue:
-            logger.error(f"Очередь для модели {model} не найдена")
-            return None
-
-        try:
-            await queue.put((messages, max_tokens, session))
-            logger.debug(f"Запрос добавлен в очередь {model}, размер: {queue.qsize()}")
-            async with self.bot_client.model_semaphores[model]:
-                messages, max_tokens, session = await queue.get()
-                try:
-                    if not self.bot_client.g4f_client:
-                        logger.error("G4FClient не инициализирован")
-                        return None
-                    response = await self.bot_client.g4f_client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        web_search=True,
-                        session=session
-                    )
-                    response_text = response.choices[0].message.content.strip()
-                    return response_text
-                finally:
-                    queue.task_done()
-        except Exception as e:
-            logger.error(f"Ошибка в очереди для {model}: {e}\n{traceback.format_exc()}")
-            queue.task_done()
-            raise
-
-    async def _distribute_request(self, model_type: str, messages: List[Dict], max_tokens: int, session: ClientSession) -> Optional[str]:
-        """Распределение запроса между моделями."""
-        available_models = [m for m in self.bot_client.models[model_type] if m not in self.bot_client.models["unavailable"][model_type]]
-        if not available_models:
-            logger.error(f"Нет доступных моделей для {model_type}")
-            return None
-
-        model_queue_sizes = [(model, self.bot_client.model_queues[model].qsize()) for model in available_models]
-        sorted_models = sorted(model_queue_sizes, key=lambda x: x[1])
-
-        for model, _ in sorted_models:
-            queue = self.bot_client.model_queues[model]
-            if not queue.full():
-                logger.debug(f"Выбрана модель {model}, очередь: {queue.qsize()}")
-                return await self._enqueue_request(model, messages, max_tokens, session)
-
-        logger.warning(f"Все очереди для {model_type} заполнены")
-        tasks = [asyncio.create_task(queue.join()) for model, queue in [(m[0], self.bot_client.model_queues[m[0]]) for m in sorted_models]]
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-
-        for model, _ in sorted_models:
-            if not self.bot_client.model_queues[model].full():
-                logger.debug(f"Повторная попытка с {model}")
-                return await self._enqueue_request(model, messages, max_tokens, session)
-
-        logger.error(f"Не удалось распределить запрос для {model_type}")
-        return None
 
     @backoff.on_exception(
         backoff.expo,
@@ -288,8 +292,8 @@ class AIChat:
         factor=2,
         jitter=backoff.full_jitter
     )
-    async def _try_generate_response(self, messages: List[Dict], has_image: bool, max_tokens: int, user_id: str, channel_type: str, channel_id: str) -> Optional[str]:
-        """Попытка генерации ответа."""
+    async def _generate_response_internal(self, messages: List[Dict], has_image: bool, max_tokens: int, user_id: str, channel_type: str, channel_id: str, use_search: bool, query: str = "") -> Optional[str]:
+        """Внутренняя функция для генерации ответа с или без search_tool."""
         model_type = "vision" if has_image else "text"
         available_models = [m for m in self.bot_client.models[model_type] if m not in self.bot_client.models["unavailable"][model_type]]
         
@@ -314,36 +318,74 @@ class AIChat:
             except Exception as e:
                 logger.error(f"Ошибка чтения кэша: {e}\n{traceback.format_exc()}")
 
+        # Prepare search tool call if use_search is True and query is provided
+        tool_calls = None
+        if use_search and query:
+            search_query = query[:100].strip()  # Limit query to 100 characters
+            tool_calls = [
+                {
+                    "function": {
+                        "arguments": {
+                            "query": search_query,
+                            "max_results": 5,
+                            "max_words": 2500,
+                            "backend": "auto",
+                            "add_text": True,
+                            "timeout": 5
+                        },
+                        "name": "search_tool"
+                    },
+                    "type": "function"
+                }
+            ]
+
         timeout = ClientTimeout(total=60)
         headers = {"User-Agent": "BotClient/1.0 (DiscordBot; PollinationsAI)"}
         async with ClientSession(timeout=timeout, headers=headers) as session:
             for selected_model in sorted_models:
-                logger.debug(f"Попытка с моделью {selected_model}")
-                
+                queue = self.bot_client.model_queues.get(selected_model)
+                if not queue:
+                    logger.error(f"Очередь для модели {selected_model} не найдена")
+                    continue
+
                 for attempt in range(self.bot_client.request_settings["max_retries"]):
                     try:
-                        response_text = await self._enqueue_request(selected_model, messages, max_tokens, session)
-                        if not response_text:
-                            logger.warning(f"Пустой ответ от {selected_model}, попытка {attempt + 1}")
-                            raise ValueError("Empty response")
-
-                        self.bot_client.models["model_stats"][model_type][selected_model]["success"] += 1
-                        self.bot_client.models["last_successful"][model_type] = selected_model
-                        if self.bot_client.firebase_manager:
-                            await self.bot_client.firebase_manager.save_models({"timestamp": time.time(), **self.bot_client.models})
-                        else:
-                            logger.warning("FirebaseManager не инициализирован, модели не сохранены")
-
-                        if self.bot_client.firebase_manager:
+                        await queue.put((messages, max_tokens, session))
+                        logger.debug(f"Запрос добавлен в очередь {selected_model}, размер: {queue.qsize()}")
+                        async with self.bot_client.model_semaphores[selected_model]:
+                            messages, max_tokens, session = await queue.get()
                             try:
-                                await self.bot_client.firebase_manager.save_cache(user_id, channel_type, channel_id, cache_key, {
-                                    "response": response_text,
-                                    "timestamp": time.time()
-                                })
-                            except Exception as e:
-                                logger.error(f"Ошибка сохранения кэша: {e}\n{traceback.format_exc()}")
+                                if not self.bot_client.g4f_client:
+                                    logger.error("G4FClient не инициализирован")
+                                    return None
+                                response = await self.bot_client.g4f_client.chat.completions.create(
+                                    model=selected_model,
+                                    messages=messages,
+                                    max_tokens=max_tokens,
+                                    tool_calls=tool_calls if use_search else None,
+                                    session=session
+                                )
+                                response_text = response.choices[0].message.content.strip()
+                                if not response_text:
+                                    logger.warning(f"Пустой ответ от {selected_model}, попытка {attempt + 1}")
+                                    raise ValueError("Empty response")
 
-                        return response_text
+                                self.bot_client.models["model_stats"][model_type][selected_model]["success"] += 1
+                                self.bot_client.models["last_successful"][model_type] = selected_model
+                                if self.bot_client.firebase_manager:
+                                    await self.bot_client.firebase_manager.save_models({"timestamp": time.time(), **self.bot_client.models})
+                                    try:
+                                        await self.bot_client.firebase_manager.save_cache(user_id, channel_type, channel_id, cache_key, {
+                                            "response": response_text,
+                                            "timestamp": time.time()
+                                        })
+                                    except Exception as e:
+                                        logger.error(f"Ошибка сохранения кэша: {e}\n{traceback.format_exc()}")
+
+                                return response_text
+
+                            finally:
+                                queue.task_done()
 
                     except ResponseStatusError as e:
                         if e.status >= 500 and attempt < self.bot_client.request_settings["max_retries"] - 1:
@@ -370,21 +412,6 @@ class AIChat:
                 if self.bot_client.firebase_manager:
                     await self.bot_client.firebase_manager.save_models({"timestamp": time.time(), **self.bot_client.models})
                 await asyncio.sleep(3)
-
-            response_text = await self._distribute_request(model_type, messages, max_tokens, session)
-            if response_text:
-                last_model = self.bot_client.models["last_successful"][model_type] or sorted_models[0]
-                self.bot_client.models["model_stats"][model_type][last_model]["success"] += 1
-                if self.bot_client.firebase_manager:
-                    await self.bot_client.firebase_manager.save_models({"timestamp": time.time(), **self.bot_client.models})
-                    try:
-                        await self.bot_client.firebase_manager.save_cache(user_id, channel_type, channel_id, cache_key, {
-                            "response": response_text,
-                            "timestamp": time.time()
-                        })
-                    except Exception as e:
-                        logger.error(f"Ошибка сохранения кэша: {e}\n{traceback.format_exc()}")
-                return response_text
 
         logger.error(f"Все модели ({model_type}) не смогли обработать запрос")
         return None
