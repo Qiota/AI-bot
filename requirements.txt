@@ -1,5 +1,5 @@
 discord.py
-g4f
+g4f[all]
 python-decouple
 aiohttp
 colorama
@@ -12,3 +12,5 @@ backoff
 flask_socketio
 eventlet
 bs4
+beautifulsoup4
+duckduckgo-search
