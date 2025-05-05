@@ -14,3 +14,4 @@ eventlet
 bs4
 beautifulsoup4
 duckduckgo-search
+gtts
