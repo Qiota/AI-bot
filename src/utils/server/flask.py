@@ -1,8 +1,12 @@
 from flask import Flask
 from ...systemLog import logger
 import os
+import logging
 
 app = Flask(__name__)
+
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.setLevel(logging.ERROR)
 
 class BotConfig:
     FLASK_HOST = '0.0.0.0'
