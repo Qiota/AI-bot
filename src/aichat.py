@@ -10,6 +10,10 @@ import backoff
 import uuid
 from aiohttp import ClientSession, ClientTimeout
 from g4f.errors import ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, ResponseStatusError
+from g4f.client import Client
+from g4f.Provider import PollinationsAI
+import re
+import base64
 from datetime import datetime, timezone
 import traceback
 from .commands.restrict import check_bot_access
@@ -163,9 +167,8 @@ class AIChat:
         text_lower = text.lower().strip()
         for trigger in SEARCH_TRIGGER_WORDS:
             if text_lower.startswith(trigger):
-                # Extract the query by removing the trigger word
                 query = text[len(trigger):].strip()
-                if not query and not text[len(trigger):]:  # Handle case where trigger is the entire text
+                if not query and not text[len(trigger):]:
                     return False, text
                 return True, query
         return False, text
@@ -211,6 +214,86 @@ class AIChat:
                 logger.error(f"Ошибка отправки части {i+1}: {e}\n{traceback.format_exc()}")
                 await self._send_temp_message(message.channel, "Ошибка отправки.", str(message.author.id), ephemeral=True)
 
+    async def vision(self, prompt: str, images: List[Tuple[bytes, str]], user_id: str, channel_type: str, channel_id: str) -> Optional[str]:
+        """
+        Асинхронная функция для обработки изображений с использованием PollinationsAI.
+
+        Args:
+            prompt (str): Текстовый запрос пользователя.
+            images (List[Tuple[bytes, str]]): Список кортежей (байты изображения, имя файла).
+            user_id (str): ID пользователя.
+            channel_type (str): Тип канала ("DM" или "guild").
+            channel_id (str): ID канала.
+
+        Returns:
+            Optional[str]: Текстовое описание изображений или None в случае ошибки.
+        """
+        try:
+            # Инициализация клиента с PollinationsAI
+            client = Client(provider=PollinationsAI)
+
+            # Преобразование изображений в Data URI
+            formatted_images = []
+            for image_data, filename in images:
+                mime_type = "image/jpeg" if filename.lower().endswith((".jpeg", ".jpg")) else "image/webp"
+                base64_image = base64.b64encode(image_data).decode("utf-8")
+                data_uri = f"data:{mime_type};base64,{base64_image}"
+                formatted_images.append([data_uri, filename])
+
+            # Формирование системного промпта
+            current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            system_prompt = f"[PERSONALITY]\n{DEFAULT_VISION_PROMPT.format(now=current_date)}\n[INSTRUCTIONS]\nAnalyze image."
+
+            # Формирование сообщений
+            messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
+
+            # Кэширование
+            cache_key = self._generate_cache_key(messages, "vision", user_id, channel_type, channel_id)
+            if self.bot_client.firebase_manager:
+                try:
+                    cached_response = await self.bot_client.firebase_manager.load_cache(user_id, channel_type, channel_id, cache_key)
+                    if cached_response and cached_response.get("timestamp", 0) + self.bot_client.cache_limits["cache_ttl_seconds"] > time.time():
+                        logger.debug(f"Использован кэш для {cache_key}")
+                        return cached_response["response"]
+                except Exception as e:
+                    logger.error(f"Ошибка чтения кэша: {e}\n{traceback.format_exc()}")
+
+            # Выполнение синхронного запроса (PollinationsAI использует синхронный метод)
+            response = client.chat.completions.create(
+                model="",  # PollinationsAI не требует модели
+                messages=messages,
+                images=formatted_images,
+                max_tokens=2000
+            )
+
+            response_text = response.choices[0].message.content.strip()
+            if not response_text:
+                logger.warning("Пустой ответ от PollinationsAI")
+                return None
+
+            # Сохранение в кэш
+            if self.bot_client.firebase_manager:
+                try:
+                    await self.bot_client.firebase_manager.save_cache(user_id, channel_type, channel_id, cache_key, {
+                        "response": response_text,
+                        "timestamp": time.time()
+                    })
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения кэша: {e}\n{traceback.format_exc()}")
+
+            logger.debug(f"Успешный ответ от PollinationsAI: {response_text[:100]}...")
+            return response_text
+
+        except ResponseStatusError as e:
+            status_match = re.search(r"Response (\d+):", str(e))
+            status_code = int(status_match.group(1)) if status_match else None
+            logger.error(f"Ошибка PollinationsAI: {e}, код состояния: {status_code}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Неизвестная ошибка при обработке изображений: {e}\n{traceback.format_exc()}")
+            return None
+
     async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message, is_edit: bool = False) -> Optional[List[str]]:
         """Генерация ответа с использованием search_tool."""
         try:
@@ -220,25 +303,26 @@ class AIChat:
             channel_type = "DM" if isinstance(message.channel, discord.DMChannel) else "guild"
             channel_id = str(message.channel.id)
             
-            context = await self.get_context(user_id, message.channel)
+            # Проверка наличия изображений
             has_image = any(a.content_type and a.content_type.startswith("image/") for a in message.attachments)
+            if has_image:
+                image_attachments = [(await a.read(), a.filename) for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+                response = await self.vision(text or "Опиши, что на изображениях", image_attachments, user_id, channel_type, channel_id)
+                if not response:
+                    return ["Не удалось обработать изображение."]
+                return self._split_response(response, self.bot_client.user_settings[user_id]["max_response_length"])
+
+            context = await self.get_context(user_id, message.channel)
             system_prompt = await self._build_system_prompt(has_image)
             
-            # Prepare user content
-            user_content = text if text else ""
-            image_urls = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
-            
-            # Construct messages
+            # Формирование сообщений
             messages = [{"role": "system", "content": system_prompt}] + context
-            if user_content:
-                messages.append({"role": "user", "content": user_content})
-            for url in image_urls:
-                messages.append({"role": "user", "content": f"Image: {url}"})
+            if text:
+                messages.append({"role": "user", "content": text})
             
-            model_type = "vision" if has_image else "text"
             response = await self._generate_response_internal(messages, has_image, 2000, user_id, channel_type, channel_id, use_search=True, query=text)
             if not response:
-                return [f"Не удалось обработать {'изображение' if has_image else 'текст'}."]
+                return ["Не удалось обработать текст."]
             
             return self._split_response(response, self.bot_client.user_settings[user_id]["max_response_length"])
         except Exception as e:
@@ -254,25 +338,26 @@ class AIChat:
             channel_type = "DM" if isinstance(message.channel, discord.DMChannel) else "guild"
             channel_id = str(message.channel.id)
             
-            context = await self.get_context(user_id, message.channel)
+            # Проверка наличия изображений
             has_image = any(a.content_type and a.content_type.startswith("image/") for a in message.attachments)
+            if has_image:
+                image_attachments = [(await a.read(), a.filename) for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+                response = await self.vision(text or "Опиши, что на изображениях", image_attachments, user_id, channel_type, channel_id)
+                if not response:
+                    return ["Не удалось обработать изображение."]
+                return self._split_response(response, self.bot_client.user_settings[user_id]["max_response_length"])
+
+            context = await self.get_context(user_id, message.channel)
             system_prompt = await self._build_system_prompt(has_image)
             
-            # Prepare user content
-            user_content = text if text else ""
-            image_urls = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
-            
-            # Construct messages
+            # Формирование сообщений
             messages = [{"role": "system", "content": system_prompt}] + context
-            if user_content:
-                messages.append({"role": "user", "content": user_content})
-            for url in image_urls:
-                messages.append({"role": "user", "content": f"Image: {url}"})
+            if text:
+                messages.append({"role": "user", "content": text})
             
-            model_type = "vision" if has_image else "text"
             response = await self._generate_response_internal(messages, has_image, 2000, user_id, channel_type, channel_id, use_search=False)
             if not response:
-                return [f"Не удалось обработать {'изображение' if has_image else 'текст'}."]
+                return ["Не удалось обработать текст."]
             
             return self._split_response(response, self.bot_client.user_settings[user_id]["max_response_length"])
         except Exception as e:
@@ -321,7 +406,7 @@ class AIChat:
         # Prepare search tool call if use_search is True and query is provided
         tool_calls = None
         if use_search and query:
-            search_query = query[:100].strip()  # Limit query to 100 characters
+            search_query = query[:100].strip()
             tool_calls = [
                 {
                     "function": {
@@ -388,8 +473,10 @@ class AIChat:
                                 queue.task_done()
 
                     except ResponseStatusError as e:
-                        if e.status >= 500 and attempt < self.bot_client.request_settings["max_retries"] - 1:
-                            logger.warning(f"Серверная ошибка {e.status}, попытка {attempt + 1}")
+                        status_match = re.search(r"Response (\d+):", str(e))
+                        status_code = int(status_match.group(1)) if status_match else None
+                        if status_code and status_code >= 500 and attempt < self.bot_client.request_settings["max_retries"] - 1:
+                            logger.warning(f"Серверная ошибка {status_code}, попытка {attempt + 1}")
                             await asyncio.sleep(self.bot_client.request_settings["retry_delay_base"])
                         else:
                             logger.error(f"Ошибка {selected_model} после {attempt + 1} попыток: {e}")
