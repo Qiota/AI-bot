@@ -220,10 +220,6 @@ class NavigationView(View):
                 page_label, ButtonStyle.blurple, page_disabled,
                 callback=self.open_page_modal
             ))
-
-            self.add_item(self._create_button(
-                "🔗 Большие файлы", ButtonStyle.link, False, url=None
-            ))
         else:
             self.add_item(self._create_button(
                 "⬅️", ButtonStyle.gray,
@@ -239,9 +235,6 @@ class NavigationView(View):
                 "📄", ButtonStyle.blurple,
                 disabled=False,
                 callback=self.open_page_modal
-            ))
-            self.add_item(self._create_button(
-                "🔗 Большие файлы", ButtonStyle.link, False, url=None
             ))
 
     async def open_page_modal(self, interaction: Interaction) -> None:
@@ -400,7 +393,6 @@ class NavigationView(View):
             elif skipped_post:
                 new_skipped_posts.append(skipped_post)
 
-        # Обновление глобального списка пропущенных постов
         skipped_posts_global.extend([post for post in new_skipped_posts if post not in skipped_posts_global])
 
         cache_key = (self.current_page, self.current_chunk)
@@ -424,7 +416,6 @@ class NavigationView(View):
                 posts = await fetch_danbooru_posts(session, self.query, target_page)
                 if not posts:
                     return False
-                # Фильтрация дубликатов
                 posts = filter_duplicates(posts)
                 self.results = posts
                 self.page_cache[target_page] = posts
