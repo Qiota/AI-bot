@@ -10,8 +10,8 @@ import asyncio
 from contextlib import asynccontextmanager
 import backoff
 import logging
-from aiohttp import web
 import html
+from cachetools import TTLCache
 from ...systemLog import logger
 from ...utils.checker import checker
 from ..restrict import check_bot_access, restrict_command_execution
@@ -20,6 +20,23 @@ from ..restrict import check_bot_access, restrict_command_execution
 aiohttp_access_logger = logging.getLogger("aiohttp.access")
 aiohttp_access_logger.propagate = False
 aiohttp_access_logger.addHandler(logging.NullHandler())
+
+# Конфигурационные константы
+MAX_FILE_SIZE_DEFAULT = 8 * 1024 * 1024 
+MAX_FILE_SIZE_TIER_2 = 25 * 1024 * 1024
+MAX_FILE_SIZE_TIER_3 = 100 * 1024 * 1024
+SUPPORTED_MIME_TYPES = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'video/mp4': '.mp4',
+    'video/webm': '.webm'
+}
+REQUEST_TIMEOUT = 5  # Таймаут для HEAD/GET-запросов
+SEMAPHORE_LIMIT = 5  # Ограничение параллельных запросов
+INACTIVITY_TIMEOUT = 120  # Таймаут бездействия (секунды)
+TAG_CACHE_TTL = 3600  # Время жизни кэша тегов (1 час)
+VIEW_TIMEOUT = 300  # Таймаут для NavigationView (секунды)
 
 # Пользовательские исключения
 class DanbooruAPIError(Exception):
@@ -38,131 +55,18 @@ class DanbooruPost:
     created_at: str
 
 # Глобальное состояние
-web_server: Optional[web.TCPSite] = None
 skipped_posts_global: List[DanbooruPost] = []
 content_type_cache: Dict[str, str] = {}  # Кэш для Content-Type по file_url
-server_lock = asyncio.Lock()
+tag_suggestions_cache: TTLCache = TTLCache(maxsize=1000, ttl=TAG_CACHE_TTL)  # Кэш тегов
 
-# MIME-типы и соответствующие расширения
-MIME_TO_EXTENSION = {
-    'image/jpeg': '.jpg',
-    'image/png': '.png',
-    'image/gif': '.gif',
-    'video/mp4': '.mp4',
-    'video/webm': '.webm'
-}
-
-# HTML-страница для отображения больших файлов, оптимизированная для мобильных
-# Экранируем фигурные скобки в CSS, заменяя { на {{ и } на }}
-HTML_PAGE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Danbooru Large Files</title>
-    <style>
-        body {{
-            font-family: system-ui, -apple-system, sans-serif;
-            margin: 1rem;
-            background-color: #f4f4f4;
-            line-height: 1.5;
-        }}
-        h1 {{
-            font-size: 1.5rem;
-            color: #333;
-            margin-bottom: 1rem;
-        }}
-        .post {{
-            margin: 1rem 0;
-            border: 1px solid #ddd;
-            padding: 0.75rem;
-            border-radius: 0.5rem;
-            background-color: #fff;
-        }}
-        .post-id {{
-            font-weight: 600;
-            font-size: 1.1rem;
-            color: #1a73e8;
-        }}
-        .tags {{
-            color: #666;
-            font-size: 0.85rem;
-            margin-top: 0.5rem;
-            word-break: break-word;
-        }}
-        img, video {{
-            max-width: 100%;
-            height: auto;
-            margin-top: 0.5rem;
-            border-radius: 0.25rem;
-            object-fit: contain;
-        }}
-        a {{
-            color: #1a73e8;
-            text-decoration: none;
-            font-size: 1rem;
-            padding: 0.5rem;
-            display: inline-block;
-        }}
-        a:hover, a:focus {{
-            text-decoration: underline;
-            background-color: #e8f0fe;
-        }}
-        #to-top {{
-            position: fixed;
-            bottom: 1rem;
-            right: 1rem;
-            background-color: #1a73e8;
-            color: #fff;
-            border: none;
-            border-radius: 50%;
-            width: 3rem;
-            height: 3rem;
-            font-size: 1rem;
-            cursor: pointer;
-            display: none;
-            align-items: center;
-            justify-content: center;
-        }}
-        #to-top.visible {{
-            display: flex;
-        }}
-        @media (max-width: 600px) {{
-            body {{
-                margin: 0.5rem;
-            }}
-            h1 {{
-                font-size: 1.25rem;
-            }}
-            .post {{
-                padding: 0.5rem;
-            }}
-            .post-id {{
-                font-size: 1rem;
-            }}
-            .tags {{
-                font-size: 0.8rem;
-            }}
-        }}
-    </style>
-</head>
-<body>
-    <h1>Danbooru Large Files</h1>
-    {posts}
-    <button id="to-top" title="Наверх">↑</button>
-    <script>
-        const toTopBtn = document.getElementById('to-top');
-        window.addEventListener('scroll', () => {{
-            toTopBtn.classList.toggle('visible', window.scrollY > 300);
-        }});
-        toTopBtn.addEventListener('click', () => {{
-            window.scrollTo({{ top: 0, behavior: 'smooth' }});
-        }});
-    </script>
-</body>
-</html>
-"""
+def format_post_count(count: int) -> str:
+    """Форматирует количество постов в читаемый вид (например, 2400 -> '2.4k')."""
+    if count < 1000:
+        return str(count)
+    elif count < 1000000:
+        return f"{count / 1000:.1f}k".replace(".0k", "k")
+    else:
+        return f"{count / 1000000:.1f}M".replace(".0M", "M")
 
 # Модальное окно для ввода номера страницы
 class PageInputModal(Modal, title="Перейти к странице"):
@@ -239,10 +143,16 @@ class PageInputModal(Modal, title="Перейти к странице"):
                 await interaction.edit_original_response(content=content, view=self.view, attachments=files)
             except discord.HTTPException as e:
                 logger.error(f"Ошибка HTTP при обновлении сообщения: {e}")
-                await interaction.followup.send("Не удалось обновить сообщение из-за слишком больших файлов. Попробуйте снова.", ephemeral=True)
+                await interaction.followup.send(
+                    "Не удалось обновить сообщение из-за слишком GRAND файлов. Попробуйте снова.",
+                    ephemeral=True
+                )
             except discord.DiscordException as e:
                 logger.error(f"Ошибка при обновлении сообщения: {e}")
-                await interaction.followup.send("Не удалось обновить сообщение. Попробуйте снова.", ephemeral=True)
+                await interaction.followup.send(
+                    "Не удалось обновить сообщение. Попробуйте снова.",
+                    ephemeral=True
+                )
         else:
             self.view.is_loading = False
             self.view.loading_button = None
@@ -260,7 +170,7 @@ class NavigationView(View):
         current_page: int,
         total_pages: int,
         current_chunk: int = 0,
-        timeout: int = 300
+        timeout: int = VIEW_TIMEOUT
     ):
         super().__init__(timeout=timeout)
         self.results = results
@@ -272,8 +182,9 @@ class NavigationView(View):
         self.is_loading = False
         self.loading_button: Optional[str] = None
         self.message_cache: Dict[Tuple[int, int], Tuple[str, List[str], List[DanbooruPost]]] = {}
+        self.page_cache: Dict[int, List[DanbooruPost]] = {}
         self.last_interaction = asyncio.get_event_loop().time()
-        self.inactivity_timeout = 120
+        self.inactivity_timeout = INACTIVITY_TIMEOUT
         self.inactivity_task: Optional[asyncio.Task] = None
         self.message: Optional[discord.Message] = None
         self.update_buttons()
@@ -284,7 +195,7 @@ class NavigationView(View):
         self.inactivity_task = asyncio.create_task(self.check_inactivity())
 
     async def check_inactivity(self) -> None:
-        """Отключает кнопки после 2 минут бездействия."""
+        """Отключает кнопки после периода бездействия."""
         try:
             while True:
                 elapsed = asyncio.get_event_loop().time() - self.last_interaction
@@ -334,10 +245,6 @@ class NavigationView(View):
                 page_label, ButtonStyle.blurple, page_disabled,
                 callback=self.open_page_modal
             ))
-
-            self.add_item(self._create_button(
-                "🔗 Большие файлы", ButtonStyle.link, False, url="http://localhost:8000"
-            ))
         else:
             self.add_item(self._create_button(
                 "⬅️", ButtonStyle.gray,
@@ -353,9 +260,6 @@ class NavigationView(View):
                 "📄", ButtonStyle.blurple,
                 disabled=False,
                 callback=self.open_page_modal
-            ))
-            self.add_item(self._create_button(
-                "🔗 Большие файлы", ButtonStyle.link, False, url="http://localhost:8000"
             ))
 
     async def open_page_modal(self, interaction: Interaction) -> None:
@@ -438,10 +342,16 @@ class NavigationView(View):
             await interaction.edit_original_response(content=content, view=self, attachments=files)
         except discord.HTTPException as e:
             logger.error(f"Ошибка HTTP при обновлении сообщения: {e}")
-            await interaction.followup.send("Не удалось обновить сообщение из-за слишком больших файлов. Попробуйте снова.", ephemeral=True)
+            await interaction.followup.send(
+                "Не удалось обновить сообщение из-за слишком больших файлов. Попробуйте снова.",
+                ephemeral=True
+            )
         except discord.DiscordException as e:
             logger.error(f"Ошибка при обновлении сообщения: {e}")
-            await interaction.followup.send("Не удалось обновить сообщение. Попробуйте снова.", ephemeral=True)
+            await interaction.followup.send(
+                "Не удалось обновить сообщение. Попробуйте снова.",
+                ephemeral=True
+            )
 
     async def fetch_images(
         self,
@@ -449,8 +359,8 @@ class NavigationView(View):
         interaction: Interaction,
         skipped_posts: List[DanbooruPost]
     ) -> List[discord.File]:
-        """Загружает файлы по URL и возвращает список discord.File с правильными расширениями."""
-        global skipped_posts_global
+        """Загружает файлы по URL с проверкой размера и MIME-типа."""
+        global skipped_posts_global, content_type_cache
         files = []
         new_skipped_posts = skipped_posts.copy()
         start_idx = self.current_chunk * 10
@@ -458,27 +368,49 @@ class NavigationView(View):
         posts = self.results[start_idx:end_idx]
         posts_with_url = [post for post in posts if post.file_url]
 
-        max_file_size = 8 * 1024 * 1024
+        # Определяем максимальный размер файла в зависимости от уровня сервера
+        max_file_size = MAX_FILE_SIZE_DEFAULT
         if interaction.guild:
             if interaction.guild.premium_tier == 2:
-                max_file_size = 25 * 1024 * 1024
+                max_file_size = MAX_FILE_SIZE_TIER_2
             elif interaction.guild.premium_tier == 3:
-                max_file_size = 100 * 1024 * 1024
+                max_file_size = MAX_FILE_SIZE_TIER_3
 
-        semaphore = asyncio.Semaphore(5)  # Ограничение на 5 одновременных загрузок
+        semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
 
         async def fetch_single_image(idx: int, url: str) -> Tuple[Optional[discord.File], Optional[DanbooruPost]]:
             async with semaphore:
                 try:
-                    async with aiohttp.ClientSession() as session:
+                    # Проверяем кэш MIME-типов
+                    content_type = content_type_cache.get(url)
+                    if content_type and content_type not in SUPPORTED_MIME_TYPES:
+                        logger.debug(f"Пропущен файл {url} из кэша с неподдерживаемым MIME-типом: {content_type}")
+                        return None, posts_with_url[idx]
+
+                    async with aiohttp_session() as session:
+                        async with session.head(url, timeout=REQUEST_TIMEOUT) as head_response:
+                            if head_response.status != 200:
+                                logger.error(f"HEAD-запрос для {url} вернул {head_response.status}")
+                                return None, posts_with_url[idx]
+                            content_length = head_response.headers.get('Content-Length')
+                            if content_length and int(content_length) > max_file_size:
+                                logger.debug(f"Файл {url} слишком большой ({content_length} байт)")
+                                return None, posts_with_url[idx]
+                            content_type = head_response.headers.get('Content-Type', 'application/octet-stream')
+                            content_type_cache[url] = content_type
+
+                            # Проверяем, является ли файл медийным
+                            if content_type not in SUPPORTED_MIME_TYPES:
+                                logger.debug(f"Пропущен файл {url} с неподдерживаемым MIME-типом: {content_type}")
+                                return None, posts_with_url[idx]
+
                         async with session.get(url) as response:
                             if response.status == 200:
                                 image_data = await response.read()
                                 if len(image_data) > max_file_size:
-                                    logger.debug(f"Файл {url} слишком большой ({len(image_data)} байт), добавлен в skipped_posts")
+                                    logger.debug(f"Файл {url} слишком большой ({len(image_data)} байт)")
                                     return None, posts_with_url[idx]
-                                content_type = response.headers.get('Content-Type', 'application/octet-stream')
-                                extension = MIME_TO_EXTENSION.get(content_type, '.bin')
+                                extension = SUPPORTED_MIME_TYPES[content_type]
                                 post = posts_with_url[idx]
                                 file = discord.File(
                                     fp=io.BytesIO(image_data),
@@ -488,24 +420,28 @@ class NavigationView(View):
                             else:
                                 logger.error(f"Ошибка загрузки файла {url}: HTTP {response.status}")
                                 return None, posts_with_url[idx]
-                except aiohttp.ClientError as e:
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                     logger.error(f"Ошибка загрузки файла {url}: {e}")
                     return None, posts_with_url[idx]
 
         tasks = [fetch_single_image(idx, url) for idx, url in enumerate(image_urls)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for file, skipped_post in results:
-            if isinstance(file, Exception) or isinstance(skipped_post, Exception):
-                logger.error(f"Ошибка в задаче загрузки: {file or skipped_post}")
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Ошибка в задаче загрузки изображения: {result}")
                 continue
-            if file:
-                files.append(file)
-            if skipped_post:
-                new_skipped_posts.append(skipped_post)
+            try:
+                file, skipped_post = result
+                if file:
+                    files.append(file)
+                elif skipped_post:
+                    new_skipped_posts.append(skipped_post)
+            except ValueError as e:
+                logger.error(f"Некорректный результат задачи загрузки: {result}, ошибка: {e}")
+                continue
 
-        async with server_lock:
-            skipped_posts_global.extend([post for post in new_skipped_posts if post not in skipped_posts_global])
+        skipped_posts_global.extend([post for post in new_skipped_posts if post not in skipped_posts_global])
 
         cache_key = (self.current_page, self.current_chunk)
         if cache_key in self.message_cache:
@@ -514,13 +450,23 @@ class NavigationView(View):
         return files
 
     async def load_page(self, target_page: int, reset_chunk: bool = False) -> bool:
-        """Загружает результаты для указанной страницы."""
+        """Загружает результаты для указанной страницы с использованием кэша."""
+        if target_page in self.page_cache:
+            self.results = self.page_cache[target_page]
+            self.current_page = target_page
+            if reset_chunk:
+                self.current_chunk = 0
+            self.message_cache.clear()
+            return True
+
         try:
             async with aiohttp_session() as session:
                 posts = await fetch_danbooru_posts(session, self.query, target_page)
                 if not posts:
                     return False
+                posts = filter_duplicates(posts)
                 self.results = posts
+                self.page_cache[target_page] = posts
                 self.current_page = target_page
                 if reset_chunk:
                     self.current_chunk = 0
@@ -552,17 +498,17 @@ class NavigationView(View):
 
         for post in skipped_posts:
             if post.file_url:
-                message_lines.append(f"[Пост #{post.id}]({post.file_url})")
+                message_lines.append(f"**Слишком большой файл или неподдерживаемый формат:** [Пост #{post.id}]({post.file_url})")
 
         message = "\n".join(message_lines)
         self.message_cache[cache_key] = (message, image_urls, skipped_posts)
         return message, image_urls, skipped_posts
 
     async def on_timeout(self) -> None:
-        """Обрабатывает таймаут view, удаляя кнопки и останавливая веб-сервер."""
-        global web_server, skipped_posts_global, content_type_cache
+        """Обрабатывает таймаут view, очищая кэш."""
         self.clear_items()
         self.message_cache.clear()
+        self.page_cache.clear()
         if self.inactivity_task:
             self.inactivity_task.cancel()
         try:
@@ -571,85 +517,30 @@ class NavigationView(View):
         except discord.DiscordException as e:
             logger.error(f"Ошибка при удалении кнопок: {e}")
 
-        async with server_lock:
-            if web_server:
-                await web_server.stop()
-                web_server = None
-                logger.info("Веб-сервер остановлен")
-            skipped_posts_global.clear()
-            content_type_cache.clear()
+        global skipped_posts_global, content_type_cache, tag_suggestions_cache
+        skipped_posts_global.clear()
+        content_type_cache.clear()
+        tag_suggestions_cache.clear()
 
-# Веб-сервер для отображения больших файлов
-async def handle_large_files(request):
-    """Обрабатывает запросы к веб-серверу, встраивая изображения, GIF и видео."""
-    global skipped_posts_global, content_type_cache
-    if request.path == "/favicon.ico":
-        return web.Response(status=404)
-
-    async with server_lock:
-        try:
-            posts_html = []
-            urls_to_check = [post.file_url for post in skipped_posts_global if post.file_url]
-
-            async def fetch_content_type(url: str) -> Tuple[str, Optional[str]]:
-                if url in content_type_cache:
-                    return url, content_type_cache[url]
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.head(url, timeout=5) as response:
-                            if response.status == 200:
-                                content_type = response.headers.get('Content-Type', '')
-                                content_type_cache[url] = content_type
-                                return url, content_type
-                            else:
-                                logger.warning(f"HEAD-запрос для {url} вернул {response.status}")
-                                return url, None
-                except aiohttp.ClientError as e:
-                    logger.error(f"Ошибка HEAD-запроса для {url}: {e}")
-                    return url, None
-
-            content_types = await asyncio.gather(*[fetch_content_type(url) for url in urls_to_check], return_exceptions=True)
-
-            for post in skipped_posts_global:
-                if not post.file_url:
-                    continue
-                tags = ", ".join(html.escape(tag) for tag in post.tags)  # Экранируем теги
-                content = f'<a href="{html.escape(post.file_url)}" target="_blank">Открыть файл</a>'
-                for url, content_type in content_types:
-                    if isinstance(content_type, Exception):
-                        logger.error(f"Ошибка в задаче HEAD-запроса для {url}: {content_type}")
-                        continue
-                    if url == post.file_url and content_type:
-                        if content_type.startswith('image/'):
-                            content = f'<img src="{html.escape(post.file_url)}" alt="Post #{post.id}" loading="lazy">'
-                        elif content_type.startswith('video/'):
-                            content = (
-                                f'<video controls preload="metadata">'
-                                f'<source src="{html.escape(post.file_url)}" type="{html.escape(content_type)}">'
-                                f'Your browser does not support the video tag.</video>'
-                            )
-                        break
-                posts_html.append(
-                    f'<div class="post">'
-                    f'<div class="post-id">Пост #{post.id}</div>'
-                    f'<div>{content}</div>'
-                    f'<div class="tags">Теги: {tags}</div>'
-                    f'</div>'
-                )
-            posts_content = "".join(posts_html) if posts_html else "<p>Нет больших файлов</p>"
-            logger.debug(f"Сформирован posts_content: {posts_content[:100]}...")  # Логируем начало контента
-            return web.Response(text=HTML_PAGE.format(posts=posts_content), content_type="text/html")
-        except Exception as e:
-            logger.error(f"Ошибка в handle_large_files: {e}", exc_info=True)
-            return web.Response(status=500, text="Internal Server Error")
-
+# Контекстный менеджер для сессии aiohttp
 @asynccontextmanager
 async def aiohttp_session():
-    """Контекстный менеджер для сессии aiohttp, оптимизированный для мобильных."""
+    """Контекстный менеджер для сессии aiohttp с оптимизированными настройками."""
     timeout = aiohttp.ClientTimeout(total=20, connect=10)
-    connector = aiohttp.TCPConnector(limit=5)
+    connector = aiohttp.TCPConnector(limit=10)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         yield session
+
+# Функция для фильтрации дубликатов
+def filter_duplicates(posts: List[DanbooruPost]) -> List[DanbooruPost]:
+    """Удаляет дубликаты постов на основе их идентификаторов."""
+    seen_ids = set()
+    unique_posts = []
+    for post in posts:
+        if post.id not in seen_ids:
+            seen_ids.add(post.id)
+            unique_posts.append(post)
+    return unique_posts
 
 @backoff.on_exception(
     backoff.expo,
@@ -667,15 +558,15 @@ async def fetch_post_count(session: aiohttp.ClientSession, tags: Optional[str]) 
     async with session.get(url, params=params) as response:
         if response.status != 200:
             error_map = {
-                403: "Доступ запрещен",
-                429: "Превышен лимит запросов",
-                500: "Ошибка сервера"
+                403: "Доступ запрещен. Проверьте настройки API.",
+                429: "Превышен лимит запросов. Пожалуйста, подождите.",
+                500: "Внутренняя ошибка сервера Danbooru."
             }
-            raise DanbooruAPIError(f"Ошибка API: {error_map.get(response.status, f'Код {response.status}')}")
+            raise DanbooruAPIError(error_map.get(response.status, f"Неизвестная ошибка API: Код {response.status}"))
         
         data = await response.json()
         if not isinstance(data, dict) or "counts" not in data or "posts" not in data["counts"]:
-            raise DanbooruAPIError("Неправильный формат ответа")
+            raise DanbooruAPIError("Неправильный формат ответа от API")
         
         return data["counts"]["posts"]
 
@@ -695,15 +586,15 @@ async def fetch_danbooru_posts(session: aiohttp.ClientSession, tags: Optional[st
     async with session.get(base_url, params=params) as response:
         if response.status != 200:
             error_map = {
-                403: "Доступ запрещен",
-                429: "Превышен лимит запросов",
-                500: "Ошибка сервера"
+                403: "Доступ запрещен. Проверьте настройки API.",
+                429: "Превышен лимит запросов. Пожалуйста, подождите.",
+                500: "Внутренняя ошибка сервера Danbooru."
             }
-            raise DanbooruAPIError(f"Ошибка API: {error_map.get(response.status, f'Код {response.status}')}")
+            raise DanbooruAPIError(error_map.get(response.status, f"Неизвестная ошибка API: Код {response.status}"))
         
         data = await response.json()
         if not isinstance(data, list):
-            raise DanbooruAPIError("Неправильный формат ответа")
+            raise DanbooruAPIError("Неправильный формат ответа от API")
 
         posts = []
         for item in data:
@@ -720,11 +611,73 @@ async def fetch_danbooru_posts(session: aiohttp.ClientSession, tags: Optional[st
             ))
         return posts
 
+@backoff.on_exception(
+    backoff.expo,
+    (aiohttp.ClientError, asyncio.TimeoutError, DanbooruAPIError),
+    max_tries=3,
+    max_time=10
+)
+async def fetch_tag_suggestions(session: aiohttp.ClientSession, query: str) -> List[Tuple[str, int]]:
+    """Получает предложения тегов с количеством постов из Danbooru API."""
+    global tag_suggestions_cache
+    query = query.strip().lower()
+    if query in tag_suggestions_cache:
+        return tag_suggestions_cache[query]
+
+    url = "https://danbooru.donmai.us/tags.json"
+    params = {
+        "search[name_matches]": f"{query}*",
+        "search[order]": "count",
+        "limit": 25
+    }
+
+    async with session.get(url, params=params) as response:
+        if response.status != 200:
+            error_map = {
+                403: "Доступ запрещен. Проверьте настройки API.",
+                429: "Превышен лимит запросов. Пожалуйста, подождите.",
+                500: "Внутренняя ошибка сервера Danbooru."
+            }
+            raise DanbooruAPIError(
+                error_map.get(response.status, f"Неизвестная ошибка API при получении тегов: Код {response.status}")
+            )
+        
+        data = await response.json()
+        if not isinstance(data, list):
+            raise DanbooruAPIError("Неправильный формат ответа для тегов")
+
+        tags = [(item["name"], item["post_count"]) for item in data if "name" in item and "post_count" in item]
+        tag_suggestions_cache[query] = tags
+        return tags
+
+async def tags_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    """Обработчик автодополнения для тегов, поддерживающий множественные теги с количеством постов."""
+    try:
+        tags = current.strip().split()
+        query = tags[-1] if tags else current
+
+        async with aiohttp_session() as session:
+            suggestions = await fetch_tag_suggestions(session, query)
+            prefix = ' '.join(tags[:-1]) + ' ' if tags[:-1] else ''
+            return [
+                app_commands.Choice(
+                    name=f"{tag} ({format_post_count(count)})",
+                    value=f"{prefix}{tag}".strip()
+                )
+                for tag, count in suggestions[:25]
+            ]
+    except DanbooruAPIError as e:
+        logger.error(f"Ошибка автодополнения тегов: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка в автодополнении тегов: {e}", exc_info=True)
+        return []
+
 async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[str] = None) -> None:
-    """Слеш-команда для поиска постов на Danbooru."""
-    global web_server
+    """Слеш-команда для поиска постов на Danbooru с отображением количества постов."""
     guild_id = str(interaction.guild.id) if interaction.guild else "ЛС"
     channel_id = str(interaction.channel.id) if interaction.channel else "ЛС"
+    logger.debug(f"Команда /danbooru вызвана пользователем {interaction.user.id} в гильдии {guild_id}, канал {channel_id}")
 
     result, reason = await restrict_command_execution(interaction, bot_client)
     if not result:
@@ -755,26 +708,28 @@ async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[
     except discord.errors.InteractionResponded:
         pass
 
-    async with server_lock:
-        if not web_server:
-            app = web.Application()
-            app.router.add_get("/", handle_large_files)
-            runner = web.AppRunner(app)
-            await runner.setup()
-            web_server = web.TCPSite(runner, "localhost", 8000)
-            await web_server.start()
-            logger.info("Веб-сервер запущен на http://localhost:8000")
-
     try:
         async with aiohttp_session() as session:
-            total_posts = await fetch_post_count(session, tags)
-            total_pages = math.ceil(total_posts / 20) if total_posts > 0 else 1
-            posts = await fetch_danbooru_posts(session, tags, page=1)
+            total_posts_task = fetch_post_count(session, tags)
+            posts_task = fetch_danbooru_posts(session, tags, page=1)
+            total_posts, posts = await asyncio.gather(total_posts_task, posts_task, return_exceptions=True)
+
+            if isinstance(total_posts, Exception):
+                raise DanbooruAPIError(f"Ошибка получения количества постов: {total_posts}")
+            if isinstance(posts, Exception):
+                raise DanbooruAPIError(f"Ошибка получения постов: {posts}")
+
+            total_pages = min(1000, math.ceil(total_posts / 20)) if total_posts > 0 else 1
             if not posts:
-                await interaction.followup.send("Посты по тегам не найдены.", ephemeral=False)
+                await interaction.followup.send(
+                    f"Посты по тегам '{tags or 'без тегов'}' не найдены.",
+                    ephemeral=False
+                )
                 return
 
+            posts = filter_duplicates(posts)
             view = NavigationView(posts, interaction.user, tags, current_page=1, total_pages=total_pages)
+            view.page_cache[1] = posts
             content, image_urls, skipped_posts = view.create_message()
             files = await view.fetch_images(image_urls, interaction, skipped_posts)
             message = await interaction.followup.send(content=content, view=view, files=files, ephemeral=False)
@@ -784,13 +739,14 @@ async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[
         logger.error(f"Ошибка Danbooru API: {e}")
         await interaction.followup.send(f"Не удалось получить посты: {str(e)}", ephemeral=False)
     except Exception as e:
-        logger.error(f"Неизвестная ошибка в /danbooru: {e}")
+        logger.error(f"Неизвестная ошибка в /danbooru: {e}", exc_info=True)
         await interaction.followup.send("Произошла ошибка. Попробуйте позже.", ephemeral=False)
 
 def create_command(bot_client) -> app_commands.Command:
-    """Создает слеш-команду /danbooru."""
+    """Создает слеш-команду /danbooru с автодополнением тегов."""
     @app_commands.command(name="danbooru", description="Поиск постов на Danbooru по тегам")
     @app_commands.describe(tags="Теги для поиска (например, 'cat_ears solo')")
+    @app_commands.autocomplete(tags=tags_autocomplete)
     async def wrapper(interaction: discord.Interaction, tags: Optional[str] = None) -> None:
         await danbooru(interaction, bot_client, tags)
 
@@ -798,7 +754,10 @@ def create_command(bot_client) -> app_commands.Command:
     async def command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
         guild_id = str(interaction.guild.id) if interaction.guild else "ЛС"
         channel_id = str(interaction.channel.id) if interaction.channel else "ЛС"
-        logger.error(f"Ошибка в /danbooru для пользователя {interaction.user.id} в гильдии {guild_id}, канал {channel_id}: {error}")
+        logger.error(
+            f"Ошибка в /danbooru для пользователя {interaction.user.id} в гильдии {guild_id}, "
+            f"канал {channel_id}: {error}"
+        )
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message("Ошибка команды. Попробуйте снова.", ephemeral=True)
