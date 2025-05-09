@@ -57,6 +57,7 @@ class DanbooruPost:
 # Глобальное состояние
 skipped_posts_global: List[DanbooruPost] = []
 content_type_cache: Dict[str, str] = {}  # Кэш для Content-Type по file_url
+<<<<<<< HEAD
 tag_suggestions_cache: TTLCache = TTLCache(maxsize=1000, ttl=TAG_CACHE_TTL)  # Кэш тегов
 
 def format_post_count(count: int) -> str:
@@ -67,6 +68,17 @@ def format_post_count(count: int) -> str:
         return f"{count / 1000:.1f}k".replace(".0k", "k")
     else:
         return f"{count / 1000000:.1f}M".replace(".0M", "M")
+=======
+
+# MIME-типы и соответствующие расширения
+MIME_TO_EXTENSION = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'video/mp4': '.mp4',
+    'video/webm': '.webm'
+}
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
 
 # Модальное окно для ввода номера страницы
 class PageInputModal(Modal, title="Перейти к странице"):
@@ -359,7 +371,11 @@ class NavigationView(View):
         interaction: Interaction,
         skipped_posts: List[DanbooruPost]
     ) -> List[discord.File]:
+<<<<<<< HEAD
         """Загружает файлы по URL с проверкой размера и MIME-типа."""
+=======
+        """Загружает файлы по URL с предварительной проверкой размера."""
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
         global skipped_posts_global, content_type_cache
         files = []
         new_skipped_posts = skipped_posts.copy()
@@ -376,11 +392,16 @@ class NavigationView(View):
             elif interaction.guild.premium_tier == 3:
                 max_file_size = MAX_FILE_SIZE_TIER_3
 
+<<<<<<< HEAD
         semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
+=======
+        semaphore = asyncio.Semaphore(10)
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
 
         async def fetch_single_image(idx: int, url: str) -> Tuple[Optional[discord.File], Optional[DanbooruPost]]:
             async with semaphore:
                 try:
+<<<<<<< HEAD
                     # Проверяем кэш MIME-типов
                     content_type = content_type_cache.get(url)
                     if content_type and content_type not in SUPPORTED_MIME_TYPES:
@@ -389,28 +410,45 @@ class NavigationView(View):
 
                     async with aiohttp_session() as session:
                         async with session.head(url, timeout=REQUEST_TIMEOUT) as head_response:
+=======
+                    async with aiohttp.ClientSession() as session:
+                        async with session.head(url, timeout=5) as head_response:
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
                             if head_response.status != 200:
                                 logger.error(f"HEAD-запрос для {url} вернул {head_response.status}")
                                 return None, posts_with_url[idx]
                             content_length = head_response.headers.get('Content-Length')
                             if content_length and int(content_length) > max_file_size:
+<<<<<<< HEAD
                                 logger.debug(f"Файл {url} слишком большой ({content_length} байт)")
+=======
+                                logger.debug(f"Файл {url} слишком большой ({content_length} байт), отправлена ссылка")
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
                                 return None, posts_with_url[idx]
                             content_type = head_response.headers.get('Content-Type', 'application/octet-stream')
                             content_type_cache[url] = content_type
 
+<<<<<<< HEAD
                             # Проверяем, является ли файл медийным
                             if content_type not in SUPPORTED_MIME_TYPES:
                                 logger.debug(f"Пропущен файл {url} с неподдерживаемым MIME-типом: {content_type}")
                                 return None, posts_with_url[idx]
 
+=======
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
                         async with session.get(url) as response:
                             if response.status == 200:
                                 image_data = await response.read()
                                 if len(image_data) > max_file_size:
+<<<<<<< HEAD
                                     logger.debug(f"Файл {url} слишком большой ({len(image_data)} байт)")
                                     return None, posts_with_url[idx]
                                 extension = SUPPORTED_MIME_TYPES[content_type]
+=======
+                                    logger.debug(f"Файл {url} слишком большой ({len(image_data)} байт), отправлена ссылка")
+                                    return None, posts_with_url[idx]
+                                extension = MIME_TO_EXTENSION.get(content_type, '.bin')
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
                                 post = posts_with_url[idx]
                                 file = discord.File(
                                     fp=io.BytesIO(image_data),
@@ -440,6 +478,13 @@ class NavigationView(View):
             except ValueError as e:
                 logger.error(f"Некорректный результат задачи загрузки: {result}, ошибка: {e}")
                 continue
+<<<<<<< HEAD
+=======
+            if file:
+                files.append(file)
+            elif skipped_post:
+                new_skipped_posts.append(skipped_post)
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
 
         skipped_posts_global.extend([post for post in new_skipped_posts if post not in skipped_posts_global])
 
@@ -498,7 +543,11 @@ class NavigationView(View):
 
         for post in skipped_posts:
             if post.file_url:
+<<<<<<< HEAD
                 message_lines.append(f"**Слишком большой файл или неподдерживаемый формат:** [Пост #{post.id}]({post.file_url})")
+=======
+                message_lines.append(f"**Слишком большой файл:** [Пост #{post.id}]({post.file_url})")
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
 
         message = "\n".join(message_lines)
         self.message_cache[cache_key] = (message, image_urls, skipped_posts)
@@ -517,15 +566,25 @@ class NavigationView(View):
         except discord.DiscordException as e:
             logger.error(f"Ошибка при удалении кнопок: {e}")
 
+<<<<<<< HEAD
         global skipped_posts_global, content_type_cache, tag_suggestions_cache
         skipped_posts_global.clear()
         content_type_cache.clear()
         tag_suggestions_cache.clear()
+=======
+        global skipped_posts_global, content_type_cache
+        skipped_posts_global.clear()
+        content_type_cache.clear()
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
 
 # Контекстный менеджер для сессии aiohttp
 @asynccontextmanager
 async def aiohttp_session():
+<<<<<<< HEAD
     """Контекстный менеджер для сессии aiohttp с оптимизированными настройками."""
+=======
+    """Контекстный менеджер для сессии aiohttp."""
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
     timeout = aiohttp.ClientTimeout(total=20, connect=10)
     connector = aiohttp.TCPConnector(limit=10)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
@@ -674,7 +733,11 @@ async def tags_autocomplete(interaction: discord.Interaction, current: str) -> L
         return []
 
 async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[str] = None) -> None:
+<<<<<<< HEAD
     """Слеш-команда для поиска постов на Danbooru с отображением количества постов."""
+=======
+    """Слеш-команда для поиска постов на Danbooru."""
+>>>>>>> 63e4e77701a8967bfff1c0c244e9701fb6e07391
     guild_id = str(interaction.guild.id) if interaction.guild else "ЛС"
     channel_id = str(interaction.channel.id) if interaction.channel else "ЛС"
     logger.debug(f"Команда /danbooru вызвана пользователем {interaction.user.id} в гильдии {guild_id}, канал {channel_id}")
