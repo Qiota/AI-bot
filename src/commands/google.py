@@ -350,7 +350,7 @@ class GoogleSearch:
     MAX_TITLE_LENGTH: int = 256
     MAX_SNIPPET_LENGTH: int = 1024
     SVG_MIME: str = "image/svg+xml"
-    MAX_FILE_SIZE: int = 8 * 1024 * 1024  # 8 МБ
+    MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10 МБ
 
     def __init__(self, bot_client: 'BotClient') -> None:
         self.bot_client: BotClient = bot_client
@@ -418,7 +418,7 @@ class GoogleSearch:
                         return None
                     image = await resp.read()
                     if len(image) > self.MAX_FILE_SIZE:
-                        logger.warning(f"Изображение {image_url} превышает 8 МБ, пропущено")
+                        logger.warning(f"Изображение {image_url} превышает 10 МБ, пропущено")
                         return None
                     filename = self._extract_filename(resp)
                     return File(BytesIO(image), filename=filename), image_url

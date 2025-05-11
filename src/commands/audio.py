@@ -58,7 +58,7 @@ async def audio(interaction: discord.Interaction, request: str, voice: str, bot_
             audio_size = len(audio_data)
 
             if audio_size > FILE_SIZE_LIMIT:
-                raise ValueError(f"Аудиофайл слишком большой ({audio_size / 1024 / 1024:.2f} МБ). Максимум: 8 МБ.")
+                raise ValueError(f"Аудиофайл слишком большой ({audio_size / 1024 / 1024:.2f} МБ). Максимум: 10 МБ.")
 
             audio_buffer = io.BytesIO(audio_data)
             await interaction.followup.send(

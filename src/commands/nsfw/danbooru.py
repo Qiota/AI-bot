@@ -12,17 +12,18 @@ import backoff
 import logging
 import html
 from cachetools import TTLCache
+from bs4 import BeautifulSoup
 from ...systemLog import logger
 from ...utils.checker import checker
 from ..restrict import check_bot_access, restrict_command_execution
 
-# Отключаем логирование aiohttp.access
+# Отключаем логирование aiohttp.access для снижения шума в логах
 aiohttp_access_logger = logging.getLogger("aiohttp.access")
 aiohttp_access_logger.propagate = False
 aiohttp_access_logger.addHandler(logging.NullHandler())
 
 # Конфигурационные константы
-MAX_FILE_SIZE_DEFAULT = 8 * 1024 * 1024  # 8 МБ для серверов без буста
+MAX_FILE_SIZE_DEFAULT = 10 * 1024 * 1024  # 10 МБ для серверов без буста
 MAX_FILE_SIZE_TIER_2 = 25 * 1024 * 1024  # 25 МБ для Tier 2
 MAX_FILE_SIZE_TIER_3 = 100 * 1024 * 1024  # 100 МБ для Tier 3
 SUPPORTED_MIME_TYPES = {
@@ -32,18 +33,22 @@ SUPPORTED_MIME_TYPES = {
     'video/mp4': '.mp4',
     'video/webm': '.webm'
 }
-REQUEST_TIMEOUT = 5  # Таймаут для HEAD/GET-запросов
-SEMAPHORE_LIMIT = 5  # Ограничение параллельных запросов
-INACTIVITY_TIMEOUT = 120  # Таймаут бездействия (секунды)
+REQUEST_TIMEOUT = 10  # Таймаут для HEAD/GET-запросов (секунды)
+AUTOCOMPLETE_TIMEOUT = 1  # Таймаут для автодополнения (секунды)
+SEMAPHORE_LIMIT = 10  # Ограничение параллельных запросов
+INACTIVITY_TIMEOUT = 160  # Таймаут бездействия (секунды)
 TAG_CACHE_TTL = 3600  # Время жизни кэша тегов (1 час)
+TAG_CACHE_SIZE = 5000  # Размер кэша тегов
 VIEW_TIMEOUT = 300  # Таймаут для NavigationView (секунды)
+COOLDOWN_TIME = 5  # Время кулдауна команды (секунды)
+COOLDOWN_RATE = 1  # Количество использований команды за период
 
 # Пользовательские исключения
 class DanbooruAPIError(Exception):
     """Исключение для ошибок Danbooru API."""
     pass
 
-# Структурированные данные
+# Структурированные данные для постов Danbooru
 @dataclass
 class DanbooruPost:
     id: int
@@ -57,16 +62,47 @@ class DanbooruPost:
 # Глобальное состояние
 skipped_posts_global: List[DanbooruPost] = []
 content_type_cache: Dict[str, str] = {}  # Кэш для Content-Type по file_url
-tag_suggestions_cache: TTLCache = TTLCache(maxsize=1000, ttl=TAG_CACHE_TTL)  # Кэш тегов
+tag_suggestions_cache: TTLCache = TTLCache(maxsize=TAG_CACHE_SIZE, ttl=TAG_CACHE_TTL)  # Кэш тегов
 
 def format_post_count(count: int) -> str:
-    """Форматирует количество постов в читаемый вид (например, 2400 -> '2.4k')."""
+    """Форматирует количество постов в читаемый вид (например, 2400 -> '2.4k').
+
+    Args:
+        count: Количество постов.
+
+    Returns:
+        str: Форматированная строка (например, '2.4k' или '1.2M').
+    """
     if count < 1000:
         return str(count)
     elif count < 1000000:
         return f"{count / 1000:.1f}k".replace(".0k", "k")
     else:
         return f"{count / 1000000:.1f}M".replace(".0M", "M")
+
+def parse_post_count(count_str: str) -> int:
+    """Парсит форматированное количество постов в число (например, '2.4k' -> 2400).
+
+    Args:
+        count_str: Строка с количеством постов (например, '520', '2.4k', '287k').
+
+    Returns:
+        int: Числовое значение постов.
+
+    Raises:
+        ValueError: Если строка имеет неверный формат.
+    """
+    count_str = count_str.strip().lower()
+    try:
+        if count_str.endswith('k'):
+            return int(float(count_str[:-1]) * 1000)
+        elif count_str.endswith('m'):
+            return int(float(count_str[:-1]) * 1000000)
+        else:
+            return int(count_str)
+    except (ValueError, TypeError) as e:
+        logger.error(f"Ошибка парсинга post-count '{count_str}': {e}")
+        raise ValueError(f"Неверный формат post-count: {count_str}")
 
 # Модальное окно для ввода номера страницы
 class PageInputModal(Modal, title="Перейти к странице"):
@@ -84,7 +120,11 @@ class PageInputModal(Modal, title="Перейти к странице"):
         self.add_item(self.page_input)
 
     async def on_submit(self, interaction: Interaction) -> None:
-        """Обрабатывает ввод номера страницы."""
+        """Обрабатывает ввод номера страницы.
+
+        Args:
+            interaction: Взаимодействие с пользователем.
+        """
         if interaction.user != self.view.original_user:
             await interaction.response.send_message(
                 "Только пользователь, вызвавший команду, может с ней взаимодействовать.",
@@ -144,7 +184,7 @@ class PageInputModal(Modal, title="Перейти к странице"):
             except discord.HTTPException as e:
                 logger.error(f"Ошибка HTTP при обновлении сообщения: {e}")
                 await interaction.followup.send(
-                    "Не удалось обновить сообщение из-за слишком GRAND файлов. Попробуйте снова.",
+                    "Не удалось обновить сообщение из-за слишком больших файлов. Попробуйте снова.",
                     ephemeral=True
                 )
             except discord.DiscordException as e:
@@ -161,7 +201,17 @@ class PageInputModal(Modal, title="Перейти к странице"):
 
 # Класс для навигации по результатам поиска
 class NavigationView(View):
-    """View для навигации по чанкам и страницам Danbooru."""
+    """View для навигации по чанкам и страницам Danbooru.
+
+    Attributes:
+        results: Список постов Danbooru.
+        original_user: Пользователь, вызвавший команду.
+        query: Поисковый запрос (теги).
+        current_page: Текущая страница.
+        total_pages: Общее количество страниц.
+        current_chunk: Текущий чанк (группа постов).
+        timeout: Таймаут view (секунды).
+    """
     def __init__(
         self,
         results: List[DanbooruPost],
@@ -191,7 +241,7 @@ class NavigationView(View):
         self.start_inactivity_timer()
 
     def start_inactivity_timer(self) -> None:
-        """Запускает таймер бездействия."""
+        """Запускает таймер бездействия для отключения кнопок."""
         self.inactivity_task = asyncio.create_task(self.check_inactivity())
 
     async def check_inactivity(self) -> None:
@@ -215,7 +265,18 @@ class NavigationView(View):
                 item.disabled = True
 
     def _create_button(self, label: str, style: ButtonStyle, disabled: bool, callback=None, url: Optional[str] = None):
-        """Создает кнопку с заданными параметрами."""
+        """Создает кнопку с заданными параметрами.
+
+        Args:
+            label: Текст кнопки.
+            style: Стиль кнопки (ButtonStyle).
+            disabled: Состояние кнопки (отключена/включена).
+            callback: Функция обратного вызова для кнопки.
+            url: URL для кнопки (если применимо).
+
+        Returns:
+            Button: Объект кнопки.
+        """
         button = Button(label=label, style=style, disabled=disabled, url=url)
         if callback:
             button.callback = callback
@@ -228,42 +289,55 @@ class NavigationView(View):
             back_label = "⌛" if self.loading_button == "back" else "⬅️"
             back_disabled = True
             self.add_item(self._create_button(
-                back_label, ButtonStyle.gray, back_disabled,
+                label=back_label,
+                style=ButtonStyle.gray,
+                disabled=back_disabled,
                 callback=lambda i: self.navigate(i, -1, "back")
             ))
 
             next_label = "⌛" if self.loading_button == "next" else "➡️"
             next_disabled = True
             self.add_item(self._create_button(
-                next_label, ButtonStyle.gray, next_disabled,
+                label=next_label,
+                style=ButtonStyle.gray,
+                disabled=next_disabled,
                 callback=lambda i: self.navigate(i, 1, "next")
             ))
 
             page_label = "⌛" if self.loading_button == "page" else "📄"
             page_disabled = True
             self.add_item(self._create_button(
-                page_label, ButtonStyle.blurple, page_disabled,
+                label=page_label,
+                style=ButtonStyle.blurple,
+                disabled=page_disabled,
                 callback=self.open_page_modal
             ))
         else:
             self.add_item(self._create_button(
-                "⬅️", ButtonStyle.gray,
+                label="⬅️",
+                style=ButtonStyle.gray,
                 disabled=(self.current_chunk == 0 and self.current_page == 1),
                 callback=lambda i: self.navigate(i, -1, "back")
             ))
             self.add_item(self._create_button(
-                "➡️", ButtonStyle.gray,
+                label="➡️",
+                style=ButtonStyle.gray,
                 disabled=(self.current_page >= self.total_pages and self.current_chunk >= 1),
                 callback=lambda i: self.navigate(i, 1, "next")
             ))
             self.add_item(self._create_button(
-                "📄", ButtonStyle.blurple,
+                label="📄",
+                style=ButtonStyle.blurple,
                 disabled=False,
                 callback=self.open_page_modal
             ))
 
     async def open_page_modal(self, interaction: Interaction) -> None:
-        """Открывает модальное окно для ввода номера страницы."""
+        """Открывает модальное окно для ввода номера страницы.
+
+        Args:
+            interaction: Взаимодействие с пользователем.
+        """
         if interaction.user != self.original_user:
             await interaction.response.send_message(
                 "Только пользователь, вызвавший команду, может с ней взаимодействовать.",
@@ -279,7 +353,13 @@ class NavigationView(View):
         await interaction.response.send_modal(modal)
 
     async def navigate(self, interaction: Interaction, direction: int, button: str) -> None:
-        """Обрабатывает навигацию по чанкам и страницам."""
+        """Обрабатывает навигацию по чанкам и страницам.
+
+        Args:
+            interaction: Взаимодействие с пользователем.
+            direction: Направление навигации (-1 для назад, 1 для вперед).
+            button: Идентификатор кнопки ('back', 'next', 'page').
+        """
         if interaction.user != self.original_user:
             await interaction.response.send_message(
                 "Только пользователь, вызвавший команду, может с ней взаимодействовать.",
@@ -359,7 +439,16 @@ class NavigationView(View):
         interaction: Interaction,
         skipped_posts: List[DanbooruPost]
     ) -> List[discord.File]:
-        """Загружает файлы по URL с проверкой размера и MIME-типа."""
+        """Загружает файлы по URL с проверкой размера и MIME-типа.
+
+        Args:
+            image_urls: Список URL файлов для загрузки.
+            interaction: Взаимодействие с пользователем.
+            skipped_posts: Список постов, которые были пропущены.
+
+        Returns:
+            List[discord.File]: Список загруженных файлов.
+        """
         global skipped_posts_global, content_type_cache
         files = []
         new_skipped_posts = skipped_posts.copy()
@@ -379,6 +468,15 @@ class NavigationView(View):
         semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
 
         async def fetch_single_image(idx: int, url: str) -> Tuple[Optional[discord.File], Optional[DanbooruPost]]:
+            """Загружает один файл по URL.
+
+            Args:
+                idx: Индекс поста в списке.
+                url: URL файла.
+
+            Returns:
+                Tuple[Optional[discord.File], Optional[DanbooruPost]]: Загруженный файл или пропущенный пост.
+            """
             async with semaphore:
                 try:
                     # Проверяем кэш MIME-типов
@@ -450,7 +548,15 @@ class NavigationView(View):
         return files
 
     async def load_page(self, target_page: int, reset_chunk: bool = False) -> bool:
-        """Загружает результаты для указанной страницы с использованием кэша."""
+        """Загружает результаты для указанной страницы с использованием кэша.
+
+        Args:
+            target_page: Номер целевой страницы.
+            reset_chunk: Сбрасывать ли текущий чанк.
+
+        Returns:
+            bool: True, если загрузка успешна, иначе False.
+        """
         if target_page in self.page_cache:
             self.results = self.page_cache[target_page]
             self.current_page = target_page
@@ -477,7 +583,11 @@ class NavigationView(View):
             return False
 
     def create_message(self) -> Tuple[str, List[str], List[DanbooruPost]]:
-        """Создает сообщение и список URL файлов для текущего чанка."""
+        """Создает сообщение и список URL файлов для текущего чанка.
+
+        Returns:
+            Tuple[str, List[str], List[DanbooruPost]]: Текст сообщения, список URL, пропущенные посты.
+        """
         cache_key = (self.current_page, self.current_chunk)
         if cache_key in self.message_cache:
             return self.message_cache[cache_key]
@@ -525,15 +635,26 @@ class NavigationView(View):
 # Контекстный менеджер для сессии aiohttp
 @asynccontextmanager
 async def aiohttp_session():
-    """Контекстный менеджер для сессии aiohttp с оптимизированными настройками."""
+    """Контекстный менеджер для сессии aiohttp с оптимизированными настройками.
+
+    Yields:
+        aiohttp.ClientSession: Сессия для HTTP-запросов.
+    """
     timeout = aiohttp.ClientTimeout(total=20, connect=10)
-    connector = aiohttp.TCPConnector(limit=10)
+    connector = aiohttp.TCPConnector(limit=50)  # Увеличен лимит соединений
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         yield session
 
 # Функция для фильтрации дубликатов
 def filter_duplicates(posts: List[DanbooruPost]) -> List[DanbooruPost]:
-    """Удаляет дубликаты постов на основе их идентификаторов."""
+    """Удаляет дубликаты постов на основе их идентификаторов.
+
+    Args:
+        posts: Список постов Danbooru.
+
+    Returns:
+        List[DanbooruPost]: Список уникальных постов.
+    """
     seen_ids = set()
     unique_posts = []
     for post in posts:
@@ -549,19 +670,34 @@ def filter_duplicates(posts: List[DanbooruPost]) -> List[DanbooruPost]:
     max_time=10
 )
 async def fetch_post_count(session: aiohttp.ClientSession, tags: Optional[str]) -> int:
-    """Получает общее количество постов для заданных тегов."""
+    """Получает общее количество постов для заданных тегов без аутентификации.
+
+    Args:
+        session: Сессия aiohttp.
+        tags: Поисковые теги (опционально).
+
+    Returns:
+        int: Общее количество постов.
+
+    Raises:
+        DanbooruAPIError: Если API вернул ошибку или неверный формат ответа.
+    """
     url = "https://danbooru.donmai.us/counts/posts.json"
     params = {}
     if tags:
         params["tags"] = tags.strip()
 
     async with session.get(url, params=params) as response:
+        rate_limit_remaining = response.headers.get('X-Rate-Limit-Remaining', 'unknown')
+        logger.debug(f"Rate-Limit-Remaining for /counts/posts.json: {rate_limit_remaining}")
         if response.status != 200:
             error_map = {
-                403: "Доступ запрещен. Проверьте настройки API.",
+                403: "Доступ к API ограничен для неаутентифицированных запросов.",
                 429: "Превышен лимит запросов. Пожалуйста, подождите.",
                 500: "Внутренняя ошибка сервера Danbooru."
             }
+            response_text = await response.text()
+            logger.error(f"API Error: {error_map.get(response.status, f'Неизвестная ошибка API: Код {response.status}')}, Response: {response_text[:200]}")
             raise DanbooruAPIError(error_map.get(response.status, f"Неизвестная ошибка API: Код {response.status}"))
         
         data = await response.json()
@@ -577,19 +713,35 @@ async def fetch_post_count(session: aiohttp.ClientSession, tags: Optional[str]) 
     max_time=10
 )
 async def fetch_danbooru_posts(session: aiohttp.ClientSession, tags: Optional[str], page: int) -> List[DanbooruPost]:
-    """Получает посты из Danbooru API."""
+    """Получает посты из Danbooru API без аутентификации.
+
+    Args:
+        session: Сессия aiohttp.
+        tags: Поисковые теги (опционально).
+        page: Номер страницы.
+
+    Returns:
+        List[DanbooruPost]: Список постов.
+
+    Raises:
+        DanbooruAPIError: Если API вернул ошибку или неверный формат ответа.
+    """
     base_url = "https://danbooru.donmai.us/posts.json"
     params = {"page": page, "limit": 20}
     if tags:
         params["tags"] = tags.strip()
 
     async with session.get(base_url, params=params) as response:
+        rate_limit_remaining = response.headers.get('X-Rate-Limit-Remaining', 'unknown')
+        logger.debug(f"Rate-Limit-Remaining for /posts.json: {rate_limit_remaining}")
         if response.status != 200:
             error_map = {
-                403: "Доступ запрещен. Проверьте настройки API.",
+                403: "Доступ к API ограничен для неаутентифицированных запросов.",
                 429: "Превышен лимит запросов. Пожалуйста, подождите.",
                 500: "Внутренняя ошибка сервера Danbooru."
             }
+            response_text = await response.text()
+            logger.error(f"API Error: {error_map.get(response.status, f'Неизвестная ошибка API: Код {response.status}')}, Response: {response_text[:200]}")
             raise DanbooruAPIError(error_map.get(response.status, f"Неизвестная ошибка API: Код {response.status}"))
         
         data = await response.json()
@@ -613,72 +765,141 @@ async def fetch_danbooru_posts(session: aiohttp.ClientSession, tags: Optional[st
 
 @backoff.on_exception(
     backoff.expo,
-    (aiohttp.ClientError, asyncio.TimeoutError, DanbooruAPIError),
+    (aiohttp.ClientError, asyncio.TimeoutError),
     max_tries=3,
     max_time=10
 )
+async def fetch_tags_from_homepage(session: aiohttp.ClientSession) -> List[Tuple[str, int]]:
+    """Получает список тегов с главной страницы Danbooru, парся HTML, и сортирует по количеству постов (убывание).
+
+    Args:
+        session: Сессия aiohttp.
+
+    Returns:
+        List[Tuple[str, int]]: Список кортежей (тег, количество постов), отсортированный по убыванию количества постов.
+
+    Raises:
+        DanbooruAPIError: Если не удалось получить или разобрать HTML.
+    """
+    url = "https://danbooru.donmai.us/"
+    async with session.get(url, timeout=REQUEST_TIMEOUT) as response:
+        rate_limit_remaining = response.headers.get('X-Rate-Limit-Remaining', 'unknown')
+        logger.debug(f"Rate-Limit-Remaining for homepage: {rate_limit_remaining}")
+        if response.status != 200:
+            response_text = await response.text()
+            logger.error(f"Ошибка получения главной страницы: HTTP {response.status}, Response: {response_text[:200]}")
+            raise DanbooruAPIError(f"Не удалось получить главную страницу: HTTP {response.status}")
+
+        html_content = await response.text()
+        soup = BeautifulSoup(html_content, 'html.parser')
+        tag_box = soup.find('section', id='tag-box')
+        if not tag_box:
+            logger.error("Не удалось найти <section id='tag-box'> в HTML")
+            raise DanbooruAPIError("Не удалось найти секцию тегов на странице")
+
+        tag_list = tag_box.find('ul', class_='tag-list')
+        if not tag_list:
+            logger.error("Не удалось найти <ul class='tag-list'> в tag-box")
+            raise DanbooruAPIError("Не удалось найти список тегов на странице")
+
+        tags = []
+        for li in tag_list.find_all('li'):
+            tag_name = li.get('data-tag-name')
+            post_count_span = li.find('span', class_='post-count')
+            if tag_name and post_count_span:
+                try:
+                    post_count = parse_post_count(post_count_span.text.strip())
+                    tags.append((tag_name, post_count))
+                except ValueError as e:
+                    logger.warning(f"Пропущен тег '{tag_name}' из-за ошибки парсинга: {e}")
+                    continue
+
+        if not tags:
+            logger.error("Не удалось извлечь теги из HTML")
+            raise DanbooruAPIError("Список тегов пуст")
+
+        # Сортировка тегов по количеству постов (убывание)
+        sorted_tags = sorted(tags, key=lambda x: x[1], reverse=True)
+        logger.debug(f"Извлечено и отсортировано {len(sorted_tags)} тегов с главной страницы")
+        return sorted_tags
+
 async def fetch_tag_suggestions(session: aiohttp.ClientSession, query: str) -> List[Tuple[str, int]]:
-    """Получает предложения тегов с количеством постов из Danbooru API."""
+    """Получает предложения тегов с главной страницы Danbooru с кэшированием.
+
+    Args:
+        session: Сессия aiohttp.
+        query: Поисковый запрос для тегов (пустая строка для всех тегов).
+
+    Returns:
+        List[Tuple[str, int]]: Список кортежей (тег, количество постов).
+    """
     global tag_suggestions_cache
     query = query.strip().lower()
-    if query in tag_suggestions_cache:
-        return tag_suggestions_cache[query]
+    cache_key = query or "__all_tags__"
+    if cache_key in tag_suggestions_cache:
+        return tag_suggestions_cache[cache_key]
 
-    url = "https://danbooru.donmai.us/tags.json"
-    params = {
-        "search[name_matches]": f"{query}*",
-        "search[order]": "count",
-        "limit": 25
-    }
-
-    async with session.get(url, params=params) as response:
-        if response.status != 200:
-            error_map = {
-                403: "Доступ запрещен. Проверьте настройки API.",
-                429: "Превышен лимит запросов. Пожалуйста, подождите.",
-                500: "Внутренняя ошибка сервера Danbooru."
-            }
-            raise DanbooruAPIError(
-                error_map.get(response.status, f"Неизвестная ошибка API при получении тегов: Код {response.status}")
-            )
-        
-        data = await response.json()
-        if not isinstance(data, list):
-            raise DanbooruAPIError("Неправильный формат ответа для тегов")
-
-        tags = [(item["name"], item["post_count"]) for item in data if "name" in item and "post_count" in item]
-        tag_suggestions_cache[query] = tags
+    try:
+        tags = await fetch_tags_from_homepage(session)
+        if query:
+            filtered_tags = [(tag, count) for tag, count in tags if query in tag.lower()]
+            tag_suggestions_cache[cache_key] = filtered_tags
+            logger.debug(f"Кэшированы отфильтрованные теги для запроса '{query}': {len(filtered_tags)} тегов")
+            return filtered_tags
+        tag_suggestions_cache[cache_key] = tags
+        logger.debug(f"Кэшированы все теги: {len(tags)} тегов")
         return tags
+    except DanbooruAPIError as e:
+        logger.error(f"Ошибка получения тегов для запроса '{query}': {e}")
+        return []
 
 async def tags_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
-    """Обработчик автодополнения для тегов, поддерживающий множественные теги с количеством постов."""
+    """Обработчик автодополнения для тегов, использующий теги с главной страницы.
+
+    Args:
+        interaction: Взаимодействие с пользователем.
+        current: Текущий ввод пользователя (пустой для всех тегов).
+
+    Returns:
+        List[app_commands.Choice[str]]: Список предложений для автодополнения.
+    """
     try:
         tags = current.strip().split()
-        query = tags[-1] if tags else current
+        query = tags[-1] if tags else ""  # Пустая строка для всех тегов
 
         async with aiohttp_session() as session:
             suggestions = await fetch_tag_suggestions(session, query)
             prefix = ' '.join(tags[:-1]) + ' ' if tags[:-1] else ''
-            return [
+            choices = [
                 app_commands.Choice(
                     name=f"{tag} ({format_post_count(count)})",
                     value=f"{prefix}{tag}".strip()
                 )
                 for tag, count in suggestions[:25]
             ]
-    except DanbooruAPIError as e:
-        logger.error(f"Ошибка автодополнения тегов: {e}")
-        return []
+            if not choices and query:
+                await interaction.response.send_message(
+                    "Теги не найдены. Попробуйте другой запрос или введите теги вручную.",
+                    ephemeral=True
+                )
+            return choices
     except Exception as e:
-        logger.error(f"Неизвестная ошибка в автодополнении тегов: {e}", exc_info=True)
+        logger.error(f"Ошибка автодополнения тегов для запроса '{current}': {e}", exc_info=True)
         return []
 
 async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[str] = None) -> None:
-    """Слеш-команда для поиска постов на Danbooru с отображением количества постов."""
+    """Слеш-команда для поиска постов на Danbooru с отображением количества постов.
+
+    Args:
+        interaction: Взаимодействие с пользователем.
+        bot_client: Клиент бота.
+        tags: Поисковые теги (опционально).
+    """
     guild_id = str(interaction.guild.id) if interaction.guild else "ЛС"
     channel_id = str(interaction.channel.id) if interaction.channel else "ЛС"
-    logger.debug(f"Команда /danbooru вызвана пользователем {interaction.user.id} в гильдии {guild_id}, канал {channel_id}")
+    logger.debug(f"Команда /danbooru вызвана пользователем {interaction.user.id} в гильдии {guild_id}, канал {channel_id}, теги: {tags}")
 
+    # Проверка доступа и ограничений
     result, reason = await restrict_command_execution(interaction, bot_client)
     if not result:
         await interaction.response.send_message(reason or "Конфигурация сервера не найдена!", ephemeral=True)
@@ -694,10 +915,15 @@ async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[
         return
 
     if interaction.guild:
-        restriction, restriction_reason = await checker.check_user_restriction(interaction)
+        restriction, reason = await checker.check_user_restriction(interaction)
         if not restriction:
-            await interaction.response.send_message(restriction_reason or "Ваш доступ ограничен.", ephemeral=True)
+            await interaction.response.send_message(reason or "Ваш доступ ограничен.", ephemeral=True)
             return
+
+    # Проверка корректности тегов
+    if tags and any(tag.strip() == "" for tag in tags.split()):
+        await interaction.response.send_message("Теги содержат пустые значения. Введите корректные теги.", ephemeral=True)
+        return
 
     try:
         await interaction.response.defer(ephemeral=False)
@@ -736,27 +962,62 @@ async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[
             view.message = message
 
     except DanbooruAPIError as e:
-        logger.error(f"Ошибка Danbooru API: {e}")
+        logger.error(f"Ошибка Danbooru API для тегов '{tags}': {e}")
         await interaction.followup.send(f"Не удалось получить посты: {str(e)}", ephemeral=False)
     except Exception as e:
-        logger.error(f"Неизвестная ошибка в /danbooru: {e}", exc_info=True)
+        logger.error(f"Неизвестная ошибка в /danbooru для тегов '{tags}': {e}", exc_info=True)
         await interaction.followup.send("Произошла ошибка. Попробуйте позже.", ephemeral=False)
 
 def create_command(bot_client) -> app_commands.Command:
-    """Создает слеш-команду /danbooru с автодополнением тегов."""
+    """Создает слеш-команду /danbooru с автодополнением тегов и кулдауном.
+
+    Args:
+        bot_client: Клиент бота.
+
+    Returns:
+        app_commands.Command: Объект команды.
+    """
     @app_commands.command(name="danbooru", description="Поиск постов на Danbooru по тегам")
-    @app_commands.describe(tags="Теги для поиска (например, 'cat_ears solo')")
+    @app_commands.describe(tags="Теги для поиска (например, 'blue_archive')")
     @app_commands.autocomplete(tags=tags_autocomplete)
+    @app_commands.checks.cooldown(rate=COOLDOWN_RATE, per=COOLDOWN_TIME)
     async def wrapper(interaction: discord.Interaction, tags: Optional[str] = None) -> None:
+        """Обёртка для команды /danbooru.
+
+        Args:
+            interaction: Взаимодействие с пользователем.
+            tags: Поисковые теги (опционально).
+        """
         await danbooru(interaction, bot_client, tags)
 
     @wrapper.error
     async def command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        """Обработчик ошибок для команды /danbooru.
+
+        Args:
+            interaction: Взаимодействие с пользователем.
+            error: Ошибка команды.
+        """
         guild_id = str(interaction.guild.id) if interaction.guild else "ЛС"
         channel_id = str(interaction.channel.id) if interaction.channel else "ЛС"
+        tags = getattr(interaction.namespace, 'tags', None)
+        
+        if isinstance(error, app_commands.CommandOnCooldown):
+            retry_after = int(error.retry_after)
+            logger.debug(
+                f"Пользователь {interaction.user.id} попытался вызвать /danbooru во время кулдауна "
+                f"(гильдия: {guild_id}, канал: {channel_id}, теги: {tags}, осталось: {retry_after} сек)"
+            )
+            await interaction.response.send_message(
+                f"Команда на кулдауне. Попробуйте снова через {retry_after} секунд.", 
+                ephemeral=True
+            )
+            return
+
         logger.error(
             f"Ошибка в /danbooru для пользователя {interaction.user.id} в гильдии {guild_id}, "
-            f"канал {channel_id}: {error}"
+            f"канал {channel_id}, теги: {tags}: {error}",
+            exc_info=True
         )
         try:
             if not interaction.response.is_done():

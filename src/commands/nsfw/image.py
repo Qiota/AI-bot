@@ -73,9 +73,9 @@ async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
                     {
                         "role": "system",
                         "content": (
-                            "Enhance prompt for image generation with vivid details: colors, lighting, textures, environment, tone. "
+                            "Enhance the image generation prompt by dynamically enriching it with vivid, multi-layered details—including nuanced color palettes, dramatic or natural lighting effects, realistic or stylized textures, immersive environmental settings, a clear emotional tone or atmosphere, distinct artistic styles or mediums, and thoughtful composition and perspective—ensuring the prompt remains coherent, expressive, and visually compelling."
                             f"{'Allow tasteful NSFW if present.' if nsfw_allowed else 'Avoid NSFW.'} "
-                            "Return only improved prompt, max 900 chars, no Markdown."
+                            "Return only improved prompt, no Markdown."
                         )
                     },
                     {"role": "user", "content": f"Enhance: {prompt}."}
@@ -150,7 +150,7 @@ async def generate_image(
                     raise Exception(f"HTTP ошибка: {resp.status}")
                 image_data = await resp.read()
                 if len(image_data) > MAX_FILE_SIZE:
-                    raise ValueError("Изображение > 8 МБ.")
+                    raise ValueError("Изображение > 10 МБ.")
 
         await update_progress(interaction, 0.8, message, ephemeral)
         img = PIL.Image.open(BytesIO(image_data)).convert("RGB")
