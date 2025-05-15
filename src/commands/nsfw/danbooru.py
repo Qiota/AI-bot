@@ -233,8 +233,8 @@ class PageInputModal(Modal, title="Перейти к странице"):
             self.view.loading_button = None
             self.view.update_buttons()
             try:
-                content, image_urls, skipped_posts = await self.view.create_message()
-                files = await self.view.fetch_images(image_urls, interaction, skipped_posts)
+                content, image_urls, skipped_posts, chunk_posts = await self.view.create_message()
+                files = await self.view.fetch_images(image_urls, interaction, skipped_posts, chunk_posts)
                 await interaction.edit_original_response(content=content, view=self.view, attachments=files)
             except discord.HTTPException as e:
                 logging.error(f"Ошибка HTTP при обновлении сообщения: {e}")
@@ -446,8 +446,8 @@ class NavigationView(View):
         self.loading_button = None
         self.update_buttons()
         try:
-            content, image_urls, skipped_posts = await self.create_message()
-            files = await self.fetch_images(image_urls, interaction, skipped_posts)
+            content, image_urls, skipped_posts, chunk_posts = await self.create_message()
+            files = await self.fetch_images(image_urls, interaction, skipped_posts, chunk_posts)
             await interaction.edit_original_response(content=content, view=self, attachments=files)
         except discord.HTTPException as e:
             logging.error(f"Ошибка HTTP при обновлении сообщения: {e}")
@@ -466,7 +466,8 @@ class NavigationView(View):
         self,
         image_urls: List[str],
         interaction: Interaction,
-        skipped_posts: List[DanbooruPost]
+        skipped_posts: List[DanbooruPost],
+        chunk_posts: List[DanbooruPost]
     ) -> List[discord.File]:
         """Загружает файлы по URL с проверкой размера и MIME-типа."""
         files = []
@@ -475,11 +476,16 @@ class NavigationView(View):
 
         async def fetch_single_image(idx: int, url: str) -> Tuple[Optional[discord.File], Optional[DanbooruPost]]:
             async with semaphore:
+                if idx >= len(chunk_posts):
+                    logging.error(f"Индекс {idx} выходит за пределы chunk_posts (длина: {len(chunk_posts)})")
+                    return None, None
+
+                post = chunk_posts[idx]
                 try:
                     content_type, file_size = file_info_cache.get(url, ('unknown', None))
                     if content_type not in SUPPORTED_MIME_TYPES or (file_size is not None and file_size > self.max_file_size):
-                        logging.debug(f"Ппропущен файл {url} из кэша: MIME={content_type}, размер={file_size}")
-                        return None, self.results[self.current_chunk * POSTS_PER_CHUNK + idx]
+                        logging.debug(f"Пропущен файл {url} из кэша: MIME={content_type}, размер={file_size}")
+                        return None, post
 
                     async with aiohttp_session() as session:
                         async with session.get(url, timeout=REQUEST_TIMEOUT) as response:
@@ -487,13 +493,12 @@ class NavigationView(View):
                                 image_data = await response.read()
                                 if len(image_data) > self.max_file_size:
                                     logging.debug(f"Файл {url} слишком большой ({len(image_data)} байт)")
-                                    return None, self.results[self.current_chunk * POSTS_PER_CHUNK + idx]
+                                    return None, post
                                 content_type = response.headers.get('Content-Type', 'application/octet-stream')
                                 if content_type not in SUPPORTED_MIME_TYPES:
                                     logging.debug(f"Пропущен файл {url} с неподдерживаемым MIME-типом: {content_type}")
-                                    return None, self.results[self.current_chunk * POSTS_PER_CHUNK + idx]
+                                    return None, post
                                 extension = SUPPORTED_MIME_TYPES[content_type]
-                                post = self.results[self.current_chunk * POSTS_PER_CHUNK + idx]
                                 file = discord.File(
                                     fp=io.BytesIO(image_data),
                                     filename=f"post_{post.id}{extension}"
@@ -501,10 +506,10 @@ class NavigationView(View):
                                 return file, None
                             else:
                                 logging.error(f"Ошибка загрузки файла {url}: HTTP {response.status}")
-                                return None, self.results[self.current_chunk * POSTS_PER_CHUNK + idx]
+                                return None, post
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                     logging.error(f"Ошибка загрузки файла {url}: {e}")
-                    return None, self.results[self.current_chunk * POSTS_PER_CHUNK + idx]
+                    return None, post
 
         tasks = [fetch_single_image(idx, url) for idx, url in enumerate(image_urls)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -585,8 +590,8 @@ class NavigationView(View):
             logging.error(f"Ошибка загрузки страницы {target_page}: {e}")
             return False
 
-    async def create_message(self) -> Tuple[str, List[str], List[DanbooruPost]]:
-        """Создает сообщение и список URL файлов для текущего чанка."""
+    async def create_message(self) -> Tuple[str, List[str], List[DanbooruPost], List[DanbooruPost]]:
+        """Создает сообщение, список URL файлов и список постов для текущего чанка."""
         start_idx = self.current_chunk * POSTS_PER_CHUNK
         end_idx = min(start_idx + POSTS_PER_CHUNK, len(self.results))
         chunk_posts = self.results[start_idx:end_idx]
@@ -622,7 +627,7 @@ class NavigationView(View):
 
         message = "\n".join(message_lines)
         logging.debug(f"Сформирован чанк {self.current_chunk + 1}/{max_chunks}: {len(image_urls)} файлов, {len(skipped_posts)} пропущено")
-        return message, image_urls, skipped_posts
+        return message, image_urls, skipped_posts, chunk_posts
 
     async def on_timeout(self) -> None:
         """Обрабатывает таймаут view, очищая кэш."""
@@ -905,8 +910,8 @@ async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[
                 max_file_size=max_file_size
             )
             view.page_cache[1] = posts
-            content, image_urls, skipped_posts = await view.create_message()
-            files = await view.fetch_images(image_urls, interaction, skipped_posts)
+            content, image_urls, skipped_posts, chunk_posts = await view.create_message()
+            files = await view.fetch_images(image_urls, interaction, skipped_posts, chunk_posts)
             message = await interaction.followup.send(content=content, view=view, files=files, ephemeral=False)
             view.message = message
 
@@ -915,7 +920,7 @@ async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[
         await interaction.followup.send(f"Не удалось получить посты: {str(e)}", ephemeral=False)
     except Exception as e:
         logging.error(f"Неизвестная ошибка в /danbooru для тегов '{tags}': {e}")
-        await interaction.followup.send("Произошла/error команды.", ephemeral=False)
+        await interaction.followup.send("Произошла ошибка команды.", ephemeral=False)
 
 def create_command(bot_client) -> app_commands.Command:
     """Создает слеш-команду /danbooru с автодополнением тегов."""
