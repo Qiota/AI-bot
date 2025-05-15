@@ -21,6 +21,10 @@ CONFIG = {
     "max_file_size": 8 * 1024 * 1024,  # Максимальный размер файла (8 МБ)
     "temp_dir": os.path.join("src", "temp_images"),
     "default_prompt": "A serene landscape with mountains and a clear sky, vibrant colors",
+    "default_negative_prompt": (
+        "blurry, low quality, distorted, extra limbs, artifacts, noise, low resolution, oversaturated, "
+        "grainy, unnatural colors, deformed, missing limbs, text, watermark, logo, cropped"
+    ),
     "default_settings": {
         "model": "sdxl-turbo",
         "aspect_ratio": "4:3",
@@ -97,6 +101,7 @@ async def generate_initial_prompt() -> str:
             return cleaned if cleaned else CONFIG["default_prompt"]
         except Exception as e:
             logger.error(f"Ошибка генерации промпта с {model}: {e}")
+            continue
     return CONFIG["default_prompt"]
 
 async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
@@ -127,6 +132,7 @@ async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
             return cleaned if cleaned else prompt
         except Exception as e:
             logger.error(f"Ошибка улучшения с {model}: {e}")
+            continue
     return prompt
 
 async def generate_image(
@@ -272,6 +278,7 @@ class PromptModal(Modal):
             label="Отрицательный промпт",
             placeholder="Что исключить из изображения",
             required=False,
+            default=CONFIG["default_negative_prompt"],
             max_length=CONFIG["negative_prompt_max_length"]
         )
 
@@ -286,7 +293,7 @@ class PromptModal(Modal):
         async with self.view.view_lock:
             await interaction.response.defer(ephemeral=self.view.ephemeral)
             self.view.prompt = self.prompt_input.value or await generate_initial_prompt()
-            self.view.negative_prompt = self.negative_prompt_input.value or ""
+            self.view.negative_prompt = self.negative_prompt_input.value or CONFIG["default_negative_prompt"]
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
             embed.add_field(
                 name="📝 Промпт",
@@ -408,7 +415,7 @@ class SettingsView(View):
         self.channel_id = channel_id
         self.message_id = message_id
         self.prompt = CONFIG["default_prompt"]
-        self.negative_prompt = ""
+        self.negative_prompt = CONFIG["default_negative_prompt"]
         self.model = CONFIG["default_settings"]["model"]
         self.aspect_ratio = CONFIG["default_settings"]["aspect_ratio"]
         self.steps = CONFIG["default_settings"]["steps"]
