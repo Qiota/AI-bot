@@ -23,4 +23,4 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV ENV=production
 EXPOSE 5000
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["python", "bot.py"]
+CMD ["python", "main.py"]
