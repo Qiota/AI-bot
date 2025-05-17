@@ -17,13 +17,24 @@ import base64
 from datetime import datetime, timezone
 import traceback
 from .commands.restrict import check_bot_access
-from .utils.checker import checker  # Исправлен импорт
+from .utils.checker import checker
 from .client import BotClient
 from duckduckgo_search.exceptions import DuckDuckGoSearchException
 import tempfile
 import os
 import g4f.debug
-import psutil  # Добавлено для мониторинга памяти
+import warnings
+
+# Подавление предупреждений pydub
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
+
+# Опциональный импорт psutil
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logger.warning("Модуль psutil не установлен, мониторинг памяти отключен")
 
 # Отключение debug-режима для минимизации логов
 g4f.debug.logging = False
@@ -64,6 +75,7 @@ SEARCH_TRIGGER_WORDS = [
 
 class AIChat:
     """Класс для обработки сообщений и генерации AI-ответов в Discord-боте."""
+    MAX_MEMORY_SIZE = 10  # Ограничение на количество сообщений в памяти
 
     def __init__(self, bot_client: BotClient) -> None:
         """Инициализация AIChat с привязкой к BotClient."""
@@ -310,6 +322,11 @@ class AIChat:
                 self.bot_client.message_to_response[f"{message.id}_{i}" if i > 0 else message.id] = sent_msg.id
                 conversation_id = self.bot_client.current_conversation[str(message.author.id)]["id"]
                 self.bot_client.chat_memory[conversation_id].append({"role": "assistant", "content": part})
+                # Ограничение размера памяти
+                if len(self.bot_client.chat_memory[conversation_id]) > self.MAX_MEMORY_SIZE:
+                    self.bot_client.chat_memory[conversation_id] = self.bot_client.chat_memory[conversation_id][-self.MAX_MEMORY_SIZE:]
+                if len(self.bot_client.topic_memory[conversation_id]) > self.MAX_MEMORY_SIZE:
+                    self.bot_client.topic_memory[conversation_id] = self.bot_client.topic_memory[conversation_id][-self.MAX_MEMORY_SIZE:]
                 await self._save_conversation(str(message.author.id), conversation_id)
             except (Forbidden, HTTPException) as e:
                 logger.error(f"Ошибка отправки части {i+1}: {e}\n{traceback.format_exc()}")
@@ -356,9 +373,10 @@ class AIChat:
                 return "Изображение слишком большое (макс. 5 МБ)."
 
         # Логирование потребления памяти
-        process = psutil.Process()
-        mem_before = process.memory_info().rss
-        logger.debug(f"Память до обработки vision: {mem_before / 1024 / 1024:.2f} МБ")
+        if PSUTIL_AVAILABLE:
+            process = psutil.Process()
+            mem_before = process.memory_info().rss
+            logger.debug(f"Память до обработки vision: {mem_before / 1024 / 1024:.2f} МБ")
 
         async with ClientSession(timeout=ClientTimeout(total=30)) as session:
             try:
@@ -445,17 +463,19 @@ class AIChat:
                 return None
             finally:
                 formatted_images = None
-                mem_after = process.memory_info().rss
-                logger.debug(f"Память после обработки vision: {mem_after / 1024 / 1024:.2f} МБ (разница: {(mem_after - mem_before) / 1024 / 1024:.2f} МБ)")
+                if PSUTIL_AVAILABLE:
+                    mem_after = process.memory_info().rss
+                    logger.debug(f"Память после обработки vision: {mem_after / 1024 / 1024:.2f} МБ (разница: {(mem_after - mem_before) / 1024 / 1024:.2f} МБ)")
                 import gc
                 gc.collect()
 
     async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message, is_edit: bool = False, use_search: bool = False) -> Optional[List[str]]:
         """Генерация ответа с учетом веб-поиска для триггерных слов."""
         # Логирование потребления памяти
-        process = psutil.Process()
-        mem_before = process.memory_info().rss
-        logger.debug(f"Память до обработки generate_response: {mem_before / 1024 / 1024:.2f} МБ")
+        if PSUTIL_AVAILABLE:
+            process = psutil.Process()
+            mem_before = process.memory_info().rss
+            logger.debug(f"Память до обработки generate_response: {mem_before / 1024 / 1024:.2f} МБ")
 
         try:
             if not (text or message.attachments):
@@ -506,8 +526,9 @@ class AIChat:
             logger.error(f"Ошибка генерации ответа для {message_id}: {e}\n{traceback.format_exc()}")
             return ["Ошибка генерации ответа."]
         finally:
-            mem_after = process.memory_info().rss
-            logger.debug(f"Память после обработки generate_response: {mem_after / 1024 / 1024:.2f} МБ (разница: {(mem_after - mem_before) / 1024 / 1024:.2f} МБ)")
+            if PSUTIL_AVAILABLE:
+                mem_after = process.memory_info().rss
+                logger.debug(f"Память после обработки generate_response: {mem_after / 1024 / 1024:.2f} МБ (разница: {(mem_after - mem_before) / 1024 / 1024:.2f} МБ)")
             import gc
             gc.collect()
 
@@ -527,9 +548,10 @@ class AIChat:
     async def _generate_response_internal(self, messages: List[Dict], has_image: bool, max_tokens: int, user_id: str, channel_type: str, channel_id: str, use_search: bool, query: str = "") -> Optional[str]:
         """Генерация ответа с учетом веб-поиска."""
         # Логирование потребления памяти
-        process = psutil.Process()
-        mem_before = process.memory_info().rss
-        logger.debug(f"Память до обработки _generate_response_internal: {mem_before / 1024 / 1024:.2f} МБ")
+        if PSUTIL_AVAILABLE:
+            process = psutil.Process()
+            mem_before = process.memory_info().rss
+            logger.debug(f"Память до обработки _generate_response_internal: {mem_before / 1024 / 1024:.2f} МБ")
 
         async with ClientSession(timeout=ClientTimeout(total=30)) as session:
             try:
@@ -693,8 +715,9 @@ class AIChat:
                 return None
             finally:
                 messages = None
-                mem_after = process.memory_info().rss
-                logger.debug(f"Память после обработки _generate_response_internal: {mem_after / 1024 / 1024:.2f} МБ (разница: {(mem_after - mem_before) / 1024 / 1024:.2f} МБ)")
+                if PSUTIL_AVAILABLE:
+                    mem_after = process.memory_info().rss
+                    logger.debug(f"Память после обработки _generate_response_internal: {mem_after / 1024 / 1024:.2f} МБ (разница: {(mem_after - mem_before) / 1024 / 1024:.2f} МБ)")
                 import gc
                 gc.collect()
 
@@ -707,7 +730,7 @@ class AIChat:
     async def get_context(self, user_id: str, channel: discord.abc.Messageable) -> List[Dict]:
         """Получение контекста разговора."""
         conversation_id = self.bot_client.current_conversation[user_id]["id"]
-        return self.bot_client.chat_memory.get(conversation_id, [])
+        return self.bot_client.chat_memory.get(conversation_id, [])[-self.MAX_MEMORY_SIZE:]
 
     async def _save_user_settings(self, user_id: str) -> None:
         """Сохранение настроек пользователя."""
@@ -722,8 +745,8 @@ class AIChat:
         if self.bot_client.firebase_manager:
             try:
                 conversation_data = {
-                    "chat_memory": self.bot_client.chat_memory[conversation_id],
-                    "topic_memory": self.bot_client.topic_memory[conversation_id]
+                    "chat_memory": self.bot_client.chat_memory[conversation_id][-self.MAX_MEMORY_SIZE:],
+                    "topic_memory": self.bot_client.topic_memory[conversation_id][-self.MAX_MEMORY_SIZE:]
                 }
                 await self.bot_client.firebase_manager.save_conversation(
                     user_id,
@@ -751,4 +774,6 @@ class AIChat:
             self.bot_client.topic_memory[conversation_id] = []
             if initial_message:
                 self.bot_client.chat_memory[conversation_id].append({"role": "user", "content": initial_message})
+                if len(self.bot_client.chat_memory[conversation_id]) > self.MAX_MEMORY_SIZE:
+                    self.bot_client.chat_memory[conversation_id] = self.bot_client.chat_memory[conversation_id][-self.MAX_MEMORY_SIZE:]
             await self._save_conversation(user_id, conversation_id)

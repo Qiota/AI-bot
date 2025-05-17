@@ -1,42 +1,26 @@
 # Этап 1: Сборка зависимостей
-FROM python:3.9.20-alpine AS builder
+FROM python:3.13-alpine AS builder
 
-# Установка рабочей директории
 WORKDIR /app
-
-# Копирование файла зависимостей
 COPY requirements.txt .
-
-# Установка зависимостей с минимальным кэшем
-RUN apk add --no-cache gcc musl-dev linux-headers && \
+RUN apk add --no-cache gcc musl-dev linux-headers ffmpeg && \
     pip install --no-cache-dir -r requirements.txt && \
     apk del gcc musl-dev linux-headers && \
     rm -rf /root/.cache/pip
 
 # Этап 2: Финальный образ
-FROM python:3.9.20-alpine
-
-# Установка рабочей директории
+FROM python:3.13-alpine
 WORKDIR /app
-
-# Копирование установленных зависимостей
-COPY --from=builder /usr/local/lib/python3.9/site-packages /usr/local/lib/python3.9/site-packages
+COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
-
-# Копирование проекта
+COPY --from=builder /usr/bin/ffmpeg /usr/bin/ffmpeg
 COPY bot.py .
 COPY src/ src/
 COPY entrypoint.sh .
-
-# Делаем entrypoint-скрипт исполняемым
-RUN chmod +x entrypoint.sh
-
-# Отключение создания pyc-файлов
+RUN chmod +x entrypoint.sh && \
+    apk add --no-cache ffmpeg
 ENV PYTHONDONTWRITEBYTECODE=1
-
-# Указание порта
-EXPOSE 8000
-
-# Установка entrypoint
+ENV ENV=production
+EXPOSE 5000
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["python", "main.py"]
+CMD ["python", "bot.py"]

@@ -2,7 +2,6 @@ import logging
 import os
 import sys
 from typing import NoReturn
-
 from src.start import start_bot
 from src.systemLog import logger
 

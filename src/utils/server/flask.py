@@ -30,7 +30,8 @@ def run_flask():
             host=config.FLASK_HOST,
             port=config.FLASK_PORT,
             debug=config.ENV != 'production',
-            use_reloader=False
+            use_reloader=False,
+            threaded=True, 
         )
     except Exception as e:
         logger.error(f"Ошибка запуска Flask: {e}")
