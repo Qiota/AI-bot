@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands, Embed, ButtonStyle, Interaction
-from discord.ui import Button, View
+from discord.ui import Button, View, Select
 import aiohttp
 from urllib.parse import urlencode, quote
 from typing import Optional, Dict
@@ -8,8 +8,6 @@ from dataclasses import dataclass
 import asyncio
 import backoff
 from contextlib import asynccontextmanager
-from ...systemLog import logger
-from ...utils.checker import checker
 import os
 import traceback
 
@@ -45,11 +43,62 @@ async def aiohttp_session():
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         yield session
 
+async def translate_text(text: str, target_lang: str) -> str:
+    """Переводит текст на указанный язык с помощью LibreTranslate."""
+    url = "https://libretranslate.com/translate"
+    payload = {
+        "q": text,
+        "source": "auto",
+        "target": target_lang,
+    }
+    headers = {"Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers) as response:
+            if response.status != 200:
+                return text  # Возвращаем оригинальный текст при ошибке
+            data = await response.json()
+            return data.get("translatedText", text)
+
+class LanguageSelect(Select):
+    """Селект-меню для выбора языка перевода."""
+    def __init__(self, anime: AnimeInfo, view: 'KitsuView'):
+        super().__init__(
+            placeholder="Выберите язык перевода",
+            options=[
+                discord.SelectOption(label="Русский", value="ru"),
+                discord.SelectOption(label="Українська", value="uk"),
+                discord.SelectOption(label="Polski", value="pl"),
+            ],
+        )
+        self.anime = anime
+        self.kitsu_view = view
+
+    async def callback(self, interaction: Interaction):
+        if interaction.user != self.kitsu_view.original_user:
+            await interaction.response.send_message(
+                "Только пользователь, вызвавший команду, может использовать это меню.",
+                ephemeral=True
+            )
+            return
+
+        selected_lang = self.values[0]
+        try:
+            translated_synopsis = await translate_text(self.anime.synopsis, selected_lang)
+            self.anime.synopsis = translated_synopsis
+            embed = create_anime_embed(self.anime)
+            await interaction.response.edit_message(embed=embed)
+        except Exception as e:
+            await interaction.response.send_message(
+                "Ошибка при переводе текста. Попробуйте позже.",
+                ephemeral=True
+            )
+
 class KitsuView(View):
-    """Кастомный View для отображения кнопок ссылок."""
-    def __init__(self, kitsu_url: str, youtube_id: Optional[str], original_user: discord.User):
+    """Кастомный View для отображения кнопок ссылок и селект-меню."""
+    def __init__(self, kitsu_url: str, youtube_id: Optional[str], original_user: discord.User, anime: AnimeInfo):
         super().__init__(timeout=300)
         self.original_user = original_user
+        self.anime = anime
         self.add_item(Button(
             label="Ссылка на Kitsu",
             style=ButtonStyle.link,
@@ -61,6 +110,7 @@ class KitsuView(View):
                 style=ButtonStyle.link,
                 url=f"https://www.youtube.com/watch?v={youtube_id}"
             ))
+        self.add_item(LanguageSelect(anime, self))
 
     async def interaction_check(self, interaction: Interaction) -> bool:
         """Проверяет, что взаимодействие выполняется оригинальным пользователем."""
@@ -78,8 +128,8 @@ class KitsuView(View):
         try:
             if hasattr(self, "message") and self.message:
                 await self.message.edit(view=self)
-        except discord.DiscordException as e:
-            logger.error(f"Ошибка при отключении view: {e}\n{traceback.format_exc()}")
+        except discord.DiscordException:
+            pass
 
 @backoff.on_exception(
     backoff.expo,
@@ -172,9 +222,6 @@ def create_anime_embed(anime: AnimeInfo) -> Embed:
 )
 async def kitsu(interaction: Interaction, bot_client, query: str) -> None:
     """Команда /kitsu: Поиск информации об аниме на Kitsu."""
-    guild_id = str(interaction.guild.id) if interaction.guild else "DM"
-    channel_id = str(interaction.channel.id) if interaction.channel else "DM"
-
     # Проверка NSFW-канала
     if interaction.guild and not interaction.channel.nsfw:
         await interaction.response.send_message(
@@ -183,20 +230,9 @@ async def kitsu(interaction: Interaction, bot_client, query: str) -> None:
         )
         return
 
-    # Проверка ограничений пользователя
-    if interaction.guild:
-        restriction, restriction_reason = await checker.check_user_restriction(interaction)
-        if not restriction:
-            await interaction.response.send_message(
-                restriction_reason or "Ваш доступ к боту ограничен.",
-                ephemeral=True
-            )
-            return
-
     try:
         await interaction.response.defer(ephemeral=False)
-    except discord.errors.NotFound as e:
-        logger.error(f"Взаимодействие не найдено при defer: {e}")
+    except discord.errors.NotFound:
         await interaction.followup.send("Взаимодействие устарело. Попробуйте снова.", ephemeral=True)
         return
 
@@ -220,11 +256,12 @@ async def kitsu(interaction: Interaction, bot_client, query: str) -> None:
             attributes = data["attributes"]
 
             # Формирование объекта аниме
+            synopsis = attributes.get("synopsis", "Описание отсутствует") or "Описание отсутствует"
             anime = AnimeInfo(
                 title=attributes.get("titles", {}).get("en") or
                       attributes.get("titles", {}).get("en_jp") or
                       attributes.get("canonicalTitle", "Без названия"),
-                synopsis=attributes.get("synopsis", "Описание отсутствует"),
+                synopsis=synopsis,
                 poster_url=attributes.get("posterImage", {}).get("original", "https://via.placeholder.com/300"),
                 episode_count=attributes.get("episodeCount"),
                 episode_length=attributes.get("episodeLength"),
@@ -238,20 +275,17 @@ async def kitsu(interaction: Interaction, bot_client, query: str) -> None:
 
             # Создание Embed и View
             embed = create_anime_embed(anime)
-            view = KitsuView(anime.kitsu_url, anime.youtube_id, interaction.user)
+            view = KitsuView(anime.kitsu_url, anime.youtube_id, interaction.user, anime)
 
             # Отправка ответа
             message = await interaction.followup.send(embed=embed, view=view, ephemeral=False)
             view.message = message
 
-    except KitsuApiError as e:
-        logger.error(f"Ошибка Kitsu API: {e}\n{traceback.format_exc()}")
+    except KitsuApiError:
         await interaction.followup.send("Ошибка при запросе к Kitsu API. Попробуйте позже.", ephemeral=False)
-    except discord.errors.NotFound as e:
-        logger.error(f"Взаимодействие не найдено: {e}\n{traceback.format_exc()}")
+    except discord.errors.NotFound:
         await interaction.followup.send("Взаимодействие устарело. Попробуйте снова.", ephemeral=True)
-    except Exception as e:
-        logger.error(f"Неизвестная ошибка /kitsu: {e}\n{traceback.format_exc()}")
+    except Exception:
         await interaction.followup.send("Произошла неизвестная ошибка. Обратитесь к администратору.", ephemeral=False)
 
 def create_command(bot_client) -> app_commands.Command:
@@ -263,15 +297,12 @@ def create_command(bot_client) -> app_commands.Command:
 
     @wrapper.error
     async def command_error(interaction: Interaction, error: app_commands.AppCommandError):
-        guild_id = str(interaction.guild.id) if interaction.guild else "DM"
-        channel_id = str(interaction.channel.id) if interaction.channel else "DM"
-        logger.error(f"Ошибка /kitsu для {interaction.user.id} в гильдии {guild_id}, канал {channel_id}: {error}\n{traceback.format_exc()}")
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message("Ошибка при выполнении команды. Попробуйте снова.", ephemeral=True)
             else:
                 await interaction.followup.send("Ошибка при выполнении команды. Попробуйте снова.", ephemeral=True)
-        except discord.DiscordException as e:
-            logger.error(f"Не удалось отправить сообщение об ошибке: {e}\n{traceback.format_exc()}")
+        except discord.DiscordException:
+            pass
 
     return wrapper
