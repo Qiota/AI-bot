@@ -51,14 +51,20 @@ class BotClient:
         })
         self.processed_messages: set = set()
         self.message_to_response: Dict = {}
-        self.user_settings: DefaultDict[str, Dict[str, int]] = defaultdict(lambda: {"max_response_length": 2000})
+        self.user_settings: DefaultDict[str, Dict[str, any]] = defaultdict(lambda: {
+            "max_response_length": 2000,
+            "selected_text_model": "llamascout",
+            "selected_vision_model": "mirexa",
+            "text_prompt": "Ты — умный, дружелюбный и полезный ассистент. Учитывай весь доступный контекст и предоставляй точные, актуальные и понятные ответы. При необходимости уточняй детали. Текущее время: {now}.",
+            "vision_prompt": "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Сначала кратко и точно опиши изображение, обращая внимание на визуальные детали (персонажи, текст, контекст). Затем ответь на запрос пользователя, используя изображение, текст и результаты веб-поиска, если применимо. Отвечай на языке запроса. Текущее время: {now}."
+        })
         self.last_message_time: DefaultDict[str, float] = defaultdict(float)
         self.model_queues: Dict[str, asyncio.Queue] = {}
         self.model_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._initialize_settings()
         self.bot.event(self.on_ready)
         self.bot.setup_hook = self._setup_hook
-        self.start_time: float = time.time()  # Для команды /uptime
+        self.start_time: float = time.time()
 
     async def _setup_hook(self) -> None:
         """Асинхронный хук для инициализации Firebase и запуска задач."""
@@ -153,6 +159,19 @@ class BotClient:
                 self.model_semaphores[model] = asyncio.Semaphore(self.request_settings["max_concurrent_requests"])
                 logger.debug(f"Инициализирована очередь для модели {model} ({model_type})")
 
+    async def load_user_settings(self, user_id: str) -> None:
+        """Загрузка пользовательских настроек из Firebase."""
+        if self.firebase_manager:
+            try:
+                settings = await self.firebase_manager.load_user_settings(user_id)
+                if settings:
+                    self.user_settings[user_id].update(settings)
+                    logger.debug(f"Настройки пользователя {user_id} загружены из Firebase")
+                else:
+                    logger.debug(f"Настройки пользователя {user_id} отсутствуют в Firebase, используются значения по умолчанию")
+            except Exception as e:
+                logger.error(f"Ошибка загрузки настроек пользователя {user_id}: {e}\n{traceback.format_exc()}")
+
     async def check_spam(self, user_id: str) -> bool:
         """Проверка на спам."""
         current_time = time.time()
@@ -204,7 +223,7 @@ class BotClient:
                     if response.status == 200:
                         models_data = await response.json()
                         vision_models = [m.get("name") for m in models_data if isinstance(m, dict) and m.get("vision", False) and m.get("name")]
-                        text_models = [m.get("name") for m in models_data if isinstance(m, dict) and not m.get("vision", False) and m.get("name")]
+                        text_models = [m.get("name") for m in models_data if isinstance(m, dict) and m.get("name")]
                         logger.debug(f"Vision: {vision_models}, Text: {text_models}")
                     else:
                         logger.warning(f"Ошибка API Pollinations: статус {response.status}")
@@ -240,8 +259,8 @@ class BotClient:
                     logger.success(f"Модели загружены из Firebase: Text={len(self.models['text'])}, Vision={len(self.models['vision'])}")
                 else:
                     if not self.models["text"] and not self.models["vision"]:
-                        self.models["text"] = ["text"]
-                        self.models["vision"] = ["vision"]
+                        self.models["text"] = ["openai-fast"]
+                        self.models["vision"] = ["openai-fast"]
                         self.models["last_update"] = time.time()
                         for model in self.models["vision"]:
                             if model not in self.models["model_stats"]["vision"]:

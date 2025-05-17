@@ -296,6 +296,50 @@ class FirebaseManager:
         factor=2,
         jitter=backoff.full_jitter
     )
+    async def save_user_settings(self, user_id: str, settings: Dict) -> None:
+        """Сохранение пользовательских настроек в Realtime Database."""
+        self._ensure_db_initialized()
+        try:
+            logger.debug(f"Начало сохранения настроек пользователя {user_id}")
+            def sync_set():
+                self._db.child(f"users/{user_id}/settings").set(settings)
+            await self._run_sync_in_executor(sync_set)
+            logger.debug(f"Настройки пользователя {user_id} сохранены в Realtime Database")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения настроек пользователя {user_id} в Realtime Database: {e}")
+            raise Exception(f"Ошибка сохранения настроек пользователя {user_id}: {e}")
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
+    async def load_user_settings(self, user_id: str) -> Optional[Dict]:
+        """Загрузка пользовательских настроек из Realtime Database."""
+        self._ensure_db_initialized()
+        try:
+            logger.debug(f"Начало загрузки настроек пользователя {user_id}")
+            def sync_get():
+                data = self._db.child(f"users/{user_id}/settings").get()
+                return data if data else None
+            data = await self._run_sync_in_executor(sync_get)
+            logger.debug(f"Настройки пользователя {user_id} загружены из Realtime Database")
+            return data
+        except Exception as e:
+            logger.error(f"Ошибка загрузки настроек пользователя {user_id} в Realtime Database: {e}")
+            raise Exception(f"Ошибка загрузки настроек пользователя {user_id}: {e}")
+
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=3,
+        max_time=30,
+        factor=2,
+        jitter=backoff.full_jitter
+    )
     async def save_cache(self, user_id: str, channel_type: str, channel_id: str, cache_key: str, cache_data: Dict) -> None:
         """Сохранение данных кэша в Realtime Database."""
         self._ensure_db_initialized()
