@@ -74,9 +74,8 @@ class AIChat:
         logger.info("Инициализация AIChat")
         self.bot_client.bot.event(self.on_message)
         self.bot_client.bot.event(self.on_message_edit)
-        self._search_semaphore = asyncio.Semaphore(2)  # Ограничение на 2 одновременных поисковых запроса
+        self._search_semaphore = asyncio.Semaphore(2)
 
-        # Настройка директории для cookie
         self.cookies_dir = os.path.join(os.path.dirname(__file__), "har_and_cookies")
         try:
             set_cookies_dir(self.cookies_dir)
@@ -409,13 +408,12 @@ class AIChat:
             system_prompt = await self._build_system_prompt(True, user_id)
             messages = [{"role": "system", "content": system_prompt}]
 
-            # Проверка триггерных слов и выполнение веб-поиска
             search_results = ""
             if use_search and query:
                 search_query = query[:100].strip()
                 search_params = self.bot_client.user_settings[user_id].get("search_params", {
-                    "max_results": 5,
-                    "max_words": 2500,
+                    "max_results": 3,
+                    "max_words": 2000,
                     "backend": "auto",
                     "add_text": True,
                     "timeout": 5
@@ -586,7 +584,7 @@ class AIChat:
             Optional[str]: Текст ответа или None в случае ошибки.
         """
         model_type = "vision" if has_image else "text"
-        selected_model = self.bot_client.user_settings[user_id].get(f"selected_{model_type}_model", "openai-fast")
+        selected_model = self.bot_client.user_settings[user_id].get(f"selected_{model_type}_model", "llamascout")
         model_stats = self.bot_client.models["model_stats"][model_type]
         available_models = sorted(
             [m for m in self.bot_client.models[model_type] if m not in self.bot_client.models["unavailable"][model_type]],
@@ -615,8 +613,8 @@ class AIChat:
         if use_search and query:
             search_query = query[:100].strip()
             search_params = self.bot_client.user_settings[user_id].get("search_params", {
-                "max_results": 5,
-                "max_words": 2500,
+                "max_results": 3,
+                "max_words": 2000,
                 "backend": "auto",
                 "add_text": True,
                 "timeout": 5
