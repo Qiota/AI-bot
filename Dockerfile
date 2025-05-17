@@ -1,5 +1,5 @@
 # Базовый образ с Python
-FROM python:3.9.20-slim-bookworm@sha256:7e2b6e1e5e1b6e9e2b7e1e2b6e1e5e1b6e9e2b7e1e2b6e1e5e1b6e9e2b7e1e2b6e1e5e1b6e9e2b7e1e2b6e1e5e1b6e9e2b7e1
+FROM python:3.9.20-slim-bullseye
 
 # Установка рабочей директории
 WORKDIR /app
