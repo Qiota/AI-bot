@@ -1,5 +1,5 @@
 # Этап 1: Сборка зависимостей
-FROM python:3.9.20-slim-bullseye AS builder
+FROM python:3.9.20-alpine AS builder
 
 # Установка рабочей директории
 WORKDIR /app
@@ -7,35 +7,36 @@ WORKDIR /app
 # Копирование файла зависимостей
 COPY requirements.txt .
 
-# Установка зависимостей с минимальным кэшем и очисткой
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc && \
+# Установка зависимостей с минимальным кэшем
+RUN apk add --no-cache gcc musl-dev linux-headers && \
     pip install --no-cache-dir -r requirements.txt && \
-    apt-get remove -y gcc && \
-    apt-get autoremove -y && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    apk del gcc musl-dev linux-headers && \
+    rm -rf /root/.cache/pip
 
 # Этап 2: Финальный образ
-FROM python:3.9.20-slim-bullseye
+FROM python:3.9.20-alpine
 
 # Установка рабочей директории
 WORKDIR /app
 
-# Копирование установленных зависимостей из этапа сборки
+# Копирование установленных зависимостей
 COPY --from=builder /usr/local/lib/python3.9/site-packages /usr/local/lib/python3.9/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Копирование кода бота
+# Копирование проекта
 COPY bot.py .
+COPY src/ src/
 COPY entrypoint.sh .
 
 # Делаем entrypoint-скрипт исполняемым
 RUN chmod +x entrypoint.sh
 
-# Указание порта (если бот использует веб-сервер, настройте нужный)
+# Отключение создания pyc-файлов
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Указание порта
 EXPOSE 8000
 
-# Установка entrypoint для очистки и запуска
+# Установка entrypoint
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["python", "bot.py"]
+CMD ["python", "main.py"]
