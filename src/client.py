@@ -52,7 +52,7 @@ class BotClient:
         self.message_to_response: Dict = {}
         self.user_settings: DefaultDict[str, Dict[str, any]] = defaultdict(lambda: {
             "max_response_length": 1000,
-            "selected_text_model": "evil",
+            "selected_text_model": "openai-fast",
             "selected_vision_model": "mistral",
             "text_prompt": "Ты — Чатбот. отвечай на своё усмотрение. Текущее время: {now}.",
             "vision_prompt": "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Текущее время: {now}.",
@@ -230,10 +230,10 @@ class BotClient:
         except Exception as e:
             logger.error(f"Ошибка загрузки моделей из API Pollinations: {e}\n{traceback.format_exc()}")
 
-        if "evil" not in vision_models:
-            vision_models.append("evil")
-        if "evil" not in text_models:
-            text_models.append("evil")
+        if "openai-fast" not in vision_models:
+            vision_models.append("openai-fast")
+        if "openai-fast" not in text_models:
+            text_models.append("openai-fast")
 
         if text_models or vision_models:
             try:
@@ -264,8 +264,8 @@ class BotClient:
                     logger.success(f"Модели загружены из Firebase: Text={len(self.models['text'])}, Vision={len(self.models['vision'])}")
                 else:
                     if not self.models["text"] and not self.models["vision"]:
-                        self.models["text"] = ["evil"]
-                        self.models["vision"] = ["evil"]
+                        self.models["text"] = ["openai-fast"]
+                        self.models["vision"] = ["openai-fast"]
                         self.models["last_update"] = time.time()
                         for model in self.models["vision"]:
                             if model not in self.models["model_stats"]["vision"]:

@@ -206,8 +206,8 @@ class AIChat:
             models_list = "\n".join([f"- {m}" for m in self.bot_client.models["text"] + self.bot_client.models["vision"]])
             await message.reply(f"Доступные модели:\n{models_list}")
         elif command == "view":
-            current_text = self.bot_client.user_settings[user_id].get("selected_text_model", "evil")
-            current_vision = self.bot_client.user_settings[user_id].get("selected_vision_model", "evil")
+            current_text = self.bot_client.user_settings[user_id].get("selected_text_model", "openai-fast")
+            current_vision = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
             await message.reply(f"Текущие модели:\nТекст: {current_text}\nVision: {current_vision}")
         elif command == "use" and len(parts) >= 4:
             model_type = parts[2].lower()
@@ -437,7 +437,7 @@ class AIChat:
                         logger.error(f"Ошибка чтения кэша: {e}")
 
                 # Вызов API
-                selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "evil")
+                selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
                 logger.debug(f"Используется модель для vision: {selected_model}")
                 response = call_vision_api()  # Синхронный вызов
 
@@ -565,7 +565,7 @@ class AIChat:
         async with ClientSession(timeout=ClientTimeout(total=30)) as session:
             try:
                 model_type = "vision" if has_image else "text"
-                selected_model = self.bot_client.user_settings[user_id].get(f"selected_{model_type}_model", "evil")
+                selected_model = self.bot_client.user_settings[user_id].get(f"selected_{model_type}_model", "openai-fast")
                 logger.debug(f"Используется модель: {selected_model}")
                 model_stats = self.bot_client.models["model_stats"][model_type]
                 available_models = sorted(
