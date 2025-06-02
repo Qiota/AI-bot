@@ -12,7 +12,6 @@ from aiohttp import ClientSession, ClientTimeout
 from g4f.errors import ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError
 from g4f.client import Client
 from g4f.Provider import PollinationsAI
-import re
 import base64
 from datetime import datetime, timezone
 import traceback
@@ -21,14 +20,8 @@ from .utils.checker import checker
 from .client import BotClient
 from duckduckgo_search.exceptions import DuckDuckGoSearchException
 import tempfile
-import os
 import g4f.debug
 import warnings
-
-# Подавление предупреждений pydub
-warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
-
-# Опциональный импорт psutil
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -36,22 +29,15 @@ except ImportError:
     PSUTIL_AVAILABLE = False
     logger.warning("Модуль psutil не установлен, мониторинг памяти отключен")
 
+# Подавление предупреждений pydub
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
+
 # Отключение debug-режима для минимизации логов
 g4f.debug.logging = False
 
 # Фиксированные промпты
-DEFAULT_PROMPT = (
-    "Ты — умный, дружелюбный и полезный ассистент."
-    "Учитывай весь доступный контекст и предоставляй точные, актуальные и понятные ответы. "
-    "При необходимости уточняй детали. Текущее время: {now}."
-)
-DEFAULT_VISION_PROMPT = (
-    "Ты — эксперт в анализе изображений и текстов, специализирующийся на мемах, персонажах и культурных контекстах. "
-    "Сначала кратко и точно опиши изображение, обращая внимание на ключевые визуальные детали (персонажи, текст, фон, стиль). "
-    "Затем ответь на запрос пользователя, используя изображение, текстовый контекст и, если доступны, результаты веб-поиска. "
-    "Если запрос связан с мемами или персонажами, уточняй их происхождение, значение или культурный контекст, опираясь на поиск. "
-    "Отвечай на языке запроса. Текущее время: {now}."
-)
+DEFAULT_PROMPT = "Ты — эксперт по анализу текстов, мемов и культурных отсылок. Текущее время: {now}."
+DEFAULT_VISION_PROMPT = "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Текущее время: {now}."
 
 # Триггерные слова для веб-поиска
 SEARCH_TRIGGER_WORDS = [
@@ -220,8 +206,8 @@ class AIChat:
             models_list = "\n".join([f"- {m}" for m in self.bot_client.models["text"] + self.bot_client.models["vision"]])
             await message.reply(f"Доступные модели:\n{models_list}")
         elif command == "view":
-            current_text = self.bot_client.user_settings[user_id].get("selected_text_model", "llamascout")
-            current_vision = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
+            current_text = self.bot_client.user_settings[user_id].get("selected_text_model", "evil")
+            current_vision = self.bot_client.user_settings[user_id].get("selected_vision_model", "evil")
             await message.reply(f"Текущие модели:\nТекст: {current_text}\nVision: {current_vision}")
         elif command == "use" and len(parts) >= 4:
             model_type = parts[2].lower()
@@ -322,7 +308,6 @@ class AIChat:
                 self.bot_client.message_to_response[f"{message.id}_{i}" if i > 0 else message.id] = sent_msg.id
                 conversation_id = self.bot_client.current_conversation[str(message.author.id)]["id"]
                 self.bot_client.chat_memory[conversation_id].append({"role": "assistant", "content": part})
-                # Ограничение размера памяти
                 if len(self.bot_client.chat_memory[conversation_id]) > self.MAX_MEMORY_SIZE:
                     self.bot_client.chat_memory[conversation_id] = self.bot_client.chat_memory[conversation_id][-self.MAX_MEMORY_SIZE:]
                 if len(self.bot_client.topic_memory[conversation_id]) > self.MAX_MEMORY_SIZE:
@@ -366,13 +351,11 @@ class AIChat:
 
     async def vision(self, prompt: str, images: List[Tuple[bytes, str]], user_id: str, channel_type: str, channel_id: str, use_search: bool = False, query: str = "") -> Optional[str]:
         """Обработка изображений с использованием PollinationsAI и веб-поиска."""
-        # Проверка размера изображений
         for image_data, _ in images:
-            if len(image_data) > 5 * 1024 * 1024:  # 5 МБ
+            if len(image_data) > 10 * 1024 * 1024:
                 logger.warning(f"Изображение слишком большое: {len(image_data)} байт")
-                return "Изображение слишком большое (макс. 5 МБ)."
+                return "Изображение слишком большое (макс. 10 МБ)."
 
-        # Логирование потребления памяти
         if PSUTIL_AVAILABLE:
             process = psutil.Process()
             mem_before = process.memory_info().rss
@@ -410,7 +393,8 @@ class AIChat:
                                     keywords=search_query,
                                     max_results=search_params["max_results"],
                                     timelimit="y",
-                                    safesearch="off"
+                                    safesearch="off",
+                                    language="auto"
                                 )
                                 search_results = "\n".join([f"- {r['title']}: {r['body']}" for r in results])[:search_params["max_words"]]
                                 logger.debug(f"Веб-поиск успешен, результаты: {search_results[:100]}...")
@@ -433,7 +417,8 @@ class AIChat:
                     except Exception as e:
                         logger.error(f"Ошибка чтения кэша: {e}\n{traceback.format_exc()}")
 
-                selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
+                selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "evil")
+                logger.debug(f"Используется модель для vision: {selected_model}")
                 response = await client.chat.completions.create(
                     model=selected_model,
                     messages=messages,
@@ -471,7 +456,6 @@ class AIChat:
 
     async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message, is_edit: bool = False, use_search: bool = False) -> Optional[List[str]]:
         """Генерация ответа с учетом веб-поиска для триггерных слов."""
-        # Логирование потребления памяти
         if PSUTIL_AVAILABLE:
             process = psutil.Process()
             mem_before = process.memory_info().rss
@@ -547,7 +531,6 @@ class AIChat:
     )
     async def _generate_response_internal(self, messages: List[Dict], has_image: bool, max_tokens: int, user_id: str, channel_type: str, channel_id: str, use_search: bool, query: str = "") -> Optional[str]:
         """Генерация ответа с учетом веб-поиска."""
-        # Логирование потребления памяти
         if PSUTIL_AVAILABLE:
             process = psutil.Process()
             mem_before = process.memory_info().rss
@@ -556,7 +539,8 @@ class AIChat:
         async with ClientSession(timeout=ClientTimeout(total=30)) as session:
             try:
                 model_type = "vision" if has_image else "text"
-                selected_model = self.bot_client.user_settings[user_id].get(f"selected_{model_type}_model", "llamascout")
+                selected_model = self.bot_client.user_settings[user_id].get(f"selected_{model_type}_model", "evil")
+                logger.debug(f"Используется модель: {selected_model}")
                 model_stats = self.bot_client.models["model_stats"][model_type]
                 available_models = sorted(
                     [m for m in self.bot_client.models[model_type] if m not in self.bot_client.models["unavailable"][model_type]],
@@ -725,6 +709,7 @@ class AIChat:
         """Формирование системного промпта."""
         current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         prompt = DEFAULT_VISION_PROMPT if has_image else DEFAULT_PROMPT
+        logger.debug(f"Тип prompt: {type(prompt)}, значение: {prompt}")
         return prompt.format(now=current_date)
 
     async def get_context(self, user_id: str, channel: discord.abc.Messageable) -> List[Dict]:

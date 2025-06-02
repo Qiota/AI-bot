@@ -9,7 +9,6 @@ import uuid
 import traceback
 import aiohttp
 from .commands.restrict import create_command as restrict_command
-from .commands.giveaway import create_command as giveaway_command
 from .utils.firebase.firebase_manager import FirebaseManager
 from .utils.checker import checker
 from g4f.client import AsyncClient as G4FClient
@@ -52,11 +51,18 @@ class BotClient:
         self.processed_messages: set = set()
         self.message_to_response: Dict = {}
         self.user_settings: DefaultDict[str, Dict[str, any]] = defaultdict(lambda: {
-            "max_response_length": 2000,
-            "selected_text_model": "llamascout",
-            "selected_vision_model": "mirexa",
-            "text_prompt": "Ты — умный, дружелюбный и полезный ассистент. Учитывай весь доступный контекст и предоставляй точные, актуальные и понятные ответы. При необходимости уточняй детали. Текущее время: {now}.",
-            "vision_prompt": "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Сначала кратко и точно опиши изображение, обращая внимание на визуальные детали (персонажи, текст, контекст). Затем ответь на запрос пользователя, используя изображение, текст и результаты веб-поиска, если применимо. Отвечай на языке запроса. Текущее время: {now}."
+            "max_response_length": 1000,
+            "selected_text_model": "evil",
+            "selected_vision_model": "evil",
+            "text_prompt": "Ты — эксперт по анализу текстов, мемов и культурных отсылок. Текущее время: {now}.",
+            "vision_prompt": "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Текущее время: {now}.",
+            "search_params": {
+                "max_results": 2,
+                "max_words": 1000,
+                "backend": "auto",
+                "add_text": True,
+                "timeout": 3
+            }
         })
         self.last_message_time: DefaultDict[str, float] = defaultdict(float)
         self.model_queues: Dict[str, asyncio.Queue] = {}
@@ -74,15 +80,9 @@ class BotClient:
         try:
             await self._ensure_firebase_initialized()
             self.tree.add_command(restrict_command(self))
-            giveaway, reroll, edit = giveaway_command(self)
-            self.tree.add_command(giveaway)
-            self.tree.add_command(reroll)
-            self.tree.add_command(edit)
             logger.debug("Команды розыгрышей и restrict добавлены в CommandTree")
             asyncio.create_task(self.update_models_periodically())
             asyncio.create_task(self.cleanup_conversations_periodically())
-            from .commands.giveaway import resume_giveaways
-            asyncio.create_task(resume_giveaways(self))
             logger.success("Асинхронные задачи запущены в setup_hook")
         except Exception as e:
             logger.error(f"Ошибка в setup_hook: {e}\n{traceback.format_exc()}")
@@ -230,6 +230,11 @@ class BotClient:
         except Exception as e:
             logger.error(f"Ошибка загрузки моделей из API Pollinations: {e}\n{traceback.format_exc()}")
 
+        if "evil" not in vision_models:
+            vision_models.append("evil")
+        if "evil" not in text_models:
+            text_models.append("evil")
+
         if text_models or vision_models:
             try:
                 self.models["vision"] = vision_models
@@ -259,8 +264,8 @@ class BotClient:
                     logger.success(f"Модели загружены из Firebase: Text={len(self.models['text'])}, Vision={len(self.models['vision'])}")
                 else:
                     if not self.models["text"] and not self.models["vision"]:
-                        self.models["text"] = ["openai-fast"]
-                        self.models["vision"] = ["openai-fast"]
+                        self.models["text"] = ["evil"]
+                        self.models["vision"] = ["evil"]
                         self.models["last_update"] = time.time()
                         for model in self.models["vision"]:
                             if model not in self.models["model_stats"]["vision"]:
