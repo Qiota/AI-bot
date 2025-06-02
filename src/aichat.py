@@ -36,7 +36,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
 g4f.debug.logging = False
 
 # Фиксированные промпты
-DEFAULT_PROMPT = "Ты — эксперт по анализу текстов, мемов и культурных отсылок. Текущее время: {now}."
+DEFAULT_PROMPT = "Ты — Чатбот. отвечай на своё усмотрение. Текущее время: {now}."
 DEFAULT_VISION_PROMPT = "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Текущее время: {now}."
 
 # Триггерные слова для веб-поиска
@@ -361,9 +361,25 @@ class AIChat:
             mem_before = process.memory_info().rss
             logger.debug(f"Память до обработки vision: {mem_before / 1024 / 1024:.2f} МБ")
 
-        async with ClientSession(timeout=ClientTimeout(total=30)) as session:
-            try:
+        async with ClientSession(timeout=ClientTimeout(total=10)) as session:
+            @backoff.on_exception(
+                backoff.expo,
+                (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, Exception),
+                max_tries=3,
+                max_time=30,
+                jitter=backoff.full_jitter
+            )
+            def call_vision_api():
                 client = Client(provider=PollinationsAI)
+                return client.chat.completions.create(
+                    model=selected_model,
+                    messages=messages,
+                    images=formatted_images,
+                    max_tokens=1000
+                )
+
+            try:
+                # Подготовка изображений
                 formatted_images = []
                 for image_data, filename in images:
                     mime_type = "image/jpeg" if filename.lower().endswith((".jpeg", ".jpg")) else "image/webp"
@@ -371,10 +387,12 @@ class AIChat:
                     data_uri = f"data:{mime_type};base64,{base64_image}"
                     formatted_images.append([data_uri, filename])
 
+                # Формирование промпта и сообщений
                 current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                 system_prompt = await self._build_system_prompt(True, user_id)
                 messages = [{"role": "system", "content": system_prompt}]
 
+                # Веб-поиск, если требуется
                 search_results = ""
                 if use_search and query:
                     search_query = query[:50].strip()
@@ -399,7 +417,7 @@ class AIChat:
                                 search_results = "\n".join([f"- {r['title']}: {r['body']}" for r in results])[:search_params["max_words"]]
                                 logger.debug(f"Веб-поиск успешен, результаты: {search_results[:100]}...")
                     except DuckDuckGoSearchException as e:
-                        logger.error(f"Ошибка веб-поиска для запроса '{search_query}': {e}\n{traceback.format_exc()}")
+                        logger.error(f"Ошибка веб-поиска для '{search_query}': {e}")
                         search_results = "Веб-поиск недоступен, анализ основан только на изображении и запросе."
 
                 user_message = {"role": "user", "content": prompt}
@@ -407,6 +425,7 @@ class AIChat:
                     user_message["content"] += f"\n\n[Результаты веб-поиска]\n{search_results}"
                 messages.append(user_message)
 
+                # Проверка кэша
                 cache_key = self._generate_cache_key(messages, "vision", user_id, channel_type, channel_id)
                 if self.bot_client.firebase_manager:
                     try:
@@ -415,22 +434,22 @@ class AIChat:
                             logger.debug(f"Кэш найден для {cache_key}")
                             return cached_response["response"]
                     except Exception as e:
-                        logger.error(f"Ошибка чтения кэша: {e}\n{traceback.format_exc()}")
+                        logger.error(f"Ошибка чтения кэша: {e}")
 
+                # Вызов API
                 selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "evil")
                 logger.debug(f"Используется модель для vision: {selected_model}")
-                response = await client.chat.completions.create(
-                    model=selected_model,
-                    messages=messages,
-                    images=formatted_images,
-                    max_tokens=1000
-                )
+                response = call_vision_api()  # Синхронный вызов
 
-                response_text = response.choices[0].message.content.strip()
-                if not response_text:
-                    logger.warning("Пустой ответ от PollinationsAI")
+                # Проверка ответа
+                if not hasattr(response, "choices") or not response.choices or not response.choices[0].message.content:
+                    logger.warning("Пустой или некорректный ответ от PollinationsAI")
                     return None
 
+                response_text = response.choices[0].message.content.strip()
+                logger.debug(f"Успешный ответ от PollinationsAI: {response_text[:100]}...")
+
+                # Сохранение в кэш
                 if self.bot_client.firebase_manager:
                     try:
                         await self.bot_client.firebase_manager.save_cache(user_id, channel_type, channel_id, cache_key, {
@@ -438,11 +457,19 @@ class AIChat:
                             "timestamp": time.time()
                         })
                     except Exception as e:
-                        logger.error(f"Ошибка сохранения кэша: {e}\n{traceback.format_exc()}")
+                        logger.error(f"Ошибка сохранения кэша: {e}")
 
-                logger.debug(f"Успешный ответ от PollinationsAI: {response_text[:100]}...")
                 return response_text
 
+            except (ProviderNotFoundError, ModelNotSupportedError) as e:
+                logger.error(f"Ошибка провайдера/модели: {e}")
+                return "Модель или провайдер недоступны."
+            except RateLimitError as e:
+                logger.error(f"Превышен лимит запросов: {e}")
+                return "Превышен лимит запросов, попробуйте позже."
+            except ResponseError as e:
+                logger.error(f"Ошибка ответа API: {e}")
+                return "Ошибка обработки изображения."
             except Exception as e:
                 logger.error(f"Неизвестная ошибка при обработке изображений: {e}\n{traceback.format_exc()}")
                 return None
@@ -526,7 +553,6 @@ class AIChat:
         (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, ConnectionError, TimeoutError),
         max_tries=3,
         max_time=30,
-        factor=2,
         jitter=backoff.full_jitter
     )
     async def _generate_response_internal(self, messages: List[Dict], has_image: bool, max_tokens: int, user_id: str, channel_type: str, channel_id: str, use_search: bool, query: str = "") -> Optional[str]:

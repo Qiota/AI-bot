@@ -294,6 +294,7 @@ class PromptModal(Modal):
             await interaction.response.defer(ephemeral=self.view.ephemeral)
             self.view.prompt = self.prompt_input.value or await generate_initial_prompt()
             self.view.negative_prompt = self.negative_prompt_input.value or CONFIG["default_negative_prompt"]
+            self.view.is_prompt_improved = False  # Reset the improved flag when a new prompt is set
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
             embed.add_field(
                 name="📝 Промпт",
@@ -421,6 +422,7 @@ class SettingsView(View):
         self.steps = CONFIG["default_settings"]["steps"]
         self.cfg_scale = CONFIG["default_settings"]["cfg_scale"]
         self.improve_prompt_flag = CONFIG["default_settings"]["improve_prompt"]
+        self.is_prompt_improved = False  # Track if prompt has been improved
         self.view_lock = Lock()
 
         self.model_select = Select(
@@ -461,7 +463,7 @@ class SettingsView(View):
         """Отключает все кнопки и селекты."""
         self.model_select.disabled = True
         self.aspect_ratio_select.disabled = True
-        self.improve_prompt_button.disabled = True
+        self.improve_prompt_button.disabled = self.is_prompt_improved  # Disable only if prompt was improved
         self.generate_button.disabled = True
         self.prompt_button.disabled = True
         self.settings_button.disabled = True
@@ -470,7 +472,7 @@ class SettingsView(View):
         """Включает все кнопки и селекты."""
         self.model_select.disabled = False
         self.aspect_ratio_select.disabled = False
-        self.improve_prompt_button.disabled = False
+        self.improve_prompt_button.disabled = self.is_prompt_improved  # Keep disabled if prompt was improved
         self.improve_prompt_button.label = "Улучшить промпт"
         self.generate_button.disabled = False
         self.generate_button.label = "Генерировать"
@@ -497,7 +499,7 @@ class SettingsView(View):
             embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
             embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
             embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
-            embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
+            embed.add_field(name="⚖️ CFG", value=f"> `{self.view.cfg_scale}`", inline=True)
             self.enable_all_buttons()
             await interaction.message.edit(embed=embed, view=self)
 
@@ -531,11 +533,17 @@ class SettingsView(View):
 
     async def improve_prompt_button_callback(self, interaction: discord.Interaction):
         async with self.view_lock:
+            if self.is_prompt_improved:
+                await interaction.response.send_message("❌ Промпт уже был улучшен в этом вызове команды.", ephemeral=True)
+                return
+
             self.disable_all_buttons()
             self.improve_prompt_button.label = "⌛ Улучшение..."
             await interaction.response.edit_message(view=self)
             improved = await improve_prompt(self.prompt, nsfw_allowed=True)
             self.prompt = improved
+            self.is_prompt_improved = True  # Mark prompt as improved
+            self.improve_prompt_flag = True  # Set flag for generate_image
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
             embed.add_field(
                 name="📝 Промпт",

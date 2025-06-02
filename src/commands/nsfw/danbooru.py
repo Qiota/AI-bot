@@ -12,6 +12,7 @@ import backoff
 import logging
 from cachetools import TTLCache
 from concurrent.futures import ThreadPoolExecutor
+import time
 
 # Отключаем логирование aiohttp.access для снижения шума
 aiohttp_access_logger = logging.getLogger("aiohttp.access")
@@ -64,6 +65,7 @@ file_info_cache: Dict[str, Tuple[str, Optional[int]]] = {}
 tag_suggestions_cache: TTLCache = TTLCache(maxsize=TAG_CACHE_SIZE, ttl=TAG_CACHE_TTL)
 used_post_ids: set = set()
 active_views: Dict[int, 'NavigationView'] = {}
+autocomplete_cache: TTLCache = TTLCache(maxsize=1000, ttl=3600)  # Локальный кэш для автодополнения
 
 def format_post_count(count: int) -> str:
     """Форматирует количество постов в читаемый вид."""
@@ -298,14 +300,19 @@ class NavigationView(View):
         """Отключает кнопки после 1 часа бездействия."""
         try:
             await asyncio.sleep(self.inactivity_timeout)
-            logging.debug("Таймер бездействия сработал: отключаем кнопки")
-            self.disable_navigation_buttons()
-            if self.message:
-                try:
-                    await self.message.edit(view=self)
-                    logging.debug("Кнопки успешно отключены в сообщении")
-                except discord.HTTPException as e:
-                    logging.error(f"Ошибка при отключении кнопок в сообщении: {e}")
+            current_time = time.time()
+            if (current_time - self.last_interaction) >= self.inactivity_timeout:
+                logging.debug("Таймер бездействия сработал: отключаем кнопки")
+                self.disable_navigation_buttons()
+                if self.message:
+                    try:
+                        await self.message.edit(view=self)
+                        logging.debug("Кнопки успешно отключены в сообщении")
+                    except discord.HTTPException as e:
+                        logging.error(f"Ошибка при отключении кнопок в сообщении: {e}")
+            else:
+                logging.debug("Активность обнаружена, перезапуск таймера бездействия")
+                self.start_inactivity_timer()
         except asyncio.CancelledError:
             logging.debug("Таймер бездействия отменён")
         except Exception as e:
@@ -792,7 +799,7 @@ async def fetch_tag_suggestions(session: aiohttp.ClientSession, query: str) -> L
         return tags
 
 async def tags_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
-    """Обработчик автодополнения для тегов."""
+    """Обработчик автодополнения для тегов с локальным кэшем."""
     start_time = asyncio.get_event_loop().time()
     try:
         if len(current) > MAX_QUERY_LENGTH:
@@ -803,12 +810,20 @@ async def tags_autocomplete(interaction: discord.Interaction, current: str) -> L
         query = tags[-1] if tags else ""
         cache_key = query.lower() or "__all_tags__"
 
-        if cache_key in tag_suggestions_cache:
-            suggestions = tag_suggestions_cache[cache_key]
-            logging.debug(f"Использован кэш для автодополнения '{query}': {len(suggestions)} тегов")
+        # Проверка локального кэша автодополнения
+        if cache_key in autocomplete_cache:
+            suggestions = autocomplete_cache[cache_key]
+            logging.debug(f"Использован локальный кэш автодополнения для '{query}': {len(suggestions)} тегов")
         else:
-            async with aiohttp_session() as session:
-                suggestions = await fetch_tag_suggestions(session, query)
+            # Проверка глобального кэша тегов
+            if cache_key in tag_suggestions_cache:
+                suggestions = tag_suggestions_cache[cache_key]
+                logging.debug(f"Использован глобальный кэш для автодополнения '{query}': {len(suggestions)} тегов")
+            else:
+                async with aiohttp_session() as session:
+                    suggestions = await fetch_tag_suggestions(session, query)
+            autocomplete_cache[cache_key] = suggestions
+            logging.debug(f"Добавлено в локальный кэш автодополнения для '{query}': {len(suggestions)} тегов")
 
         prefix = ' '.join(tags[:-1]) + ' ' if tags[:-1] else ''
         choices = [

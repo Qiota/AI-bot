@@ -53,12 +53,12 @@ class BotClient:
         self.user_settings: DefaultDict[str, Dict[str, any]] = defaultdict(lambda: {
             "max_response_length": 1000,
             "selected_text_model": "evil",
-            "selected_vision_model": "evil",
-            "text_prompt": "Ты — эксперт по анализу текстов, мемов и культурных отсылок. Текущее время: {now}.",
+            "selected_vision_model": "mistral",
+            "text_prompt": "Ты — Чатбот. отвечай на своё усмотрение. Текущее время: {now}.",
             "vision_prompt": "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Текущее время: {now}.",
             "search_params": {
-                "max_results": 2,
-                "max_words": 1000,
+                "max_results": 3,
+                "max_words": 1500,
                 "backend": "auto",
                 "add_text": True,
                 "timeout": 3
