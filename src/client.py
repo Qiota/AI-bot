@@ -51,14 +51,14 @@ class BotClient:
         self.processed_messages: set = set()
         self.message_to_response: Dict = {}
         self.user_settings: DefaultDict[str, Dict[str, any]] = defaultdict(lambda: {
-            "max_response_length": 1000,
-            "selected_text_model": "openai-fast",
+            "max_response_length": 2000,
+            "selected_text_model": "llamascout",
             "selected_vision_model": "mistral",
             "text_prompt": "Ты — Чатбот. отвечай на своё усмотрение. Текущее время: {now}.",
             "vision_prompt": "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Текущее время: {now}.",
             "search_params": {
                 "max_results": 3,
-                "max_words": 1500,
+                "max_words": 2000,
                 "backend": "auto",
                 "add_text": True,
                 "timeout": 3
