@@ -49,7 +49,7 @@ CONFIG = {
         "stable-diffusion-v1-5": "Stable Diffusion v1.5"
     },
     "forbidden_words": ["loli"],
-    "prompt_max_length": 1000,
+    "prompt_max_length": 2000,
     "negative_prompt_max_length": 500,
     "discord_embed_limits": {
         "description": 4096,  # Максимум для description в Embed
@@ -104,7 +104,7 @@ async def generate_initial_prompt() -> str:
                         {"role": "user", "content": "Generate a prompt."}
                     ],
                     max_tokens=300,
-                    temperature=0.7
+                    temperature=0.5
                 )
             prompt = response.choices[0].message.content.strip()
             cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', prompt).strip()
@@ -141,7 +141,7 @@ async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
                         {"role": "user", "content": f"Enhance: {prompt}."}
                     ],
                     max_tokens=300,
-                    temperature=0.6
+                    temperature=0.5
                 )
             improved = response.choices[0].message.content.strip()
             cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', improved).strip()
