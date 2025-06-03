@@ -21,7 +21,7 @@ from ..restrict import check_bot_access, restrict_command_execution
 CONFIG = {
     "max_file_size": 10 * 1024 * 1024,  # Максимальный размер файла (10 МБ)
     "temp_dir": os.path.join("src", "temp_images"),
-    "default_prompt": "A serene landscape with mountains and a clear sky, vibrant colors",
+    "default_prompt": "A serene landscape with mountains and a clear sky, vibrant colors, Studio Ghibli style, ultra high quality",
     "default_negative_prompt": (
         "blurry, low quality, distorted, extra limbs, artifacts, noise, low resolution, oversaturated, "
         "grainy, unnatural colors, deformed, missing limbs, text, watermark, logo, cropped"
@@ -29,8 +29,8 @@ CONFIG = {
     "default_settings": {
         "model": "sdxl-turbo",
         "aspect_ratio": "4:3",
-        "steps": 30,
-        "cfg_scale": 7.5,
+        "steps": 50,  # Увеличено для повышения качества
+        "cfg_scale": 8.0,  # Оптимизировано для баланса детализации
         "improve_prompt": False,
         "brightness": 0,
         "contrast": 0
@@ -73,12 +73,12 @@ async def update_progress(interaction: discord.Interaction, progress: float, mes
     embed = Embed(title="⏳ Генерация", color=0x3498DB)
     embed.add_field(name="Прогресс", value=f"```{create_progress_bar(progress)} {int(progress * 100)}%```", inline=False)
     try:
-        await message.edit(embed=embed, view=None)
+        await message.edit(embed=embed, view=None, attachments=[])
     except discord.errors.NotFound:
         pass
 
 async def generate_initial_prompt() -> str:
-    """Генерирует начальный промпт с помощью модели."""
+    """Генерирует начальный промпт с выразительными деталями."""
     client = AsyncClient(provider=PollinationsAI)
     for model in ["unity"]:
         try:
@@ -88,15 +88,16 @@ async def generate_initial_prompt() -> str:
                     {
                         "role": "system",
                         "content": (
-                            "Generate a detailed, vivid, and expressive image generation prompt with rich descriptions of colors, lighting, textures, environment, emotional tone, and artistic style. "
-                            "Include nuanced details such as specific weather conditions, time of day, material properties, and composition to create a visually compelling scene. "
+                            "Generate a vivid, structured image generation prompt in the style of: 'Summer trip in Tokyo, sakura lover, sweetheart couple, t-shirt design, balance harmony space, pixel art, Studio Ghibli style, white background, ultra high quality.' "
+                            "Include a clear scene description, emotional tone, specific subjects or characters, artistic style, color palette, and quality details. "
                             "Ensure the prompt is safe, coherent, and suitable for image generation. Avoid NSFW content. "
+                            "Use concise, comma-separated phrases to describe elements. "
                             "Return only the prompt, no Markdown or additional formatting."
                         )
                     },
                     {"role": "user", "content": "Generate a prompt."}
                 ],
-                max_tokens=900,
+                max_tokens=300,
                 temperature=0.7
             )
             prompt = response.choices[0].message.content.strip()
@@ -105,10 +106,10 @@ async def generate_initial_prompt() -> str:
         except Exception as e:
             logger.error(f"Ошибка генерации промпта с {model}: {str(e)}")
             continue
-    return None
+    return CONFIG["default_prompt"]
 
 async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
-    """Улучшает промпт, добавляя детали и выразительность."""
+    """Улучшает промпт, добавляя детали в структурированном стиле."""
     client = AsyncClient(provider=PollinationsAI)
     for model in ["unity"]:
         try:
@@ -118,22 +119,24 @@ async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
                     {
                         "role": "system",
                         "content": (
-                            "Enhance the provided image generation prompt by adding vivid, multi-layered details, including nuanced color palettes, dramatic or natural lighting effects, realistic or stylized textures, immersive environmental settings, a clear emotional tone, distinct artistic styles, and thoughtful composition and perspective. "
-                            f"{'Allow tasteful NSFW elements if present in the original prompt.' if nsfw_allowed else 'Avoid NSFW content.'} "
-                            "Ensure the prompt remains coherent, expressive, and suitable for image generation."
+                            "Enhance the provided image generation prompt to match the style of: 'Summer trip in Tokyo, sakura lover, sweetheart couple, t-shirt design, balance harmony space, pixel art, Studio Ghibli style, white background, ultra high quality.' "
+                            "Add vivid details including scene, emotions, characters, colors, textures, lighting, artistic style, and quality. "
+                            "Use concise, comma-separated phrases for clarity. "
+                            f"{'Allow tasteful NSFW elements if present.' if nsfw_allowed else 'Avoid NSFW content.'} "
+                            "Ensure the prompt is coherent and suitable for image generation. "
                             "Return only the enhanced prompt, no Markdown or additional formatting."
                         )
                     },
                     {"role": "user", "content": f"Enhance: {prompt}."}
                 ],
-                max_tokens=900,
+                max_tokens=300,
                 temperature=0.6
             )
             improved = response.choices[0].message.content.strip()
             cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', improved).strip()
-            return cleaned if improved else prompt
+            return cleaned if cleaned else prompt
         except Exception as e:
-            logger.error(f"Ошибка улучшения с {model}: {e}")
+            logger.error(f"Ошибка улучшения с {model}: {str(e)}")
             continue
     return prompt
 
@@ -212,8 +215,8 @@ async def generate_image(
                 "accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
                 "accept-encoding": "gzip, deflate, br, zstd",
                 "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "origin": "https://editor.imagelabs.net",
-                "referer": "https://editor.imagelabs.net/"
+                "origin": "https://editor.imagelabs.com",
+                "referer": "https://editor.imagelabs.com/"
             }
             await update_progress(interaction, 0.6, message, ephemeral)
             async with session.get(image_url, headers=headers) as resp:
@@ -237,8 +240,6 @@ async def generate_image(
         file = File(BytesIO(adjusted_data), filename="generated_image.png")
         embed = Embed(title="🎨 Готово!", color=0x1ABC9C)
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/3659/3659898.png")
-
-        # Только конечный промпт в description с ```
         embed.description = f"**📝 Промпт**:\n```{final_prompt}```"
 
         embed.add_field(name="🤖 Модель", value=f"**{CONFIG['models'][model]}**", inline=True)
@@ -271,14 +272,14 @@ async def generate_image(
         success = True
 
     except Exception as e:
-        view.enable_all_buttons()
+        view.enable_all()
         error_str = str(e)
         if "400 Bad Request (error code: 20009)" in error_str or "20009" in error_str:
             embed = Embed(title="❌ Ошибка", description="Обнаружен явный контент.", color=0xE74C3C)
-            await message.edit(embed=embed, view=None)
+            await message.edit(embed=embed, view=None, attachments=[])
         else:
             embed = Embed(title="❌ Ошибка", description=error_str[:CONFIG["discord_embed_limits"]["description"]], color=0xE74C3C)
-            await message.edit(embed=embed, view=None)
+            await message.edit(embed=embed, view=None, attachments=[])
         logger.error(f"Ошибка /image для {interaction.user.id}: {error_str}")
 
     finally:
@@ -297,13 +298,14 @@ class PromptModal(Modal):
             label="Промпт",
             placeholder="Опишите изображение (или оставьте пустым для автогенерации)",
             required=False,
-            max_length=CONFIG["prompt_max_length"]
+            max_length=CONFIG["prompt_max_length"],
+            default=self.view.prompt if self.view.prompt != CONFIG["default_prompt"] else ""
         )
         self.negative_prompt_input = TextInput(
             label="Отрицательный промпт",
             placeholder="Что исключить из изображения",
             required=False,
-            default=CONFIG["default_negative_prompt"],
+            default=self.view.negative_prompt if self.view.negative_prompt != CONFIG["default_negative_prompt"] else "",
             max_length=CONFIG["negative_prompt_max_length"]
         )
 
@@ -327,7 +329,7 @@ class PromptModal(Modal):
             embed.add_field(name="📏 Соотношение", value=f"> `{self.view.aspect_ratio}`", inline=True)
             embed.add_field(name="🔄 Шаги", value=f"> `{self.view.steps}`", inline=True)
             embed.add_field(name="⚖️ CFG", value=f"> `{self.view.cfg_scale}`", inline=True)
-            self.view.enable_all_buttons()
+            self.view.enable_all()
             await interaction.message.edit(embed=embed, view=self.view)
 
 class SettingsModal(Modal):
@@ -342,12 +344,14 @@ class SettingsModal(Modal):
             label="Шаги (1-100)",
             placeholder="Количество шагов генерации",
             required=True,
+            default=str(self.view.steps),
             max_length=3
         )
         self.cfg_scale_input = TextInput(
             label="CFG Scale (1.0-20.0)",
             placeholder="Влияние промпта на результат",
             required=True,
+            default=str(self.view.cfg_scale),
             max_length=4
         )
 
@@ -379,7 +383,7 @@ class SettingsModal(Modal):
             embed.add_field(name="📏 Соотношение", value=f"> `{self.view.aspect_ratio}`", inline=True)
             embed.add_field(name="🔄 Шаги", value=f"> `{self.view.steps}`", inline=True)
             embed.add_field(name="⚖️ CFG", value=f"> `{self.view.cfg_scale}`", inline=True)
-            self.view.enable_all_buttons()
+            self.view.enable_all()
             await interaction.message.edit(embed=embed, view=self.view)
 
 class ImageResponseView(View):
@@ -464,7 +468,7 @@ class ImageResponseView(View):
         try:
             embed = Embed(title="⏳ Генерация", color=0x3498DB)
             embed.add_field(name="Прогресс", value=f"```{create_progress_bar(0)} 0%```", inline=False)
-            await interaction.message.edit(embed=embed, view=None)
+            await interaction.message.edit(embed=embed, view=None, attachments=[])
 
             await generate_image(
                 interaction=interaction,
@@ -486,7 +490,7 @@ class ImageResponseView(View):
             self.regenerate_button.disabled = False
             self.regenerate_button.label = "🔄 Перегенерировать"
             embed = Embed(title="❌ Ошибка", description=str(e)[:CONFIG["discord_embed_limits"]["description"]], color=0xE74C3C)
-            await interaction.message.edit(embed=embed, view=self)
+            await interaction.message.edit(embed=embed, view=self, attachments=[])
             logger.error(f"Ошибка перегенерации для {interaction.user.id}: {str(e)}")
 
 class SettingsView(View):
@@ -534,7 +538,7 @@ class SettingsView(View):
         self.generate_button.callback = self.generate_button_callback
         self.add_item(self.generate_button)
 
-        self.prompt_button = Button(label="Добавить промпт", style=ButtonStyle.primary, custom_id="open_prompt", row=3)
+        self.prompt_button = Button(label="Укажите промпт", style=ButtonStyle.primary, custom_id="open_prompt", row=3)
         self.prompt_button.callback = self.open_prompt_button
         self.add_item(self.prompt_button)
 
@@ -642,7 +646,7 @@ class SettingsView(View):
             self.disable_permanently()
             embed = Embed(title="⏳ Генерация", color=0x3498DB)
             embed.add_field(name="Прогресс", value=f"```{create_progress_bar(0)} 0%```", inline=False)
-            await interaction.response.edit_message(embed=embed, view=None)
+            await interaction.response.edit_message(embed=embed, view=None, attachments=[])
 
             if interaction.message is None:
                 embed = Embed(title="❌ Ошибка", description="Сообщение недоступно.", color=0xE74C3C)
@@ -652,28 +656,28 @@ class SettingsView(View):
             if any(word in self.prompt.lower() for word in CONFIG["forbidden_words"]) or \
                (self.negative_prompt and any(word in self.negative_prompt.lower() for word in CONFIG["forbidden_words"])):
                 embed = Embed(title="❌ Ошибка", description="Обнаружены запрещённые слова.", color=0xE74C3C)
-                await interaction.message.edit(embed=embed, view=None)
+                await interaction.message.edit(embed=embed, view=None, attachments=[])
                 return
 
             if self.steps < 1 or self.steps > 100:
                 embed = Embed(title="❌ Ошибка", description="Шаги должны быть в диапазоне 1–100.", color=0xE74C3C)
-                await interaction.message.edit(embed=embed, view=None)
+                await interaction.message.edit(embed=embed, view=None, attachments=[])
                 return
 
             if self.cfg_scale < 1.0 or self.cfg_scale > 20.0:
                 embed = Embed(title="❌ Ошибка", description="CFG Scale должен быть в диапазоне 1.0–20.0.", color=0xE74C3C)
-                await interaction.message.edit(embed=embed, view=None)
+                await interaction.message.edit(embed=embed, view=None, attachments=[])
                 return
 
             if self.model not in CONFIG["models"]:
                 embed = Embed(title="❌ Ошибка", description=f"Модель должна быть одной из: {', '.join(CONFIG['models'].keys())}.", color=0xE74C3C)
-                await interaction.message.edit(embed=embed, view=None)
+                await interaction.message.edit(embed=embed, view=None, attachments=[])
                 return
 
             try:
                 if generation_queue.full():
                     embed = Embed(title="⌛ Очередь", description="Очередь заполнена, пожалуйста, подождите.", color=0x3498DB)
-                    await interaction.message.edit(embed=embed, view=None)
+                    await interaction.message.edit(embed=embed, view=None, attachments=[])
                     await generation_queue.put(interaction)
 
                 async with command_lock:
@@ -692,7 +696,7 @@ class SettingsView(View):
                     )
             except asyncio.QueueFull:
                 embed = Embed(title="❌ Ошибка", description="Очередь заполнена.", color=0xE74C3C)
-                await interaction.message.edit(embed=embed, view=None)
+                await interaction.message.edit(embed=embed, view=None, attachments=[])
 
 def create_command(bot_client):
     """Создает группу команд для генерации изображений."""
@@ -705,12 +709,12 @@ def create_command(bot_client):
         await interaction.response.defer(ephemeral=ephemeral)
 
         if bot_client is None:
-            logger.error("bot_client не предоставлен.")
+            logger.error("bot_client не предоставлен")
             embed = Embed(title="❌ Ошибка", description="Внутренняя ошибка бота.", color=0xE74C3C)
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        if not await check_bot_access(interaction, bot_client):
+        if not await restrict_command_execution(interaction, bot_client):
             return
 
         access_result, access_reason = await check_bot_access(interaction, bot_client)
