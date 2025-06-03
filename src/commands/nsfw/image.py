@@ -76,7 +76,7 @@ async def update_progress(interaction: discord.Interaction, progress: float, mes
 async def generate_initial_prompt() -> str:
     """Генерирует начальный промпт с помощью модели, используя максимальный лимит символов."""
     client = AsyncClient(provider=PollinationsAI)
-    for model in ["llamascout", "deepseek"]:
+    for model in ["unity"]:
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -87,7 +87,7 @@ async def generate_initial_prompt() -> str:
                             "Generate a detailed, vivid, and expressive image generation prompt with rich descriptions of colors, lighting, textures, environment, emotional tone, and artistic style. "
                             "Include nuanced details such as specific weather conditions, time of day, material properties, and composition to create a visually compelling scene. "
                             "Ensure the prompt is safe, coherent, and suitable for image generation. Avoid NSFW content. "
-                            f"Target a length close to {CONFIG['embed_char_limit']} characters, but do not exceed it. "
+                            f"Target a length close to {CONFIG['embed_char_limit']} characters, but do not exceed it. Always send an answer, whatever it is, do not leave any comments from yourself."
                             "Return only the prompt, no Markdown or additional formatting."
                         )
                     },
@@ -107,7 +107,7 @@ async def generate_initial_prompt() -> str:
 async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
     """Улучшает промпт, добавляя детали и выразительность, используя максимальный лимит символов."""
     client = AsyncClient(provider=PollinationsAI)
-    for model in ["llamascout", "deepseek"]:
+    for model in ["unity"]:
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -118,7 +118,7 @@ async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
                             "Enhance the provided image generation prompt by adding vivid, multi-layered details, including nuanced color palettes, dramatic or natural lighting effects, realistic or stylized textures, immersive environmental settings, a clear emotional tone, distinct artistic styles, and thoughtful composition and perspective. "
                             f"{'Allow tasteful NSFW elements if present in the original prompt.' if nsfw_allowed else 'Avoid NSFW content.'} "
                             f"Target a length close to {CONFIG['embed_char_limit']} characters, but do not exceed it. "
-                            "Ensure the prompt remains coherent, expressive, and suitable for image generation. "
+                            "Ensure the prompt remains coherent, expressive, and suitable for image generation. Always send an answer, whatever it is, do not leave any comments from yourself."
                             "Return only the improved prompt, no Markdown or additional formatting."
                         )
                     },
