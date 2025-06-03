@@ -565,24 +565,31 @@ class SettingsView(View):
             self.disable_all_buttons()
             self.improve_prompt_button.label = "⌛ Улучшение..."
             await interaction.response.edit_message(view=self)
-            improved = await improve_prompt(self.prompt, nsfw_allowed=True)
-            self.prompt = improved
-            self.is_prompt_improved = True
-            self.improve_prompt_flag = True
-            self.improve_prompt_button.disabled = True  # Отключаем кнопку "Улучшить промпт" после использования
-            embed = Embed(title="⚙️ Настройки", color=0x3498DB)
-            max_description_length = CONFIG["embed_description_limit"]
-            description = f"**📝 Улучшенный промпт**:\n{self.prompt}"
-            description = description[:max_description_length]
-            if len(description) == max_description_length:
-                description = description[:-3] + "..."
-            embed.description = description
-            embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
-            embed.add_field(name="📏 Соотношение", value=f"> `{self.view.aspect_ratio}`", inline=True)
-            embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
-            embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
-            self.enable_all_buttons()
-            await interaction.message.edit(embed=embed, view=self)
+            try:
+                improved = await improve_prompt(self.prompt, nsfw_allowed=True)
+                self.prompt = improved
+                self.is_prompt_improved = True
+                self.improve_prompt_flag = True
+                self.improve_prompt_button.disabled = True  # Отключаем кнопку "Улучшить промпт" после использования
+                embed = Embed(title="⚙️ Настройки", color=0x3498DB)
+                max_description_length = CONFIG["embed_description_limit"]
+                description = f"**📝 Улучшенный промпт**:\n{self.prompt}"
+                description = description[:max_description_length]
+                if len(description) == max_description_length:
+                    description = description[:-3] + "..."
+                embed.description = description
+                embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
+                embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
+                embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
+                embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
+                self.enable_all_buttons()
+                await interaction.message.edit(embed=embed, view=self)
+            except Exception as e:
+                logger.error(f"Ошибка улучшения промпта для пользователя {interaction.user.id}: {str(e)}")
+                embed = Embed(title="❌ Ошибка", description="Не удалось улучшить промпт.", color=0xE74C3C)
+                await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+                self.enable_all_buttons()
+                await interaction.message.edit(view=self)
 
     async def generate_button_callback(self, interaction: discord.Interaction):
         async with self.view_lock:
