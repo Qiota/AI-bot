@@ -31,7 +31,7 @@ SUPPORTED_MIME_TYPES = {
     'video/webm': '.webm'
 }
 REQUEST_TIMEOUT = 10
-AUTOCOMPLETE_TIMEOUT = 1
+AUTOCOMPLETE_TIMEOUT = 2.5  # Увеличено до 2.5 секунд
 SEMAPHORE_LIMIT = 10
 INACTIVITY_TIMEOUT = 3600
 TAG_CACHE_TTL = 7200
@@ -766,12 +766,13 @@ async def fetch_tag_suggestions(session: aiohttp.ClientSession, query: str) -> L
     url = "https://danbooru.donmai.us/tags.json"
     params = {
         "search[hide_empty]": "yes",
-        "search[order]": "count"
+        "search[order]": "count",
+        "limit": 25  # Ограничение количества тегов для автодополнения
     }
     if query:
         params["search[name_matches]"] = f"{query}*"
     else:
-        params["limit"] = 100
+        params["limit"] = 25  # Устанавливаем тот же лимит для пустого запроса
 
     logging.debug(f"Запрос тегов с параметрами: {params}")
 
@@ -806,24 +807,31 @@ async def tags_autocomplete(interaction: discord.Interaction, current: str) -> L
             logging.debug(f"Запрос автодополнения '{current}' слишком длинный")
             return []
 
+        # Проверка, не было ли взаимодействие уже обработано
+        if interaction.response.is_done():
+            logging.debug(f"Взаимодействие для автодополнения '{current}' уже обработано")
+            return []
+
         tags = current.strip().split()
         query = tags[-1] if tags else ""
         cache_key = query.lower() or "__all_tags__"
 
-        # Проверка локального кэша автодополнения
-        if cache_key in autocomplete_cache:
-            suggestions = autocomplete_cache[cache_key]
-            logging.debug(f"Использован локальный кэш автодополнения для '{query}': {len(suggestions)} тегов")
-        else:
-            # Проверка глобального кэша тегов
-            if cache_key in tag_suggestions_cache:
-                suggestions = tag_suggestions_cache[cache_key]
-                logging.debug(f"Использован глобальный кэш для автодополнения '{query}': {len(suggestions)} тегов")
+        # Используем блокировку для синхронизации доступа к кэшу
+        async with asyncio.Lock():
+            # Проверка локального кэша автодополнения
+            if cache_key in autocomplete_cache:
+                suggestions = autocomplete_cache[cache_key]
+                logging.debug(f"Использован локальный кэш автодополнения для '{query}': {len(suggestions)} тегов")
             else:
-                async with aiohttp_session() as session:
-                    suggestions = await fetch_tag_suggestions(session, query)
-            autocomplete_cache[cache_key] = suggestions
-            logging.debug(f"Добавлено в локальный кэш автодополнения для '{query}': {len(suggestions)} тегов")
+                # Проверка глобального кэша тегов
+                if cache_key in tag_suggestions_cache:
+                    suggestions = tag_suggestions_cache[cache_key]
+                    logging.debug(f"Использован глобальный кэш для автодополнения '{query}': {len(suggestions)} тегов")
+                else:
+                    async with aiohttp_session() as session:
+                        suggestions = await fetch_tag_suggestions(session, query)
+                    autocomplete_cache[cache_key] = suggestions
+                    logging.debug(f"Добавлено в локальный кэш автодополнения для '{query}': {len(suggestions)} тегов")
 
         prefix = ' '.join(tags[:-1]) + ' ' if tags[:-1] else ''
         choices = [
@@ -833,6 +841,16 @@ async def tags_autocomplete(interaction: discord.Interaction, current: str) -> L
             )
             for tag, _, formatted_count in suggestions[:25]
         ]
+
+        # Отправляем ответ только если взаимодействие еще активно
+        try:
+            await interaction.response.autocomplete(choices)
+        except discord.errors.InteractionResponded:
+            logging.debug(f"Взаимодействие для '{current}' уже обработано")
+            return []
+        except discord.errors.NotFound as e:
+            logging.debug(f"Взаимодействие для '{current}' устарело: {e}")
+            return []
 
         logging.debug(f"Автодополнение для '{current}' выполнено за {asyncio.get_event_loop().time() - start_time:.2f} сек")
         return choices
@@ -855,7 +873,7 @@ async def disable_previous_view(user_id: int) -> None:
             logging.debug(f"Кнопки удалены из предыдущего сообщения для пользователя {user_id}")
         except discord.HTTPException as e:
             logging.error(f"Ошибка при удалении кнопок из предыдущего сообщения: {e}")
-    
+
     if user_id in active_views:
         del active_views[user_id]
         logging.debug(f"Предыдущее представление для пользователя {user_id} отключено")
