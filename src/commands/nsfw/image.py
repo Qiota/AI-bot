@@ -2,7 +2,7 @@ import discord
 from discord import app_commands, File, ButtonStyle, Embed
 from discord.ui import Modal, TextInput, Select, Button, View
 from g4f.client import AsyncClient
-from g4f.Provider import ImageLabs, Websim
+from g4f.Provider import ImageLabs, LegacyLMArena
 from io import BytesIO
 import aiohttp
 from asyncio import Lock, Queue
