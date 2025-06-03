@@ -75,7 +75,7 @@ async def update_progress(interaction: discord.Interaction, progress: float, mes
 
 async def generate_initial_prompt() -> str:
     """Генерирует начальный промпт с помощью модели, используя максимальный лимит символов."""
-    client = AsyncClient(provider=Websim)
+    client = AsyncClient(provider=LegacyLMArena)
     for model in ["gemini-1.5-pro", "gemini-1.5-flash"]:
         try:
             response = await client.chat.completions.create(
@@ -106,7 +106,7 @@ async def generate_initial_prompt() -> str:
 
 async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
     """Улучшает промпт, добавляя детали и выразительность, используя максимальный лимит символов."""
-    client = AsyncClient(provider=Websim)
+    client = AsyncClient(provider=LegacyLMArena)
     for model in ["gemini-1.5-pro", "gemini-1.5-flash"]:
         try:
             response = await client.chat.completions.create(
