@@ -13,6 +13,7 @@ import PIL.ImageEnhance
 import io
 import os
 import re
+import time
 from ...systemLog import logger
 from ..restrict import check_bot_access, restrict_command_execution
 
@@ -46,9 +47,12 @@ CONFIG = {
         "stable-diffusion-v1-5": "Stable Diffusion v1.5"
     },
     "forbidden_words": ["loli"],
-    "embed_description_limit": 2000,  # Лимит символов для description в Embed
     "prompt_max_length": 1000,
-    "negative_prompt_max_length": 500
+    "negative_prompt_max_length": 500,
+    "discord_embed_limits": {
+        "description": 4096,  # Максимум для description в Embed
+        "total": 6000  # Общий лимит символов для Embed
+    }
 }
 
 # Создание временной директории
@@ -69,7 +73,7 @@ async def update_progress(interaction: discord.Interaction, progress: float, mes
     embed = Embed(title="⏳ Генерация", color=0x3498DB)
     embed.add_field(name="Прогресс", value=f"```{create_progress_bar(progress)} {int(progress * 100)}%```", inline=False)
     try:
-        await message.edit(embed=embed)
+        await message.edit(embed=embed, view=None)
     except discord.errors.NotFound:
         pass
 
@@ -87,7 +91,6 @@ async def generate_initial_prompt() -> str:
                             "Generate a detailed, vivid, and expressive image generation prompt with rich descriptions of colors, lighting, textures, environment, emotional tone, and artistic style. "
                             "Include nuanced details such as specific weather conditions, time of day, material properties, and composition to create a visually compelling scene. "
                             "Ensure the prompt is safe, coherent, and suitable for image generation. Avoid NSFW content. "
-                            f"Target a length close to {CONFIG['embed_description_limit']} characters, but do not exceed it. "
                             "Return only the prompt, no Markdown or additional formatting."
                         )
                     },
@@ -96,13 +99,13 @@ async def generate_initial_prompt() -> str:
                 max_tokens=900,
                 temperature=0.7
             )
-            prompt = response.choices[0].message.content.strip()[:CONFIG["embed_description_limit"]]
+            prompt = response.choices[0].message.content.strip()
             cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', prompt).strip()
             return cleaned if cleaned else CONFIG["default_prompt"]
         except Exception as e:
-            logger.error(f"Ошибка генерации промпта с {model}: {e}")
+            logger.error(f"Ошибка генерации промпта с {model}: {str(e)}")
             continue
-    return CONFIG["default_prompt"]
+    return None
 
 async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
     """Улучшает промпт, добавляя детали и выразительность."""
@@ -117,9 +120,8 @@ async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
                         "content": (
                             "Enhance the provided image generation prompt by adding vivid, multi-layered details, including nuanced color palettes, dramatic or natural lighting effects, realistic or stylized textures, immersive environmental settings, a clear emotional tone, distinct artistic styles, and thoughtful composition and perspective. "
                             f"{'Allow tasteful NSFW elements if present in the original prompt.' if nsfw_allowed else 'Avoid NSFW content.'} "
-                            f"Target a length close to {CONFIG['embed_description_limit']} characters, but do not exceed it. "
-                            "Ensure the prompt remains coherent, expressive, and suitable for image generation. "
-                            "Return only the improved prompt, no Markdown or additional formatting."
+                            "Ensure the prompt remains coherent, expressive, and suitable for image generation."
+                            "Return only the enhanced prompt, no Markdown or additional formatting."
                         )
                     },
                     {"role": "user", "content": f"Enhance: {prompt}."}
@@ -127,13 +129,37 @@ async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
                 max_tokens=900,
                 temperature=0.6
             )
-            improved = response.choices[0].message.content.strip()[:CONFIG["embed_description_limit"]]
+            improved = response.choices[0].message.content.strip()
             cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', improved).strip()
-            return cleaned if cleaned else prompt
+            return cleaned if improved else prompt
         except Exception as e:
             logger.error(f"Ошибка улучшения с {model}: {e}")
             continue
     return prompt
+
+async def truncate_embed(embed: discord.Embed) -> discord.Embed:
+    """Обрезает содержимое Embed, чтобы уложиться в лимиты Discord."""
+    max_description_length = CONFIG["discord_embed_limits"]["description"]
+    total_limit = CONFIG["discord_embed_limits"]["total"]
+
+    if embed.description and len(embed.description) > max_description_length:
+        embed.description = embed.description[:max_description_length - 3] + "..."
+
+    total_chars = (
+        len(embed.title or "") +
+        len(embed.description or "") +
+        sum(len(field.name) + len(field.value) for field in embed.fields) +
+        len(embed.footer.text or "")
+    )
+
+    if total_chars > total_limit:
+        excess = total_chars - total_limit + 3
+        if embed.description:
+            embed.description = embed.description[:-excess] + "..."
+        else:
+            embed.description = "Содержимое слишком длинное и было урезано."
+
+    return embed
 
 async def generate_image(
     interaction: discord.Interaction,
@@ -212,22 +238,8 @@ async def generate_image(
         embed = Embed(title="🎨 Готово!", color=0x1ABC9C)
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/3659/3659898.png")
 
-        # Формируем описание с промптом (до 2000 символов)
-        max_description_length = CONFIG["embed_description_limit"]
-        if improve_prompt_flag and final_prompt != original_prompt:
-            description = (
-                f"**📝 Исходный промпт**:\n{original_prompt}\n\n"
-                f"**✨ Улучшенный промпт**:\n{final_prompt}"
-            )
-            description = description[:max_description_length]
-            if len(description) == max_description_length:
-                description = description[:-3] + "..."
-        else:
-            description = f"**📝 Промпт**:\n{final_prompt}"
-            description = description[:max_description_length]
-            if len(description) == max_description_length:
-                description = description[:-3] + "..."
-        embed.description = description
+        # Только конечный промпт в description с ```
+        embed.description = f"**📝 Промпт**:\n```{final_prompt}```"
 
         embed.add_field(name="🤖 Модель", value=f"**{CONFIG['models'][model]}**", inline=True)
         embed.add_field(name="📏 Размеры", value=f"**{aspect_ratio[0]}x{aspect_ratio[1]}**", inline=True)
@@ -235,24 +247,20 @@ async def generate_image(
         embed.add_field(name="⚖️ CFG", value=f"**{cfg_scale}**", inline=True)
         embed.set_footer(text="ImageLabs")
 
-        # Проверяем общий лимит символов Embed
-        total_chars = (
-            len(embed.title or "") +
-            len(embed.description or "") +
-            sum(len(field.name) + len(field.value) for field in embed.fields) +
-            len(embed.footer.text or "")
-        )
-        if total_chars > 6000:
-            logger.warning(f"Общий размер Embed превышает 6000 символов: {total_chars}")
-            embed.description = "Слишком длинный текст, сокращён."
-            embed.clear_fields()
-            embed.add_field(name="🤖 Модель", value=f"**{CONFIG['models'][model]}**", inline=True)
-            embed.add_field(name="📏 Размеры", value=f"**{aspect_ratio[0]}x{aspect_ratio[1]}**", inline=True)
-            embed.add_field(name="🔄 Шаги", value=f"**{steps}**", inline=True)
-            embed.add_field(name="⚖️ CFG", value=f"**{cfg_scale}**", inline=True)
+        embed = await truncate_embed(embed)
 
         await update_progress(interaction, 1.0, message, ephemeral)
-        response_view = ImageResponseView(interaction.user.id, ephemeral)
+        response_view = ImageResponseView(
+            user_id=interaction.user.id,
+            ephemeral=ephemeral,
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            negative_prompt=negative_prompt,
+            model=model,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            improve_prompt_flag=improve_prompt_flag
+        )
         await message.edit(
             content=f"{interaction.user.mention}",
             embed=embed,
@@ -269,7 +277,7 @@ async def generate_image(
             embed = Embed(title="❌ Ошибка", description="Обнаружен явный контент.", color=0xE74C3C)
             await message.edit(embed=embed, view=None)
         else:
-            embed = Embed(title="❌ Ошибка", description=error_str[:CONFIG["embed_description_limit"]], color=0xE74C3C)
+            embed = Embed(title="❌ Ошибка", description=error_str[:CONFIG["discord_embed_limits"]["description"]], color=0xE74C3C)
             await message.edit(embed=embed, view=None)
         logger.error(f"Ошибка /image для {interaction.user.id}: {error_str}")
 
@@ -313,12 +321,8 @@ class PromptModal(Modal):
             self.view.negative_prompt = self.negative_prompt_input.value or CONFIG["default_negative_prompt"]
             self.view.is_prompt_improved = False
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
-            max_description_length = CONFIG["embed_description_limit"]
-            description = f"**📝 Промпт**:\n{self.view.prompt}"
-            description = description[:max_description_length]
-            if len(description) == max_description_length:
-                description = description[:-3] + "..."
-            embed.description = description
+            embed.description = f"**📝 Промпт**:\n```{self.view.prompt}```"
+            embed = await truncate_embed(embed)
             embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.view.model]}`", inline=True)
             embed.add_field(name="📏 Соотношение", value=f"> `{self.view.aspect_ratio}`", inline=True)
             embed.add_field(name="🔄 Шаги", value=f"> `{self.view.steps}`", inline=True)
@@ -369,12 +373,8 @@ class SettingsModal(Modal):
                 await interaction.followup.send(embed=embed, ephemeral=self.view.ephemeral)
                 return
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
-            max_description_length = CONFIG["embed_description_limit"]
-            description = f"**📝 Промпт**:\n{self.view.prompt}"
-            description = description[:max_description_length]
-            if len(description) == max_description_length:
-                description = description[:-3] + "..."
-            embed.description = description
+            embed.description = f"**📝 Промпт**:\n```{self.view.prompt}```"
+            embed = await truncate_embed(embed)
             embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.view.model]}`", inline=True)
             embed.add_field(name="📏 Соотношение", value=f"> `{self.view.aspect_ratio}`", inline=True)
             embed.add_field(name="🔄 Шаги", value=f"> `{self.view.steps}`", inline=True)
@@ -384,17 +384,41 @@ class SettingsModal(Modal):
 
 class ImageResponseView(View):
     """View для взаимодействия с готовым изображением."""
-    def __init__(self, user_id: int, ephemeral: bool):
-        super().__init__(timeout=300)
+    def __init__(
+        self,
+        user_id: int,
+        ephemeral: bool,
+        prompt: str,
+        aspect_ratio: Tuple[int, int],
+        negative_prompt: str,
+        model: str,
+        steps: int,
+        cfg_scale: float,
+        improve_prompt_flag: bool
+    ):
+        super().__init__(timeout=600)  # 10 минут
         self.user_id = user_id
         self.ephemeral = ephemeral
+        self.prompt = prompt
+        self.aspect_ratio = aspect_ratio
+        self.negative_prompt = negative_prompt
+        self.model = model
+        self.steps = steps
+        self.cfg_scale = cfg_scale
+        self.improve_prompt_flag = improve_prompt_flag
         self.message = None
+        self.last_regenerate_time = 0
+        self.cooldown = 60  # 1 минута
 
         if not ephemeral:
             self.delete_button = Button(label="🗑️ Удалить", style=ButtonStyle.danger, custom_id="delete_image")
             self.delete_button.callback = self.delete_message_callback
             self.add_item(self.delete_button)
             asyncio.create_task(self.disable_delete_button())
+
+        self.regenerate_button = Button(label="🔄 Перегенерировать", style=ButtonStyle.primary, custom_id="regenerate_image")
+        self.regenerate_button.callback = self.regenerate_button_callback
+        self.add_item(self.regenerate_button)
 
     async def disable_delete_button(self):
         """Отключает кнопку удаления через 60 секунд."""
@@ -406,7 +430,7 @@ class ImageResponseView(View):
         except discord.errors.NotFound:
             pass
         except Exception as e:
-            logger.error(f"Ошибка отключения кнопки: {e}")
+            logger.error(f"Ошибка отключения кнопки удаления: {e}")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -425,9 +449,49 @@ class ImageResponseView(View):
             await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
             logger.error(f"Ошибка удаления: {e}")
 
+    async def regenerate_button_callback(self, interaction: discord.Interaction):
+        current_time = time.time()
+        if current_time - self.last_regenerate_time < self.cooldown:
+            remaining = int(self.cooldown - (current_time - self.last_regenerate_time))
+            embed = Embed(title="⏳ Кулдаун", description=f"Подождите {remaining} секунд перед повторной генерацией.", color=0x3498DB)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        self.regenerate_button.disabled = True
+        self.regenerate_button.label = "⌛ Генерация..."
+        await interaction.response.edit_message(view=self)
+
+        try:
+            embed = Embed(title="⏳ Генерация", color=0x3498DB)
+            embed.add_field(name="Прогресс", value=f"```{create_progress_bar(0)} 0%```", inline=False)
+            await interaction.message.edit(embed=embed, view=None)
+
+            await generate_image(
+                interaction=interaction,
+                prompt=self.prompt,
+                aspect_ratio=self.aspect_ratio,
+                negative_prompt=self.negative_prompt,
+                model=self.model,
+                steps=self.steps,
+                cfg_scale=self.cfg_scale,
+                improve_prompt_flag=self.improve_prompt_flag,
+                ephemeral=self.ephemeral,
+                view=self,
+                message=interaction.message
+            )
+            self.last_regenerate_time = time.time()
+            self.regenerate_button.disabled = False
+            self.regenerate_button.label = "🔄 Перегенерировать"
+        except Exception as e:
+            self.regenerate_button.disabled = False
+            self.regenerate_button.label = "🔄 Перегенерировать"
+            embed = Embed(title="❌ Ошибка", description=str(e)[:CONFIG["discord_embed_limits"]["description"]], color=0xE74C3C)
+            await interaction.message.edit(embed=embed, view=self)
+            logger.error(f"Ошибка перегенерации для {interaction.user.id}: {str(e)}")
+
 class SettingsView(View):
     """View для настройки параметров генерации."""
-    def __init__(self, bot_client, ephemeral: bool, user_id: int, channel_id: int, message_id: int):
+    def __init__(self, bot_client, ephemeral: bool, user_id: int, channel_id: int, message_id: str = None):
         super().__init__(timeout=300)
         self.bot_client = bot_client
         self.ephemeral = ephemeral
@@ -441,7 +505,7 @@ class SettingsView(View):
         self.steps = CONFIG["default_settings"]["steps"]
         self.cfg_scale = CONFIG["default_settings"]["cfg_scale"]
         self.improve_prompt_flag = CONFIG["default_settings"]["improve_prompt"]
-        self.is_prompt_improved = False  # Отслеживание улучшения промпта
+        self.is_prompt_improved = False
         self.view_lock = Lock()
 
         self.model_select = Select(
@@ -455,22 +519,22 @@ class SettingsView(View):
 
         self.aspect_ratio_select = Select(
             placeholder="Выберите соотношение сторон",
-            options=[discord.SelectOption(label=f"{k}", value=k) for k, v in CONFIG["aspect_ratios"].items()],
+            options=[discord.SelectOption(label=k, value=k) for k in CONFIG["aspect_ratios"]],
             custom_id="aspect_ratio_select",
             row=1
         )
         self.aspect_ratio_select.callback = self.aspect_ratio_select_callback
         self.add_item(self.aspect_ratio_select)
 
-        self.improve_prompt_button = Button(label="Улучшить промпт", style=ButtonStyle.primary, custom_id="improve_prompt", row=2)
-        self.improve_prompt_button.callback = self.improve_prompt_button_callback
-        self.add_item(self.improve_prompt_button)
+        self.improve_button = Button(label="Улучшить промпт", style=ButtonStyle.primary, custom_id="improve_prompt", row=2)
+        self.improve_button.callback = self.improve_button_callback
+        self.add_item(self.improve_button)
 
         self.generate_button = Button(label="Генерировать", style=ButtonStyle.success, custom_id="generate_image", row=2)
         self.generate_button.callback = self.generate_button_callback
         self.add_item(self.generate_button)
 
-        self.prompt_button = Button(label="Укажите Промпт", style=ButtonStyle.green, custom_id="open_prompt", row=3)
+        self.prompt_button = Button(label="Добавить промпт", style=ButtonStyle.primary, custom_id="open_prompt", row=3)
         self.prompt_button.callback = self.open_prompt_button
         self.add_item(self.prompt_button)
 
@@ -478,29 +542,21 @@ class SettingsView(View):
         self.settings_button.callback = self.open_settings_button
         self.add_item(self.settings_button)
 
-    def disable_all_buttons(self):
-        """Отключает все кнопки и селекты."""
-        self.model_select.disabled = True
-        self.aspect_ratio_select.disabled = True
-        self.improve_prompt_button.disabled = self.is_prompt_improved  # Отключаем в зависимости от состояния
-        self.generate_button.disabled = True
-        self.prompt_button.disabled = True
-        self.settings_button.disabled = True
-
-    def enable_all_buttons(self):
-        """Включает все кнопки и селекты, кроме улучшенного промпта, если он уже обработан."""
-        self.model_select.disabled = False
-        self.aspect_ratio_select.disabled = False
-        self.improve_prompt_button.disabled = self.is_prompt_improved
-        self.generate_button.disabled = False
-        self.prompt_button.disabled = False
-        self.settings_button.disabled = False
-
-    def disable_all_permanently(self):
-        """Полностью отключает все элементы управления."""
+    def disable_all(self):
+        """Отключает все элементы управления."""
         for item in self.children:
             item.disabled = True
-        self.stop()  # Останавливаем View, чтобы предотвратить дальнейшие взаимодействия
+
+    def enable_all(self):
+        """Включает все элементы управления, кроме улучшенного промпта, если он обработан."""
+        for item in self.children:
+            item.disabled = False
+        self.improve_button.disabled = self.is_prompt_improved
+
+    def disable_permanently(self):
+        """Полностью отключает и останавливает View."""
+        self.disable_all()
+        self.stop()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -510,40 +566,32 @@ class SettingsView(View):
 
     async def model_select_callback(self, interaction: discord.Interaction):
         async with self.view_lock:
-            self.disable_all_buttons()
+            self.disable_all()
             await interaction.response.edit_message(view=self)
             self.model = self.model_select.values[0]
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
-            max_description_length = CONFIG["embed_description_limit"]
-            description = f"**📝 Промпт**:\n{self.prompt}"
-            description = description[:max_description_length]
-            if len(description) == max_description_length:
-                description = description[:-3] + "..."
-            embed.description = description
+            embed.description = f"**📝 Промпт**:\n```{self.prompt}```"
+            embed = await truncate_embed(embed)
             embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
             embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
             embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
             embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
-            self.enable_all_buttons()
+            self.enable_all()
             await interaction.message.edit(embed=embed, view=self)
 
     async def aspect_ratio_select_callback(self, interaction: discord.Interaction):
         async with self.view_lock:
-            self.disable_all_buttons()
+            self.disable_all()
             await interaction.response.edit_message(view=self)
             self.aspect_ratio = self.aspect_ratio_select.values[0]
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
-            max_description_length = CONFIG["embed_description_limit"]
-            description = f"**📝 Промпт**:\n{self.prompt}"
-            description = description[:max_description_length]
-            if len(description) == max_description_length:
-                description = description[:-3] + "..."
-            embed.description = description
+            embed.description = f"**📝 Промпт**:\n```{self.prompt}```"
+            embed = await truncate_embed(embed)
             embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
             embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
             embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
             embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
-            self.enable_all_buttons()
+            self.enable_all()
             await interaction.message.edit(embed=embed, view=self)
 
     async def open_prompt_button(self, interaction: discord.Interaction):
@@ -556,46 +604,45 @@ class SettingsView(View):
             modal = SettingsModal(self.bot_client, self, self.user_id)
             await interaction.response.send_modal(modal)
 
-    async def improve_prompt_button_callback(self, interaction: discord.Interaction):
+    async def improve_button_callback(self, interaction: discord.Interaction):
         async with self.view_lock:
             if self.is_prompt_improved:
-                await interaction.response.send_message("❌ Промпт уже был улучшен в этом вызове команды.", ephemeral=True)
+                await interaction.response.send_message("❌ Промпт уже улучшен.", ephemeral=True)
                 return
 
-            self.disable_all_buttons()
-            self.improve_prompt_button.label = "⌛ Улучшение..."
+            self.disable_all()
+            self.improve_button.label = "⌛ Улучшение..."
             await interaction.response.edit_message(view=self)
+
             try:
                 improved = await improve_prompt(self.prompt, nsfw_allowed=True)
                 self.prompt = improved
                 self.is_prompt_improved = True
                 self.improve_prompt_flag = True
-                self.improve_prompt_button.disabled = True  # Отключаем кнопку "Улучшить промпт" после использования
+                self.improve_button.label = "Улучшить промпт"
+                self.improve_button.disabled = True
                 embed = Embed(title="⚙️ Настройки", color=0x3498DB)
-                max_description_length = CONFIG["embed_description_limit"]
-                description = f"**📝 Улучшенный промпт**:\n{self.prompt}"
-                description = description[:max_description_length]
-                if len(description) == max_description_length:
-                    description = description[:-3] + "..."
-                embed.description = description
+                embed.description = f"**📝 Улучшенный промпт**:\n```{self.prompt}```"
+                embed = await truncate_embed(embed)
                 embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
                 embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
                 embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
                 embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
-                self.enable_all_buttons()
+                self.enable_all()
                 await interaction.message.edit(embed=embed, view=self)
             except Exception as e:
-                logger.error(f"Ошибка улучшения промпта для пользователя {interaction.user.id}: {str(e)}")
+                self.improve_button.label = "Улучшить промпт"
+                self.enable_all()
                 embed = Embed(title="❌ Ошибка", description="Не удалось улучшить промпт.", color=0xE74C3C)
-                await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
-                self.enable_all_buttons()
-                await interaction.message.edit(view=self)
+                await interaction.message.edit(embed=embed, view=self)
+                logger.error(f"Ошибка улучшения промпта для {interaction.user.id}: {str(e)}")
 
     async def generate_button_callback(self, interaction: discord.Interaction):
         async with self.view_lock:
-            self.disable_all_permanently()  # Полностью отключаем все кнопки и селекты
-            self.generate_button.label = "⌛ Генерация..."
-            await interaction.response.edit_message(view=self)
+            self.disable_permanently()
+            embed = Embed(title="⏳ Генерация", color=0x3498DB)
+            embed.add_field(name="Прогресс", value=f"```{create_progress_bar(0)} 0%```", inline=False)
+            await interaction.response.edit_message(embed=embed, view=None)
 
             if interaction.message is None:
                 embed = Embed(title="❌ Ошибка", description="Сообщение недоступно.", color=0xE74C3C)
@@ -626,7 +673,7 @@ class SettingsView(View):
             try:
                 if generation_queue.full():
                     embed = Embed(title="⌛ Очередь", description="Очередь заполнена, пожалуйста, подождите.", color=0x3498DB)
-                    await interaction.message.edit(embed=embed, view=self)
+                    await interaction.message.edit(embed=embed, view=None)
                     await generation_queue.put(interaction)
 
                 async with command_lock:
@@ -655,16 +702,15 @@ def create_command(bot_client):
     @group.command(name="generate", description="Генерирует изображение на основе параметров")
     @app_commands.describe(ephemeral="Скрыть сообщения от других пользователей")
     async def generate(interaction: discord.Interaction, ephemeral: bool = False):
-        # Немедленно откладываем ответ, чтобы избежать ошибки Unknown interaction
         await interaction.response.defer(ephemeral=ephemeral)
 
         if bot_client is None:
-            logger.error("bot_client не предоставлен")
+            logger.error("bot_client не предоставлен.")
             embed = Embed(title="❌ Ошибка", description="Внутренняя ошибка бота.", color=0xE74C3C)
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        if not await restrict_command_execution(interaction, bot_client):
+        if not await check_bot_access(interaction, bot_client):
             return
 
         access_result, access_reason = await check_bot_access(interaction, bot_client)
@@ -678,14 +724,10 @@ def create_command(bot_client):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        view = SettingsView(bot_client, ephemeral, interaction.user.id, interaction.channel_id, None)
+        view = SettingsView(bot_client, ephemeral, interaction.user.id, interaction.channel_id)
         embed = Embed(title="⚙️ Настройки", color=0x3498DB)
-        max_description_length = CONFIG["embed_description_limit"]
-        description = f"**📝 Промпт**:\n{view.prompt}"
-        description = description[:max_description_length]
-        if len(description) == max_description_length:
-            description = description[:-3] + "..."
-        embed.description = description
+        embed.description = f"**📝 Промпт**:\n```{view.prompt}```"
+        embed = await truncate_embed(embed)
         embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][view.model]}`", inline=True)
         embed.add_field(name="📏 Соотношение", value=f"> `{view.aspect_ratio}`", inline=True)
         embed.add_field(name="🔄 Шаги", value=f"> `{view.steps}`", inline=True)
