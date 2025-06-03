@@ -2,7 +2,7 @@ import discord
 from discord import app_commands, File, ButtonStyle, Embed
 from discord.ui import Modal, TextInput, Select, Button, View
 from g4f.client import AsyncClient
-from g4f.Provider import ImageLabs, LegacyLMArena
+from g4f.Provider import ImageLabs, TeachAnything
 from io import BytesIO
 import aiohttp
 from asyncio import Lock, Queue
@@ -75,7 +75,7 @@ async def update_progress(interaction: discord.Interaction, progress: float, mes
 
 async def generate_initial_prompt() -> str:
     """Генерирует начальный промпт с помощью модели, используя максимальный лимит символов."""
-    client = AsyncClient(provider=LegacyLMArena)
+    client = AsyncClient(provider=TeachAnything)
     for model in ["gemini-1.5-pro", "gemini-1.5-flash"]:
         try:
             response = await client.chat.completions.create(
@@ -106,7 +106,7 @@ async def generate_initial_prompt() -> str:
 
 async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
     """Улучшает промпт, добавляя детали и выразительность, используя максимальный лимит символов."""
-    client = AsyncClient(provider=LegacyLMArena)
+    client = AsyncClient(provider=TeachAnything)
     for model in ["gemini-1.5-pro", "gemini-1.5-flash"]:
         try:
             response = await client.chat.completions.create(
