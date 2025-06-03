@@ -69,7 +69,7 @@ generation_queue = Queue(maxsize=5)
 def create_progress_bar(progress: float, length: int = 20) -> str:
     """Создает текстовую шкалу прогресса."""
     filled = int(length * progress)
-    return "█" * filled + "░" * (length - filled)
+    return "█" * filled + "□" * (length - filled)
 
 async def update_progress(interaction: discord.Interaction, progress: float, message: discord.Message, ephemeral: bool):
     """Обновляет сообщение с прогресс-баром."""
@@ -197,12 +197,11 @@ async def generate_image(
     success = False
     try:
         original_prompt = prompt
-        final_prompt = prompt
-        if improve_prompt_flag:
-            await update_progress(interaction, 0.1, message, ephemeral)
-            final_prompt = await improve_prompt(prompt, nsfw_allowed=True)
-            if not final_prompt or not isinstance(final_prompt, str):
-                final_prompt = prompt
+        # Всегда улучшаем промпт перед генерацией
+        await update_progress(interaction, 0.1, message, ephemeral)
+        final_prompt = await improve_prompt(prompt, nsfw_allowed=True)
+        if not final_prompt or not isinstance(final_prompt, str):
+            final_prompt = prompt
 
         params = {
             "model": model,
@@ -424,8 +423,8 @@ class SettingsModal(Modal):
             embed = await truncate_embed(embed)
             embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.view.model]}`", inline=True)
             embed.add_field(name="📏 Соотношение", value=f"> `{self.view.aspect_ratio}`", inline=True)
-            embed.add_field(name="🔄 Шаги", value=f"> `{self.view.steps}`", inline=True)
-            embed.add_field(name="⚖️ CFG", value=f"> `{self.view.cfg_scale}`", inline=True)
+            embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
+            embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
             self.view.enable_all()
             await interaction.message.edit(embed=embed, view=self.view)
 
