@@ -2,7 +2,7 @@ import discord
 from discord import app_commands, File, ButtonStyle, Embed
 from discord.ui import Modal, TextInput, Select, Button, View
 from g4f.client import AsyncClient
-from g4f.Provider import ImageLabs, TeachAnything
+from g4f.Provider import ImageLabs, PollinationsAI
 from io import BytesIO
 import aiohttp
 from asyncio import Lock, Queue
@@ -18,7 +18,7 @@ from ..restrict import check_bot_access, restrict_command_execution
 
 # Конфигурация параметров
 CONFIG = {
-    "max_file_size": 8 * 1024 * 1024,  # Максимальный размер файла (8 МБ)
+    "max_file_size": 10 * 1024 * 1024,  # Максимальный размер файла (10 МБ)
     "temp_dir": os.path.join("src", "temp_images"),
     "default_prompt": "A serene landscape with mountains and a clear sky, vibrant colors",
     "default_negative_prompt": (
@@ -75,8 +75,8 @@ async def update_progress(interaction: discord.Interaction, progress: float, mes
 
 async def generate_initial_prompt() -> str:
     """Генерирует начальный промпт с помощью модели, используя максимальный лимит символов."""
-    client = AsyncClient(provider=TeachAnything)
-    for model in ["gemini-1.5-pro", "gemini-1.5-flash"]:
+    client = AsyncClient(provider=PollinationsAI)
+    for model in ["llamascout", "deepseek"]:
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -106,8 +106,8 @@ async def generate_initial_prompt() -> str:
 
 async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
     """Улучшает промпт, добавляя детали и выразительность, используя максимальный лимит символов."""
-    client = AsyncClient(provider=TeachAnything)
-    for model in ["gemini-1.5-pro", "gemini-1.5-flash"]:
+    client = AsyncClient(provider=PollinationsAI)
+    for model in ["llamascout", "deepseek"]:
         try:
             response = await client.chat.completions.create(
                 model=model,
