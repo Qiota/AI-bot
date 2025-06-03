@@ -5,7 +5,7 @@ from g4f.client import AsyncClient
 from g4f.Provider import ImageLabs, PollinationsAI
 from io import BytesIO
 import aiohttp
-from asyncio import Lock, Queue
+from asyncio import Lock, Queue, TimeoutError
 import asyncio
 from typing import Tuple
 import PIL.Image
@@ -24,13 +24,15 @@ CONFIG = {
     "default_prompt": "A serene landscape with mountains and a clear sky, vibrant colors, Studio Ghibli style, ultra high quality",
     "default_negative_prompt": (
         "blurry, low quality, distorted, extra limbs, artifacts, noise, low resolution, oversaturated, "
-        "grainy, unnatural colors, deformed, missing limbs, text, watermark, logo, cropped"
-    ),
+        "grainy, unnatural colors, deformed, missing limbs, text, watermark, logo, cropped, overexposed, "
+        "underexposed, pixelated, jagged edges, compression artifacts, chromatic aberration, unrealistic, "
+        "poor lighting, unbalanced composition, awkward proportions, smudged, inconsistent style, glitches"
+    ),  # 30 слов для исключения дефектов
     "default_settings": {
         "model": "sdxl-turbo",
         "aspect_ratio": "4:3",
-        "steps": 50,  # Увеличено для повышения качества
-        "cfg_scale": 8.0,  # Оптимизировано для баланса детализации
+        "steps": 50,
+        "cfg_scale": 8.0,
         "improve_prompt": False,
         "brightness": 0,
         "contrast": 0
@@ -52,14 +54,15 @@ CONFIG = {
     "discord_embed_limits": {
         "description": 4096,  # Максимум для description в Embed
         "total": 6000  # Общий лимит символов для Embed
-    }
+    },
+    "api_timeout": 30  # Таймаут для запросов к API (в секундах)
 }
 
 # Создание временной директории
 if not os.path.exists(CONFIG["temp_dir"]):
     os.makedirs(CONFIG["temp_dir"])
 
-description = "Генерирует изображение, вдохновлённое editor.imagelabs.net"
+description = "Генерирует изображение, вдохновлённое editor.imagelabs.com"
 command_lock = Lock()
 generation_queue = Queue(maxsize=5)
 
@@ -75,6 +78,7 @@ async def update_progress(interaction: discord.Interaction, progress: float, mes
     try:
         await message.edit(embed=embed, view=None, attachments=[])
     except discord.errors.NotFound:
+        logger.warning(f"Сообщение для прогресс-бара не найдено для {interaction.user.id}")
         pass
 
 async def generate_initial_prompt() -> str:
@@ -82,61 +86,71 @@ async def generate_initial_prompt() -> str:
     client = AsyncClient(provider=PollinationsAI)
     for model in ["unity"]:
         try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Generate a vivid, structured image generation prompt in the style of: 'Summer trip in Tokyo, sakura lover, sweetheart couple, t-shirt design, balance harmony space, pixel art, Studio Ghibli style, white background, ultra high quality.' "
-                            "Include a clear scene description, emotional tone, specific subjects or characters, artistic style, color palette, and quality details. "
-                            "Ensure the prompt is safe, coherent, and suitable for image generation. Avoid NSFW content. "
-                            "Use concise, comma-separated phrases to describe elements. "
-                            "Return only the prompt, no Markdown or additional formatting."
-                        )
-                    },
-                    {"role": "user", "content": "Generate a prompt."}
-                ],
-                max_tokens=300,
-                temperature=0.7
-            )
+            async with asyncio.timeout(CONFIG["api_timeout"]):
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Generate a vivid, structured image generation prompt in the style of: 'Summer trip in Tokyo, sakura lover, sweetheart couple, t-shirt design, balance harmony space, pixel art, Studio Ghibli style, white background, ultra high quality.' "
+                                "Include a clear scene description, emotional tone, specific subjects or characters, artistic style, and color palette. "
+                                "Use concise, comma-separated phrases to describe elements. "
+                                "Avoid technical settings like resolution, steps, or CFG scale. "
+                                "Ensure the prompt is safe, coherent, and suitable for image generation. Avoid NSFW content. "
+                                "Return only the prompt, no Markdown or additional formatting."
+                            )
+                        },
+                        {"role": "user", "content": "Generate a prompt."}
+                    ],
+                    max_tokens=300,
+                    temperature=0.7
+                )
             prompt = response.choices[0].message.content.strip()
             cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', prompt).strip()
             return cleaned if cleaned else CONFIG["default_prompt"]
+        except TimeoutError:
+            logger.error(f"Таймаут при генерации начального промпта с {model}")
+            return CONFIG["default_prompt"]
         except Exception as e:
             logger.error(f"Ошибка генерации промпта с {model}: {str(e)}")
             continue
     return CONFIG["default_prompt"]
 
 async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
-    """Улучшает промпт, добавляя детали в структурированном стиле."""
+    """Улучшает промпт, добавляя детали без технических настроек."""
     client = AsyncClient(provider=PollinationsAI)
     for model in ["unity"]:
         try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Enhance the provided image generation prompt to match the style of: 'Summer trip in Tokyo, sakura lover, sweetheart couple, t-shirt design, balance harmony space, pixel art, Studio Ghibli style, white background, ultra high quality.' "
-                            "Add vivid details including scene, emotions, characters, colors, textures, lighting, artistic style, and quality. "
-                            "Use concise, comma-separated phrases for clarity. "
-                            f"{'Allow tasteful NSFW elements if present.' if nsfw_allowed else 'Avoid NSFW content.'} "
-                            "Ensure the prompt is coherent and suitable for image generation. "
-                            "Return only the enhanced prompt, no Markdown or additional formatting."
-                        )
-                    },
-                    {"role": "user", "content": f"Enhance: {prompt}."}
-                ],
-                max_tokens=300,
-                temperature=0.6
-            )
+            async with asyncio.timeout(CONFIG["api_timeout"]):
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Enhance the provided image generation prompt to match the style of: 'Summer trip in Tokyo, sakura lover, sweetheart couple, t-shirt design, balance harmony space, pixel art, Studio Ghibli style, white background, ultra high quality.' "
+                                "Focus on improving the scene, emotions, characters, colors, textures, lighting, and artistic style. "
+                                "Use concise, comma-separated phrases for clarity. "
+                                "Do NOT include technical settings like resolution, steps, CFG scale, or quality modifiers (e.g., 'ultra high quality'). "
+                                f"{'Allow tasteful NSFW elements if present.' if nsfw_allowed else 'Avoid NSFW content.'} "
+                                "Ensure the prompt is coherent and suitable for image generation. "
+                                "Return only the enhanced prompt, no Markdown or additional formatting."
+                            )
+                        },
+                        {"role": "user", "content": f"Enhance: {prompt}."}
+                    ],
+                    max_tokens=300,
+                    temperature=0.6
+                )
             improved = response.choices[0].message.content.strip()
             cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', improved).strip()
             return cleaned if cleaned else prompt
+        except TimeoutError:
+            logger.error(f"Таймаут при улучшении промпта с {model}")
+            return prompt
         except Exception as e:
-            logger.error(f"Ошибка улучшения с {model}: {str(e)}")
+            logger.error(f"Ошибка улучшения промпта с {model}: {str(e)}")
             continue
     return prompt
 
@@ -177,7 +191,7 @@ async def generate_image(
     view: View,
     message: discord.Message
 ) -> None:
-    """Генерирует изображение на основе параметров."""
+    """Генерирует изображение на основе параметров с обработкой ошибок API."""
     await generation_queue.put(interaction)
     client = AsyncClient(provider=ImageLabs)
     success = False
@@ -202,13 +216,28 @@ async def generate_image(
         }
 
         await update_progress(interaction, 0.3, message, ephemeral)
-        response = await client.images.async_generate(**params)
+        try:
+            async with asyncio.timeout(CONFIG["api_timeout"]):
+                response = await client.images.async_generate(**params)
+        except TimeoutError as e:
+            error_msg = "Таймаут запроса к API ImageLabs."
+            logger.error(f"Таймаут API ImageLabs для {interaction.user.id}: {str(e)}")
+            raise Exception(error_msg) from e
+        except Exception as e:
+            error_msg = f"Ошибка API ImageLabs: {str(e)}"
+            logger.error(f"Ошибка API ImageLabs для {interaction.user.id}: {str(e)}")
+            raise Exception(error_msg) from e
+
         if not response or not hasattr(response, "data") or not response.data:
-            raise ValueError("API не вернул данных.")
+            error_msg = "API ImageLabs не вернул данных."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
         image_url = response.data[0].url
         if not image_url:
-            raise ValueError("URL изображения отсутствует.")
+            error_msg = "URL изображения отсутствует."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
         async with aiohttp.ClientSession() as session:
             headers = {
@@ -219,12 +248,22 @@ async def generate_image(
                 "referer": "https://editor.imagelabs.com/"
             }
             await update_progress(interaction, 0.6, message, ephemeral)
-            async with session.get(image_url, headers=headers) as resp:
-                if resp.status != 200:
-                    raise Exception(f"HTTP ошибка: {resp.status}")
-                image_data = await resp.read()
-                if len(image_data) > CONFIG["max_file_size"]:
-                    raise ValueError("Изображение превышает лимит размера.")
+            try:
+                async with asyncio.timeout(CONFIG["api_timeout"]):
+                    async with session.get(image_url, headers=headers) as resp:
+                        if resp.status != 200:
+                            error_msg = f"HTTP ошибка при загрузке изображения: {resp.status}"
+                            logger.error(error_msg)
+                            raise Exception(error_msg)
+                        image_data = await resp.read()
+                        if len(image_data) > CONFIG["max_file_size"]:
+                            error_msg = "Изображение превышает лимит размера."
+                            logger.error(error_msg)
+                            raise ValueError(error_msg)
+            except TimeoutError as e:
+                error_msg = "Таймаут при загрузке изображения."
+                logger.error(f"Таймаут загрузки изображения для {interaction.user.id}: {str(e)}")
+                raise Exception(error_msg) from e
 
         await update_progress(interaction, 0.8, message, ephemeral)
         img = PIL.Image.open(BytesIO(image_data)).convert("RGB")
@@ -276,10 +315,9 @@ async def generate_image(
         error_str = str(e)
         if "400 Bad Request (error code: 20009)" in error_str or "20009" in error_str:
             embed = Embed(title="❌ Ошибка", description="Обнаружен явный контент.", color=0xE74C3C)
-            await message.edit(embed=embed, view=None, attachments=[])
         else:
-            embed = Embed(title="❌ Ошибка", description=error_str[:CONFIG["discord_embed_limits"]["description"]], color=0xE74C3C)
-            await message.edit(embed=embed, view=None, attachments=[])
+            embed = Embed(title="❌ Ошибка", description=f"Ошибка генерации: {error_str[:CONFIG['discord_embed_limits']['description'] - 50]}", color=0xE74C3C)
+        await message.edit(embed=embed, view=None, attachments=[])
         logger.error(f"Ошибка /image для {interaction.user.id}: {error_str}")
 
     finally:
@@ -364,7 +402,7 @@ class SettingsModal(Modal):
             return
 
         async with self.view.view_lock:
-            await interaction.response.defer(ephemeral=self.view.ephemeral)
+            await interaction.response.defer(ephemeral=True)
             try:
                 self.view.steps = int(self.steps_input.value)
                 self.view.cfg_scale = float(self.cfg_scale_input.value)
@@ -374,7 +412,7 @@ class SettingsModal(Modal):
                     raise ValueError("CFG Scale должен быть в диапазоне 1.0–20.0.")
             except ValueError as e:
                 embed = Embed(title="❌ Ошибка", description=str(e), color=0xE74C3C)
-                await interaction.followup.send(embed=embed, ephemeral=self.view.ephemeral)
+                await interaction.followup.send(embed=embed, ephemeral=True)
                 return
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
             embed.description = f"**📝 Промпт**:\n```{self.view.prompt}```"
