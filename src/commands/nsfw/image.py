@@ -578,7 +578,7 @@ class SettingsView(View):
                 description = description[:-3] + "..."
             embed.description = description
             embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
-            embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
+            embed.add_field(name="📏 Соотношение", value=f"> `{self.view.aspect_ratio}`", inline=True)
             embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
             embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
             self.enable_all_buttons()
@@ -592,7 +592,7 @@ class SettingsView(View):
 
             if interaction.message is None:
                 embed = Embed(title="❌ Ошибка", description="Сообщение недоступно.", color=0xE74C3C)
-                await interaction.response.send_message(embed=embed, ephemeral=self.ephemeral)
+                await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
                 return
 
             if any(word in self.prompt.lower() for word in CONFIG["forbidden_words"]) or \
@@ -648,9 +648,13 @@ def create_command(bot_client):
     @group.command(name="generate", description="Генерирует изображение на основе параметров")
     @app_commands.describe(ephemeral="Скрыть сообщения от других пользователей")
     async def generate(interaction: discord.Interaction, ephemeral: bool = False):
+        # Немедленно откладываем ответ, чтобы избежать ошибки Unknown interaction
+        await interaction.response.defer(ephemeral=ephemeral)
+
         if bot_client is None:
             logger.error("bot_client не предоставлен")
-            await interaction.response.send_message("Внутренняя ошибка бота.", ephemeral=True)
+            embed = Embed(title="❌ Ошибка", description="Внутренняя ошибка бота.", color=0xE74C3C)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         if not await restrict_command_execution(interaction, bot_client):
@@ -658,15 +662,15 @@ def create_command(bot_client):
 
         access_result, access_reason = await check_bot_access(interaction, bot_client)
         if not access_result:
-            await interaction.response.send_message(access_reason or "У вас нет доступа к этой команде.", ephemeral=True)
+            embed = Embed(title="❌ Ошибка", description=access_reason or "У вас нет доступа к этой команде.", color=0xE74C3C)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         if interaction.guild is not None and not interaction.channel.nsfw:
             embed = Embed(title="❌ Ошибка", description="Эта команда доступна только в личных сообщениях или в NSFW-каналах.", color=0xE74C3C)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=ephemeral)
         view = SettingsView(bot_client, ephemeral, interaction.user.id, interaction.channel_id, None)
         embed = Embed(title="⚙️ Настройки", color=0x3498DB)
         max_description_length = CONFIG["embed_description_limit"]
