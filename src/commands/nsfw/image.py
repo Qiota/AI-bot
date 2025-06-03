@@ -534,12 +534,12 @@ class ImageResponseView(View):
             self.regenerate_button.label = "🔄 Перегенерировать"
             embed = Embed(title="❌ Ошибка", description=str(e)[:CONFIG["discord_embed_limits"]["description"]], color=0xE74C3C)
             await interaction.message.edit(embed=embed, view=self)
-            logger.error(f"Ошибка перегенерации для {self.user_id}: {str(e)}")
+            logger.error(f"Ошибка перегенерации для {interaction.user.id}: {str(e)}")
 
 class SettingsView(View):
-    """View для настройки параметров."""
+    """View для настройки параметров генерации."""
     def __init__(self, bot_client, ephemeral: bool, user_id: int, channel_id: int, message_id: str = None):
-        super().__init__(timeout=6000)
+        super().__init__(timeout=600)  # 10 минут
         self.bot_client = bot_client
         self.ephemeral = ephemeral
         self.user_id = user_id
@@ -547,7 +547,7 @@ class SettingsView(View):
         self.message_id = message_id
         self.prompt = CONFIG["default_prompt"]
         self.negative_prompt = CONFIG["default_negative_prompt"]
-        self.model = CONFIG Male Model
+        self.model = CONFIG["default_settings"]["model"]
         self.aspect_ratio = CONFIG["default_settings"]["aspect_ratio"]
         self.steps = CONFIG["default_settings"]["steps"]
         self.cfg_scale = CONFIG["default_settings"]["cfg_scale"]
@@ -586,6 +586,7 @@ class SettingsView(View):
         self.add_item(self.prompt_button)
 
         self.settings_button = Button(label="Настройки", style=ButtonStyle.secondary, custom_id="open_settings", row=3)
+        self.settings_button.callback = self.open_settings_button
         self.add_item(self.settings_button)
 
     def disable_all(self):
@@ -604,7 +605,7 @@ class SettingsView(View):
         self.disable_all()
         self.stop()
 
-    async def interaction_check(self, interaction: discord.Interaction):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ Вы не автор команды.", ephemeral=True)
             return False
@@ -661,27 +662,27 @@ class SettingsView(View):
             await interaction.response.edit_message(view=self)
 
             try:
-                    improved = await improve_prompt(self.prompt, nsfw_allowed=True)
-                    self.prompt = improved
-                    self.is_prompt_improved = True
-                    self.improve_prompt_flag = True
-                    self.improve_button.label = "Улучшить промпт"
-                    self.improve_button.disabled = True
-                    embed = Embed(title="⚙️ Настройки", color=0x3498DB)
-                    embed.description = f"**📝 Улучшенный промпт**:\n```{self.prompt}```"
-                    embed = await truncate_embed(embed)
-                    embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
-                    embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
-                    embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
-                    embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
-                    self.enable_all()
-                    await interaction.message.edit(embed=embed, view=self)
-                except Exception as e:
-                    self.improve_button.label = "Улучшить промпт"
-                    self.enable_all()
-                    embed = Embed(title="❌ Ошибка", description="Не удалось улучшить промпт.", color=0xE74C3C)
-                    await interaction.message.edit(embed=embed, view=self)
-                    logger.error(f"Ошибка улучшения промпта для {interaction.user_id}: {str(e)}")
+                improved = await improve_prompt(self.prompt, nsfw_allowed=True)
+                self.prompt = improved
+                self.is_prompt_improved = True
+                self.improve_prompt_flag = True
+                self.improve_button.label = "Улучшить промпт"
+                self.improve_button.disabled = True
+                embed = Embed(title="⚙️ Настройки", color=0x3498DB)
+                embed.description = f"**📝 Улучшенный промпт**:\n```{self.prompt}```"
+                embed = await truncate_embed(embed)
+                embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
+                embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
+                embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
+                embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
+                self.enable_all()
+                await interaction.message.edit(embed=embed, view=self)
+            except Exception as e:
+                self.improve_button.label = "Улучшить промпт"
+                self.enable_all()
+                embed = Embed(title="❌ Ошибка", description="Не удалось улучшить промпт.", color=0xE74C3C)
+                await interaction.message.edit(embed=embed, view=self)
+                logger.error(f"Ошибка улучшения промпта для {interaction.user.id}: {str(e)}")
 
     async def generate_button_callback(self, interaction: discord.Interaction):
         async with self.view_lock:
@@ -696,7 +697,7 @@ class SettingsView(View):
                 return
 
             if any(word in self.prompt.lower() for word in CONFIG["forbidden_words"]) or \
-               (self.negative_prompt != "" and any(word in self.negative_prompt.lower() for word in CONFIG["forbidden_words"])):
+               (self.negative_prompt and any(word in self.negative_prompt.lower() for word in CONFIG["forbidden_words"])):
                 embed = Embed(title="❌ Ошибка", description="Обнаружены запрещённые слова.", color=0xE74C3C)
                 await interaction.message.edit(embed=embed, view=None, attachments=[])
                 return
@@ -707,7 +708,7 @@ class SettingsView(View):
                 return
 
             if self.cfg_scale < 1.0 or self.cfg_scale > 20.0:
-                embed = Embed(title="❌ Ошибка", description="CFG Scale должен быть в диапазоне 1.0–20.0.", color=0xE74C3C")
+                embed = Embed(title="❌ Ошибка", description="CFG Scale должен быть в диапазоне 1.0–20.0.", color=0xE74C3C)
                 await interaction.message.edit(embed=embed, view=None, attachments=[])
                 return
 
@@ -742,7 +743,7 @@ class SettingsView(View):
 
 def create_command(bot_client):
     """Создает группу команд для генерации изображений."""
-    group = app_commands.Group(name="image", description="Команды для создания изображений")
+    group = app_commands.Group(name="image", description="Команды для генерации изображений")
     group.dm_only = False
 
     @group.command(name="generate", description="Генерирует изображение на основе параметров")
@@ -756,7 +757,7 @@ def create_command(bot_client):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        if not await restrict_command_execution(interaction.user.id, bot_client):
+        if not await restrict_command_execution(interaction, bot_client):
             return
 
         access_result, access_reason = await check_bot_access(interaction, bot_client)
