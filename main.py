@@ -90,7 +90,7 @@ def main() -> NoReturn:
     logger.info(f"Окружение: {os.environ.get('ENV', 'production')}")
 
     # Загрузка токена из .env
-    bot_token = config('BOT_TOKEN')
+    bot_token = config('DISCORD_TOKEN')
 
     # Создаём новый цикл событий
     loop = asyncio.new_event_loop()
