@@ -79,8 +79,11 @@ def main() -> NoReturn:
     logger.info(f"Окружение: {os.environ.get('ENV', 'production')}")
 
     # Загрузка переменных из .env
-    bot_mention = config('BOT_MENTION', default='@BotName')
-    bot_token = config('BOT_TOKEN')
+    try:
+        discord_token = config('DISCORD_TOKEN')
+    except decouple.UndefinedValueError as e:
+        logger.error(f"Ошибка конфигурации: {e}. Убедитесь, что DISCORD_TOKEN указан в .env или переменных окружения.")
+        sys.exit(1)
 
     # Создаём новый цикл событий
     loop = asyncio.new_event_loop()
@@ -94,7 +97,7 @@ def main() -> NoReturn:
         bot_client = start_bot()
 
         # Инициализация утилиты приглашений
-        invite_utility = InviteUtility(bot_client.bot, bot_mention)
+        invite_utility = InviteUtility(bot_client.bot)
 
         # Запуск Flask-сервера в отдельном потоке
         Thread(target=run_flask, daemon=True).start()
@@ -108,7 +111,7 @@ def main() -> NoReturn:
         loop.create_task(memory_cleanup_service())
 
         # Запуск бота
-        loop.run_until_complete(bot_client.bot.start(bot_token))
+        loop.run_until_complete(bot_client.bot.start(discord_token))
 
     except KeyboardInterrupt:
         logger.info("Получен сигнал завершения. Остановка бота.")
