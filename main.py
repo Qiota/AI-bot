@@ -5,7 +5,9 @@ import asyncio
 import gc
 import psutil
 from typing import NoReturn
+from decouple import config
 from src.start import start_bot
+from src.invite_utility import InviteUtility
 from src.systemLog import logger
 
 # Настройка логирования
@@ -68,21 +70,27 @@ async def memory_cleanup_service():
 
 def main() -> NoReturn:
     """
-    Инициализация и запуск бота с фоновой службой очистки памяти.
+    Инициализация и запуск бота с фоновой службой очистки памяти и утилитой приглашений.
     """
     logger.info(f"Запуск бота на Python {sys.version}")
     logger.info(f"Окружение: {os.environ.get('ENV', 'production')}")
+
+    # Загрузка переменных из .env
+    bot_mention = config('BOT_MENTION', default='@BotName')
 
     # Создаём новый цикл событий
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
+        # Запуск бота и получение клиента
+        bot = start_bot()  # Предполагается, что start_bot возвращает объект commands.Bot
+
+        # Инициализация утилиты приглашений
+        invite_utility = InviteUtility(bot, bot_mention)
+
         # Запуск службы очистки памяти в фоновом режиме
         loop.create_task(memory_cleanup_service())
-
-        # Запуск бота
-        start_bot()
 
         # Держим цикл событий активным
         loop.run_forever()
