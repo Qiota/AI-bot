@@ -4,8 +4,8 @@ from discord.ext import commands
 from decouple import config
 from src.systemLog import logger
 
-class InviteUtility:
-    """Утилита для обработки секретных команд в личных сообщениях разработчика для создания ссылок приглашения."""
+class InviteUtility(commands.Cog):
+    """Утилита для обработки команд управления приглашениями на серверах."""
 
     def __init__(self, bot: commands.Bot):
         """
@@ -15,53 +15,22 @@ class InviteUtility:
             bot: Объект бота Discord (commands.Bot).
         """
         self.bot = bot
-        self.bot_mention = None  # Упоминание будет установлено после готовности бота
         self.developer_id = int(config('DEVELOPER_ID'))  # Загружаем ID разработчика из .env
-        self.bot.add_listener(self.on_message, "on_message")  # Регистрируем обработчик сообщений
-        logger.info("Инициализация утилиты приглашений для DM разработчика")
+        logger.info("Инициализация утилиты приглашений для серверов")
 
-    async def initialize(self):
-        """Инициализирует упоминание бота после его готовности."""
-        await self.bot.wait_until_ready()
-        self.bot_mention = self.bot.user.mention
-        logger.info(f"Установлено упоминание бота: {self.bot_mention}")
-
-    async def on_message(self, message: discord.Message) -> None:
+    @commands.command(name="s")
+    async def server_list(self, ctx: commands.Context) -> None:
         """
-        Обрабатывает входящие сообщения в DM от разработчика.
+        Команда !s list для вывода списка серверов, на которых находится бот.
 
         Args:
-            message: Объект сообщения Discord.
+            ctx: Контекст команды.
         """
-        # Проверяем, что сообщение в DM и от разработчика
-        if not isinstance(message.channel, discord.DMChannel) or message.author.id != self.developer_id:
+        if ctx.author.bot:
             return
 
-        # Ждем, пока упоминание бота будет установлено
-        if not self.bot_mention:
-            logger.warning("Упоминание бота еще не установлено, пропуск сообщения")
-            return
-
-        # Проверяем, начинается ли сообщение с пинга бота
-        if not message.content.startswith(self.bot_mention):
-            return
-
-        # Удаляем пинг и обрабатываем команду
-        command = message.content[len(self.bot_mention):].strip()
-        await self._process_command(message, command)
-
-    async def _process_command(self, message: discord.Message, command: str) -> None:
-        """
-        Обрабатывает введенную команду.
-
-        Args:
-            message: Объект сообщения Discord.
-            command: Введенная строка команды.
-        """
-        parts = command.split()
-
-        # Проверка команды .invite
-        if not (parts and parts[0] == ".invite"):
+        if len(ctx.message.content.split()) < 2 or ctx.message.content.split()[1].lower() != "list":
+            await ctx.send("Использование: `!s list`")
             return
 
         # Ожидаем готовности бота
@@ -69,61 +38,64 @@ class InviteUtility:
             logger.warning("Бот еще не готов. Ожидание подключения...")
             await self.bot.wait_until_ready()
 
-        if len(parts) < 2:
-            logger.info("Доступные команды: .invite list, .invite generate server <server_name>")
-            await message.channel.send("Доступные команды: `.invite list`, `.invite generate server <server_name>`")
-            return
-
-        subcommand = parts[1].lower()
-
-        if subcommand == "list":
-            await self._list_servers(message.channel)
-        elif subcommand == "generate" and len(parts) >= 4 and parts[2].lower() == "server":
-            server_name = " ".join(parts[3:])
-            await self._generate_invite(message.channel, server_name)
-        else:
-            logger.info("Неверная команда. Используйте: .invite list или .invite generate server <server_name>")
-            await message.channel.send("Неверная команда. Используйте: `.invite list` или `.invite generate server <server_name>`")
-
-    async def _list_servers(self, channel: discord.DMChannel) -> None:
-        """Выводит список серверов, на которых находится бот."""
         logger.info("Список серверов, на которых находится бот:")
         server_list = "\n".join(f"- {guild.name} (ID: {guild.id})" for guild in self.bot.guilds)
         if server_list:
             logger.info(server_list)
-            await channel.send(f"Сервера, на которых находится бот:\n{server_list}")
+            await ctx.send(f"Сервера, на которых находится бот:\n{server_list}")
         else:
             logger.info("Бот не находится на серверах")
-            await channel.send("Бот не находится на серверах")
+            await ctx.send("Бот не находится на серверах")
 
-    async def _generate_invite(self, channel: discord.DMChannel, server_name: str) -> None:
+    @commands.command(name="csl")
+    async def create_server_link(self, ctx: commands.Context, *, server_name_or_id: str) -> None:
         """
-        Генерирует ссылку приглашения для указанного сервера.
+        Команда !csl <server_name_or_id> для создания ссылки-приглашения (только для разработчика).
 
         Args:
-            channel: Канал DM для ответа.
-            server_name: Название сервера.
+            ctx: Контекст команды.
+            server_name_or_id: Название или ID сервера.
         """
-        guild = discord.utils.get(self.bot.guilds, name=server_name)
+        if ctx.author.bot:
+            return
+
+        # Проверяем, что команда вызвана разработчиком
+        if ctx.author.id != self.developer_id:
+            logger.warning(f"Пользователь {ctx.author.id} попытался выполнить !csl, но не является разработчиком")
+            await ctx.send("Эта команда доступна только разработчику.")
+            return
+
+        # Ожидаем готовности бота
+        if not self.bot.is_ready():
+            logger.warning("Бот еще не готов. Ожидание подключения...")
+            await self.bot.wait_until_ready()
+
+        # Пытаемся найти сервер по ID или имени
+        try:
+            server_id = int(server_name_or_id)
+            guild = discord.utils.get(self.bot.guilds, id=server_id)
+        except ValueError:
+            guild = discord.utils.get(self.bot.guilds, name=server_name_or_id)
+
         if not guild:
-            logger.warning(f"Сервер с названием '{server_name}' не найден")
-            await channel.send(f"Сервер с названием '{server_name}' не найден")
+            logger.warning(f"Сервер с названием или ID '{server_name_or_id}' не найден")
+            await ctx.send(f"Сервер с названием или ID '{server_name_or_id}' не найден")
             return
 
         try:
             invite_url = await self._create_invite(guild)
             logger.info(f"Ссылка приглашения для сервера '{guild.name}' (ID: {guild.id}): {invite_url}")
-            await channel.send(f"Ссылка приглашения для сервера '{guild.name}': {invite_url}")
+            await ctx.send("Ссылка-приглашение создана и выведена в консоль.")
         except discord.errors.Forbidden:
             logger.warning(f"Недостаточно прав для создания ссылки на сервере: {guild.name} (ID: {guild.id})")
-            await channel.send(f"Недостаточно прав для создания ссылки на сервере: {guild.name}")
+            await ctx.send(f"Недостаточно прав для создания ссылки на сервере: {guild.name}")
         except Exception as e:
             logger.error(f"Ошибка при создании ссылки для сервера {guild.name}: {e}")
-            await channel.send(f"Ошибка при создании ссылки для сервера {guild.name}: {e}")
+            await ctx.send(f"Ошибка при создании ссылки для сервера {guild.name}: {e}")
 
     async def _create_invite(self, guild: discord.Guild) -> str:
         """
-        Создает ссылку приглашения для указанного сервера.
+        Создаёт ссылку-приглашение для указанного сервера.
 
         Args:
             guild: Объект сервера (гильдии) Discord.
@@ -136,6 +108,16 @@ class InviteUtility:
             max_age=0,  # Без ограничения по времени
             max_uses=0,  # Без ограничения по использованию
             unique=True,
-            reason="Генерация ссылки приглашения через секретную команду в DM"
+            reason="Генерация ссылки приглашения через команду !csl"
         )
         return str(invite.url)
+
+async def setup(bot: commands.Bot) -> None:
+    """
+    Регистрирует ког InviteUtility в боте.
+
+    Args:
+        bot: Объект бота Discord.
+    """
+    await bot.add_cog(InviteUtility(bot))
+    logger.info("Ког InviteUtility зарегистрирован")
