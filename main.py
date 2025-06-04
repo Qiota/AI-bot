@@ -6,6 +6,7 @@ import gc
 import psutil
 from typing import NoReturn
 from decouple import config
+from discord.ext import commands  # Добавлен импорт
 from src.start import start_bot
 from src.invite_utility import InviteUtility
 from src.systemLog import logger
