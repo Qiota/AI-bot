@@ -12,21 +12,19 @@ class InviteUtility:
         Инициализация утилиты.
 
         Args:
-            bot: Объект бота Discord.
-
-        Raises:
-            ValueError: Если DEVELOPER_ID не указан в файле .env или бот не инициализирован.
+            bot: Объект бота Discord (commands.Bot).
         """
         self.bot = bot
-        self.DEVELOPER_ID = config("DEVELOPER_ID", cast=int, default=None)
-        if self.DEVELOPER_ID is None:
-            logger.error("DEVELOPER_ID не указан в файле .env")
-            raise ValueError("DEVELOPER_ID must be specified in .env file")
-        if not self.bot.user:
-            logger.error("Бот не инициализирован, невозможно определить упоминание")
-            raise ValueError("Bot is not initialized, cannot determine mention")
+        self.bot_mention = None  # Упоминание будет установлено после готовности бота
+        self.developer_id = int(config('DEVELOPER_ID'))  # Загружаем ID разработчика из .env
         self.bot.add_listener(self.on_message, "on_message")  # Регистрируем обработчик сообщений
-        logger.info(f"Инициализация утилиты приглашений для DM разработчика (ID: {self.DEVELOPER_ID})")
+        logger.info("Инициализация утилиты приглашений для DM разработчика")
+
+    async def initialize(self):
+        """Инициализирует упоминание бота после его готовности."""
+        await self.bot.wait_until_ready()
+        self.bot_mention = self.bot.user.mention
+        logger.info(f"Установлено упоминание бота: {self.bot_mention}")
 
     async def on_message(self, message: discord.Message) -> None:
         """
@@ -36,15 +34,20 @@ class InviteUtility:
             message: Объект сообщения Discord.
         """
         # Проверяем, что сообщение в DM и от разработчика
-        if not isinstance(message.channel, discord.DMChannel) or message.author.id != self.DEVELOPER_ID:
+        if not isinstance(message.channel, discord.DMChannel) or message.author.id != self.developer_id:
             return
 
-        # Проверяем, начинается ли сообщение с упоминания бота
-        if not message.content.startswith(self.bot.user.mention):
+        # Ждем, пока упоминание бота будет установлено
+        if not self.bot_mention:
+            logger.warning("Упоминание бота еще не установлено, пропуск сообщения")
             return
 
-        # Удаляем упоминание и обрабатываем команду
-        command = message.content[len(self.bot.user.mention):].strip()
+        # Проверяем, начинается ли сообщение с пинга бота
+        if not message.content.startswith(self.bot_mention):
+            return
+
+        # Удаляем пинг и обрабатываем команду
+        command = message.content[len(self.bot_mention):].strip()
         await self._process_command(message, command)
 
     async def _process_command(self, message: discord.Message, command: str) -> None:
