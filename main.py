@@ -6,7 +6,6 @@ import gc
 import psutil
 from typing import NoReturn
 from decouple import config
-from discord.ext import commands
 from src.start import start_bot
 from src.systemLog import logger
 
@@ -70,27 +69,15 @@ async def memory_cleanup_service():
         # Ожидание следующей проверки
         await asyncio.sleep(MEMORY_CHECK_INTERVAL)
 
-async def load_cogs(bot: commands.Bot):
-    """
-    Загружает коги после готовности бота.
-
-    Args:
-        bot: Объект бота Discord.
-    """
-    await bot.wait_until_ready()
-    logger.info("Бот готов, загрузка ког")
-    await bot.load_extension("src.invite_utility")
-    logger.info("Ког invite_utility загружен")
-
 def main() -> NoReturn:
     """
-    Инициализация и запуск бота с фоновой службой очистки памяти и загрузкой ког.
+    Инициализация и запуск бота с фоновой службой очистки памяти.
     """
     logger.info(f"Запуск бота на Python {sys.version}")
     logger.info(f"Окружение: {os.environ.get('ENV', 'production')}")
 
     # Загрузка токена из .env
-    bot_token = config('DISCORD_TOKEN')
+    bot_token = config('BOT_TOKEN')
 
     # Создаём новый цикл событий
     loop = asyncio.new_event_loop()
@@ -102,9 +89,6 @@ def main() -> NoReturn:
 
         # Запуск службы очистки памяти
         loop.create_task(memory_cleanup_service())
-
-        # Загрузка ког
-        loop.create_task(load_cogs(bot_client.bot))
 
         # Запуск бота
         loop.run_until_complete(bot_client.bot.start(bot_token))
