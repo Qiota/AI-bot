@@ -33,11 +33,6 @@ class InviteUtility(commands.Cog):
             await ctx.send("Использование: `!s list`")
             return
 
-        # Ожидаем готовности бота
-        if not self.bot.is_ready():
-            logger.warning("Бот еще не готов. Ожидание подключения...")
-            await self.bot.wait_until_ready()
-
         logger.info("Список серверов, на которых находится бот:")
         server_list = "\n".join(f"- {guild.name} (ID: {guild.id})" for guild in self.bot.guilds)
         if server_list:
@@ -64,11 +59,6 @@ class InviteUtility(commands.Cog):
             logger.warning(f"Пользователь {ctx.author.id} попытался выполнить !csl, но не является разработчиком")
             await ctx.send("Эта команда доступна только разработчику.")
             return
-
-        # Ожидаем готовности бота
-        if not self.bot.is_ready():
-            logger.warning("Бот еще не готов. Ожидание подключения...")
-            await self.bot.wait_until_ready()
 
         # Пытаемся найти сервер по ID или имени
         try:
