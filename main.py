@@ -6,12 +6,9 @@ import gc
 import psutil
 from typing import NoReturn
 from decouple import config
-from aiohttp import ClientSession
 from src.start import start_bot
 from src.invite_utility import InviteUtility
 from src.systemLog import logger
-from src.utils.server.flask import run_flask
-from threading import Thread
 
 # Настройка логирования
 logging.basicConfig(
@@ -66,10 +63,24 @@ async def memory_cleanup_service():
                 )
 
         except Exception as e:
-            logger.error(f"Ошибка в службе очистки памяти: {e}", exc_info=True)
+            logger.error(f"Ошибка в службе очистки памяти: {e}")
+            await asyncio.sleep(MEMORY_CHECK_INTERVAL)
+            continue
 
         # Ожидание следующей проверки
         await asyncio.sleep(MEMORY_CHECK_INTERVAL)
+
+async def initialize_utility(bot: commands.Bot):
+    """
+    Инициализирует утилиту приглашений после готовности бота.
+
+    Args:
+        bot: Объект бота Discord.
+    """
+    await bot.wait_until_ready()
+    logger.info("Бот готов, инициализация утилиты приглашений")
+    utility = InviteUtility(bot)
+    await utility.initialize()
 
 def main() -> NoReturn:
     """
@@ -78,55 +89,36 @@ def main() -> NoReturn:
     logger.info(f"Запуск бота на Python {sys.version}")
     logger.info(f"Окружение: {os.environ.get('ENV', 'production')}")
 
-    # Загрузка переменных из .env
-    try:
-        discord_token = config('DISCORD_TOKEN')
-    except decouple.UndefinedValueError as e:
-        logger.error(f"Ошибка конфигурации: {e}. Убедитесь, что DISCORD_TOKEN указан в .env или переменных окружения.")
-        sys.exit(1)
+    # Загрузка токена из .env
+    bot_token = config('BOT_TOKEN')
 
     # Создаём новый цикл событий
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    session = None
-    bot_client = None
-
     try:
         # Инициализация бота
         bot_client = start_bot()
 
-        # Инициализация утилиты приглашений
-        invite_utility = InviteUtility(bot_client.bot)
-
-        # Запуск Flask-сервера в отдельном потоке
-        Thread(target=run_flask, daemon=True).start()
-        logger.info("Flask-сервер запущен в фоновом потоке")
-
-        # Инициализация ClientSession
-        session = ClientSession()
-        bot_client.bot.session = session
-
         # Запуск службы очистки памяти
         loop.create_task(memory_cleanup_service())
 
+        # Инициализация утилиты после готовности бота
+        loop.create_task(initialize_utility(bot_client.bot))
+
         # Запуск бота
-        loop.run_until_complete(bot_client.bot.start(discord_token))
+        loop.run_until_complete(bot_client.bot.start(bot_token))
 
     except KeyboardInterrupt:
         logger.info("Получен сигнал завершения. Остановка бота.")
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка при запуске бота: {e}")
         sys.exit(1)
     finally:
-        # Очистка и закрытие
+        # Очистка и закрытие цикла событий
         logger.info("Закрытие бота и ресурсов")
-        if bot_client and bot_client.bot:
-            loop.run_until_complete(bot_client.bot.close())
-        if session and not session.closed:
-            loop.run_until_complete(session.close())
-        if bot_client:
-            loop.run_until_complete(bot_client.close())
+        loop.run_until_complete(bot_client.bot.close())
+        logger.info("Клиент Discord закрыт")
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
         logger.info("Цикл событий закрыт")
