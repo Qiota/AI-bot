@@ -7,25 +7,26 @@ from src.systemLog import logger
 class InviteUtility:
     """Утилита для обработки секретных команд в личных сообщениях разработчика для создания ссылок приглашения."""
 
-    def __init__(self, bot: commands.Bot, bot_mention: str):
+    def __init__(self, bot: commands.Bot):
         """
         Инициализация утилиты.
 
         Args:
             bot: Объект бота Discord.
-            bot_mention: Пинг бота (например, '@BotName').
 
         Raises:
-            ValueError: Если DEVELOPER_ID не указан в файле .env.
+            ValueError: Если DEVELOPER_ID не указан в файле .env или бот не инициализирован.
         """
         self.bot = bot
-        self.bot_mention = bot_mention.strip()
         self.DEVELOPER_ID = config("DEVELOPER_ID", cast=int, default=None)
         if self.DEVELOPER_ID is None:
             logger.error("DEVELOPER_ID не указан в файле .env")
             raise ValueError("DEVELOPER_ID must be specified in .env file")
+        if not self.bot.user:
+            logger.error("Бот не инициализирован, невозможно определить упоминание")
+            raise ValueError("Bot is not initialized, cannot determine mention")
         self.bot.add_listener(self.on_message, "on_message")  # Регистрируем обработчик сообщений
-        logger.info("Инициализация утилиты приглашений для DM разработчика")
+        logger.info(f"Инициализация утилиты приглашений для DM разработчика (ID: {self.DEVELOPER_ID})")
 
     async def on_message(self, message: discord.Message) -> None:
         """
@@ -38,12 +39,12 @@ class InviteUtility:
         if not isinstance(message.channel, discord.DMChannel) or message.author.id != self.DEVELOPER_ID:
             return
 
-        # Проверяем, начинается ли сообщение с пинга бота
-        if not message.content.startswith(self.bot_mention):
+        # Проверяем, начинается ли сообщение с упоминания бота
+        if not message.content.startswith(self.bot.user.mention):
             return
 
-        # Удаляем пинг и обрабатываем команду
-        command = message.content[len(self.bot_mention):].strip()
+        # Удаляем упоминание и обрабатываем команду
+        command = message.content[len(self.bot.user.mention):].strip()
         await self._process_command(message, command)
 
     async def _process_command(self, message: discord.Message, command: str) -> None:
