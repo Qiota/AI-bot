@@ -6,9 +6,8 @@ import gc
 import psutil
 from typing import NoReturn
 from decouple import config
-from discord.ext import commands  # Добавлен импорт
+from discord.ext import commands
 from src.start import start_bot
-from src.invite_utility import InviteUtility
 from src.systemLog import logger
 
 # Настройка логирования
@@ -71,21 +70,21 @@ async def memory_cleanup_service():
         # Ожидание следующей проверки
         await asyncio.sleep(MEMORY_CHECK_INTERVAL)
 
-async def initialize_utility(bot: commands.Bot):
+async def load_cogs(bot: commands.Bot):
     """
-    Инициализирует утилиту приглашений после готовности бота.
+    Загружает коги после готовности бота.
 
     Args:
         bot: Объект бота Discord.
     """
     await bot.wait_until_ready()
-    logger.info("Бот готов, инициализация утилиты приглашений")
-    utility = InviteUtility(bot)
-    await utility.initialize()
+    logger.info("Бот готов, загрузка ког")
+    await bot.load_extension("src.invite_utility")
+    logger.info("Ког invite_utility загружен")
 
 def main() -> NoReturn:
     """
-    Инициализация и запуск бота с фоновой службой очистки памяти и утилитой приглашений.
+    Инициализация и запуск бота с фоновой службой очистки памяти и загрузкой ког.
     """
     logger.info(f"Запуск бота на Python {sys.version}")
     logger.info(f"Окружение: {os.environ.get('ENV', 'production')}")
@@ -104,8 +103,8 @@ def main() -> NoReturn:
         # Запуск службы очистки памяти
         loop.create_task(memory_cleanup_service())
 
-        # Инициализация утилиты после готовности бота
-        loop.create_task(initialize_utility(bot_client.bot))
+        # Загрузка ког
+        loop.create_task(load_cogs(bot_client.bot))
 
         # Запуск бота
         loop.run_until_complete(bot_client.bot.start(bot_token))
