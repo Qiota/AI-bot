@@ -7,8 +7,6 @@ from src.systemLog import logger
 class InviteUtility:
     """Утилита для обработки секретных команд в личных сообщениях разработчика для создания ссылок приглашения."""
 
-    DEVELOPER_ID = 1297639749162635358  # ID разработчика
-
     def __init__(self, bot: commands.Bot, bot_mention: str):
         """
         Инициализация утилиты.
@@ -16,9 +14,16 @@ class InviteUtility:
         Args:
             bot: Объект бота Discord.
             bot_mention: Пинг бота (например, '@BotName').
+
+        Raises:
+            ValueError: Если DEVELOPER_ID не указан в файле .env.
         """
         self.bot = bot
         self.bot_mention = bot_mention.strip()
+        self.DEVELOPER_ID = config("DEVELOPER_ID", cast=int, default=None)
+        if self.DEVELOPER_ID is None:
+            logger.error("DEVELOPER_ID не указан в файле .env")
+            raise ValueError("DEVELOPER_ID must be specified in .env file")
         self.bot.add_listener(self.on_message, "on_message")  # Регистрируем обработчик сообщений
         logger.info("Инициализация утилиты приглашений для DM разработчика")
 
