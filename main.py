@@ -6,9 +6,12 @@ import gc
 import psutil
 from typing import NoReturn
 from decouple import config
+from aiohttp import ClientSession
 from src.start import start_bot
 from src.invite_utility import InviteUtility
 from src.systemLog import logger
+from src.utils.server.flask import run_flask
+from threading import Thread
 
 # Настройка логирования
 logging.basicConfig(
@@ -77,23 +80,35 @@ def main() -> NoReturn:
 
     # Загрузка переменных из .env
     bot_mention = config('BOT_MENTION', default='@BotName')
+    bot_token = config('BOT_TOKEN')
 
     # Создаём новый цикл событий
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    session = None
+    bot_client = None
+
     try:
-        # Запуск бота и получение клиента
-        bot = start_bot()  # Предполагается, что start_bot возвращает объект commands.Bot
+        # Инициализация бота
+        bot_client = start_bot()
 
         # Инициализация утилиты приглашений
-        invite_utility = InviteUtility(bot, bot_mention)
+        invite_utility = InviteUtility(bot_client.bot, bot_mention)
 
-        # Запуск службы очистки памяти в фоновом режиме
+        # Запуск Flask-сервера в отдельном потоке
+        Thread(target=run_flask, daemon=True).start()
+        logger.info("Flask-сервер запущен в фоновом потоке")
+
+        # Инициализация ClientSession
+        session = ClientSession()
+        bot_client.bot.session = session
+
+        # Запуск службы очистки памяти
         loop.create_task(memory_cleanup_service())
 
-        # Держим цикл событий активным
-        loop.run_forever()
+        # Запуск бота
+        loop.run_until_complete(bot_client.bot.start(bot_token))
 
     except KeyboardInterrupt:
         logger.info("Получен сигнал завершения. Остановка бота.")
@@ -101,10 +116,17 @@ def main() -> NoReturn:
         logger.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
         sys.exit(1)
     finally:
-        # Очистка и закрытие цикла событий
-        logger.info("Закрытие цикла событий")
+        # Очистка и закрытие
+        logger.info("Закрытие бота и ресурсов")
+        if bot_client and bot_client.bot:
+            loop.run_until_complete(bot_client.bot.close())
+        if session and not session.closed:
+            loop.run_until_complete(session.close())
+        if bot_client:
+            loop.run_until_complete(bot_client.close())
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
+        logger.info("Цикл событий закрыт")
 
 if __name__ == "__main__":
     main()
