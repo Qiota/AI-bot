@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional, Union, Tuple, List
 import discord
 from discord import app_commands
-from aiohttp import ClientSession
+from discord.ext import commands
 from .config import BotConfig
 from .client import BotClient
 from .aichat import AIChat
@@ -247,6 +247,14 @@ def start_bot() -> BotClient:
             
             await register_commands(bot_client.tree, bot_client)
             logger.success(f"Бот {bot_client.bot.user} запущен и готов к работе!")
+            
+            # Загрузка кога InviteUtility
+            try:
+                await bot_client.bot.load_extension("src.invite_utility")
+                logger.info("Ког invite_utility загружен")
+            except Exception as e:
+                logger.error(f"Ошибка загрузки кога invite_utility: {e}\n{traceback.format_exc()}")
+                
         except Exception as e:
             logger.error(f"Ошибка в on_ready: {e}\n{traceback.format_exc()}")
             raise
