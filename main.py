@@ -5,7 +5,6 @@ import asyncio
 import gc
 import psutil
 from typing import NoReturn
-from decouple import config
 from src.start import start_bot
 from src.systemLog import logger
 
@@ -62,9 +61,7 @@ async def memory_cleanup_service():
                 )
 
         except Exception as e:
-            logger.error(f"Ошибка в службе очистки памяти: {e}")
-            await asyncio.sleep(MEMORY_CHECK_INTERVAL)
-            continue
+            logger.error(f"Ошибка в службе очистки памяти: {e}", exc_info=True)
 
         # Ожидание следующей проверки
         await asyncio.sleep(MEMORY_CHECK_INTERVAL)
@@ -76,36 +73,30 @@ def main() -> NoReturn:
     logger.info(f"Запуск бота на Python {sys.version}")
     logger.info(f"Окружение: {os.environ.get('ENV', 'production')}")
 
-    # Загрузка токена из .env
-    bot_token = config('DISCORD_TOKEN')
-
     # Создаём новый цикл событий
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
-        # Инициализация бота
-        bot_client = start_bot()
-
-        # Запуск службы очистки памяти
+        # Запуск службы очистки памяти в фоновом режиме
         loop.create_task(memory_cleanup_service())
 
         # Запуск бота
-        loop.run_until_complete(bot_client.bot.start(bot_token))
+        start_bot()
+
+        # Держим цикл событий активным
+        loop.run_forever()
 
     except KeyboardInterrupt:
         logger.info("Получен сигнал завершения. Остановка бота.")
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске бота: {e}")
+        logger.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
         sys.exit(1)
     finally:
         # Очистка и закрытие цикла событий
-        logger.info("Закрытие бота и ресурсов")
-        loop.run_until_complete(bot_client.bot.close())
-        logger.info("Клиент Discord закрыт")
+        logger.info("Закрытие цикла событий")
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
-        logger.info("Цикл событий закрыт")
 
 if __name__ == "__main__":
     main()
