@@ -1,10 +1,11 @@
 import asyncio
 import importlib
 from pathlib import Path
+from threading import Thread
 from typing import Optional, Union, Tuple, List
 import discord
 from discord import app_commands
-from discord.ext import commands
+from aiohttp import ClientSession
 from .config import BotConfig
 from .client import BotClient
 from .aichat import AIChat
@@ -161,102 +162,124 @@ async def register_commands(tree: app_commands.CommandTree, bot_client: BotClien
         logger.error(f"Ошибка регистрации команд: {e}\n{traceback.format_exc()}")
         raise
 
-def start_bot() -> BotClient:
-    """Инициализирует и возвращает BotClient для Discord-бота."""
+async def run_bot() -> None:
+    """Запуск Discord-бота."""
     config = BotConfig()
     bot_client = BotClient(config)
     bot_client.start_time = time.time()
     ai_chat = AIChat(bot_client)
+    session = None
 
-    # Регистрация обработчика ошибок команд
-    @bot_client.tree.error
-    async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        """Обработка ошибок команд."""
-        command_name = interaction.command.name if interaction.command else "неизвестная команда"
-        guild_id = interaction.guild_id or "DM"
-        channel_id = interaction.channel_id or "DM"
-        user_id = interaction.user.id
+    try:
+        config.validate()
+        
+        @bot_client.tree.error
+        async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+            """Обработка ошибок команд."""
+            command_name = interaction.command.name if interaction.command else "неизвестная команда"
+            guild_id = interaction.guild_id or "DM"
+            channel_id = interaction.channel_id or "DM"
+            user_id = interaction.user.id
 
-        try:
-            if isinstance(error, app_commands.CheckFailure):
-                can_execute, reason = await precheck_command_execution(interaction, command_name, bot_client)
-                if not can_execute and reason:
-                    logger.error(f"CheckFailure для команды {command_name} в гильдии {guild_id}, канал {channel_id}: {reason}")
-                    try:
-                        if not interaction.response.is_done():
-                            await interaction.response.send_message(reason, ephemeral=True)
-                        else:
-                            await interaction.followup.send(reason, ephemeral=True)
-                    except Exception as e:
-                        logger.error(f"Ошибка отправки сообщения об ошибке для команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
-                    return
-
-                if interaction.guild:
-                    restriction, restriction_reason = await checker.check_user_restriction(interaction)
-                    if not restriction:
-                        logger.error(f"CheckFailure для команды {command_name} в гильдии {guild_id}, канал {channel_id}: Пользователь {user_id} ограничен - {restriction_reason}")
+            try:
+                if isinstance(error, app_commands.CheckFailure):
+                    can_execute, reason = await precheck_command_execution(interaction, command_name, bot_client)
+                    if not can_execute and reason:
+                        logger.error(f"CheckFailure для команды {command_name} в гильдии {guild_id}, канал {channel_id}: {reason}")
                         try:
                             if not interaction.response.is_done():
-                                await interaction.response.send_message(
-                                    restriction_reason or "Ваш доступ к боту ограничен.",
-                                    ephemeral=True
-                                )
+                                await interaction.response.send_message(reason, ephemeral=True)
                             else:
-                                await interaction.followup.send(
-                                    restriction_reason or "Ваш доступ к боту ограничен.",
-                                    ephemeral=True
-                                )
+                                await interaction.followup.send(reason, ephemeral=True)
                         except Exception as e:
-                            logger.error(f"Ошибка отправки сообщения об ошибке команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
+                            logger.error(f"Ошибка отправки сообщения об ошибке для команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
                         return
-                
-                logger.error(f"CheckFailure для команды {command_name} в гильдии {guild_id}, канал {channel_id}: Неизвестная причина\n{traceback.format_exc()}")
-                try:
-                    if not interaction.response.is_done():
-                        await interaction.response.send_message(
-                            "Ошибка выполнения команды. Пожалуйста, попробуйте снова.",
-                            ephemeral=True
-                        )
-                    else:
-                        await interaction.followup.send(
-                            "Ошибка выполнения команды. Пожалуйста, попробуйте снова.",
-                            ephemeral=True
-                        )
-                except Exception as e:
-                    logger.error(f"Ошибка отправки сообщения об ошибке команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
-            else:
-                logger.error(f"Ошибка команды {command_name} для пользователя {user_id} в гильдии {guild_id}, канал {channel_id}: {error}\n{traceback.format_exc()}")
-                try:
-                    if not interaction.response.is_done():
-                        await interaction.response.send_message("Произошла ошибка при выполнении команды.", ephemeral=True)
-                    else:
-                        await interaction.followup.send("Произошла ошибка при выполнении команды.", ephemeral=True)
-                except Exception as e:
-                    logger.error(f"Ошибка отправки сообщения об ошибке команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
-        except Exception as e:
-            logger.error(f"Критическая ошибка обработки ошибки команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
 
-    # Регистрация обработчика события готовности
-    @bot_client.bot.event
-    async def on_ready() -> None:
-        """Обработчик события готовности бота."""
-        logger.debug("Событие on_ready вызвано")
-        try:
-            bot_client.bot.loop.create_task(set_bot_activity(bot_client.bot))
-            logger.debug("set_bot_activity запущена как фоновая задача")
-            
-            await register_commands(bot_client.tree, bot_client)
-            logger.success(f"Бот {bot_client.bot.user} запущен и готов к работе!")
-            
-            # Загрузка кога InviteUtility
-            try:
-                await bot_client.bot.load_extension("src.invite_utility")
-                logger.info("Ког invite_utility загружен")
+                    if interaction.guild:
+                        restriction, restriction_reason = await checker.check_user_restriction(interaction)
+                        if not restriction:
+                            logger.error(f"CheckFailure для команды {command_name} в гильдии {guild_id}, канал {channel_id}: Пользователь {user_id} ограничен - {restriction_reason}")
+                            try:
+                                if not interaction.response.is_done():
+                                    await interaction.response.send_message(
+                                        restriction_reason or "Ваш доступ к боту ограничен.",
+                                        ephemeral=True
+                                    )
+                                else:
+                                    await interaction.followup.send(
+                                        restriction_reason or "Ваш доступ к боту ограничен.",
+                                        ephemeral=True
+                                    )
+                            except Exception as e:
+                                logger.error(f"Ошибка отправки сообщения об ошибке команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
+                            return
+                    
+                    logger.error(f"CheckFailure для команды {command_name} в гильдии {guild_id}, канал {channel_id}: Неизвестная причина\n{traceback.format_exc()}")
+                    try:
+                        if not interaction.response.is_done():
+                            await interaction.response.send_message(
+                                "Ошибка выполнения команды. Пожалуйста, попробуйте снова.",
+                                ephemeral=True
+                            )
+                        else:
+                            await interaction.followup.send(
+                                "Ошибка выполнения команды. Пожалуйста, попробуйте снова.",
+                                ephemeral=True
+                            )
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки сообщения об ошибке команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
+                else:
+                    logger.error(f"Ошибка команды {command_name} для пользователя {user_id} в гильдии {guild_id}, канал {channel_id}: {error}\n{traceback.format_exc()}")
+                    try:
+                        if not interaction.response.is_done():
+                            await interaction.response.send_message("Произошла ошибка при выполнении команды.", ephemeral=True)
+                        else:
+                            await interaction.followup.send("Произошла ошибка при выполнении команды.", ephemeral=True)
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки сообщения об ошибке команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
             except Exception as e:
-                logger.error(f"Ошибка загрузки кога invite_utility: {e}\n{traceback.format_exc()}")
-                
-        except Exception as e:
-            logger.error(f"Ошибка в on_ready: {e}\n{traceback.format_exc()}")
-            raise
+                logger.error(f"Критическая ошибка обработки ошибки команды {command_name} в гильдии {guild_id}, канал {channel_id}: {e}\n{traceback.format_exc()}")
 
-    return bot_client
+        @bot_client.bot.event
+        async def on_ready() -> None:
+            """Обработчик события готовности бота."""
+            logger.debug("Событие on_ready вызвано")
+            try:
+                bot_client.bot.loop.create_task(set_bot_activity(bot_client.bot))
+                logger.debug("set_bot_activity запущена как фоновая задача")
+                
+                await register_commands(bot_client.tree, bot_client)
+                logger.success(f"Бот {bot_client.bot.user} запущен и готов к работе!")
+            except Exception as e:
+                logger.error(f"Ошибка в on_ready: {e}\n{traceback.format_exc()}")
+                raise
+
+        Thread(target=run_flask, daemon=True).start()
+        session = ClientSession()
+        bot_client.bot.session = session
+        await bot_client.bot.start(config.TOKEN)
+    except Exception as e:
+        logger.error(f"Критическая ошибка запуска бота: {e}\n{traceback.format_exc()}")
+        raise
+    finally:
+        if session and not session.closed:
+            await session.close()
+        await bot_client.close()
+        logger.info("Бот остановлен")
+
+def start_bot() -> None:
+    """Старт бота с управлением асинхронным циклом."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(run_bot())
+        else:
+            loop.run_until_complete(run_bot())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}\n{traceback.format_exc()}")
+        exit(1)
+
+if __name__ == "__main__":
+    start_bot()
