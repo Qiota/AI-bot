@@ -36,7 +36,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
 g4f.debug.logging = False
 
 # Фиксированные промпты
-DEFAULT_PROMPT = "Ты — Чатбот. отвечай на своё усмотрение. Текущее время: {now}."
+DEFAULT_PROMPT = "Ты — Чатбот. Отвечай на своё усмотрение. Текущее время: {now}."
 DEFAULT_VISION_PROMPT = "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Текущее время: {now}."
 
 # Триггерные слова для веб-поиска
@@ -92,6 +92,14 @@ class AIChat:
         except Exception as e:
             logger.error(f"Ошибка очистки cookies: {e}")
 
+    def normalize_message_content(self, content: Optional[str], default: str = "Произошла ошибка.") -> str:
+        """Нормализация содержимого сообщения, чтобы избежать пустых строк и превышения лимита Discord."""
+        content = content.strip() if content and content.strip() else default
+        if len(content) > 2000:
+            logger.warning(f"Содержимое превышает лимит Discord (2000 символов): {len(content)}")
+            content = content[:1997] + "..."
+        return content
+
     async def on_message(self, message: discord.Message) -> None:
         """Обработка входящих сообщений."""
         msg_key = f"{message.id}-{message.channel.id}"
@@ -124,18 +132,23 @@ class AIChat:
             await self.start_new_conversation(user_id, channel_id, text)
             if isinstance(message.channel, discord.DMChannel):
                 result, restriction_reason = await checker.check_user_restriction(message)
+                restriction_reason = self.normalize_message_content(restriction_reason, "Ваш доступ к боту ограничен.")
                 if result:
                     await self._process_message(message)
                 else:
                     logger.debug(f"Пользователь {user_id} ограничен в DM")
-                    await self._send_temp_message(message.channel, message.author, restriction_reason or "Ваш доступ к боту ограничен.")
+                    logger.debug(f"Отправка временного сообщения: {restriction_reason}")
+                    await self._send_temp_message(message.channel, message.author, restriction_reason)
             else:
                 access_result, access_reason = await check_bot_access(message, self.bot_client)
                 restriction_result, restriction_reason = await checker.check_user_restriction(message)
+                access_reason = self.normalize_message_content(access_reason, "Доступ к боту ограничен.")
+                restriction_reason = self.normalize_message_content(restriction_reason, "Ваш доступ к боту ограничен.")
                 if access_result and restriction_result:
                     await self._process_message(message)
                 else:
-                    reason = access_reason if not access_result else restriction_reason or "Ваш доступ к боту ограничен."
+                    reason = access_reason if not access_result else restriction_reason
+                    logger.debug(f"Отправка причины ограничения: {reason}")
                     await self._send_temp_message(message.channel, message.author, reason)
         except Exception as e:
             logger.error(f"Ошибка обработки сообщения {msg_key}: {e}\n{traceback.format_exc()}")
@@ -175,17 +188,22 @@ class AIChat:
             await self.start_new_conversation(user_id, channel_id, text)
             if isinstance(after.channel, discord.DMChannel):
                 result, restriction_reason = await checker.check_user_restriction(after)
+                restriction_reason = self.normalize_message_content(restriction_reason, "Ваш доступ к боту ограничен.")
                 if result:
                     await self._process_edit(after)
                 else:
-                    await self._send_temp_message(after.channel, after.author, restriction_reason or "Ваш доступ к боту ограничен.")
+                    logger.debug(f"Отправка временного сообщения: {restriction_reason}")
+                    await self._send_temp_message(after.channel, after.author, restriction_reason)
             else:
                 access_result, access_reason = await check_bot_access(after, self.bot_client)
                 restriction_result, restriction_reason = await checker.check_user_restriction(after)
+                access_reason = self.normalize_message_content(access_reason, "Доступ к боту ограничен.")
+                restriction_reason = self.normalize_message_content(restriction_reason, "Ваш доступ к боту ограничен.")
                 if access_result and restriction_result:
                     await self._process_edit(after)
                 else:
-                    reason = access_reason if not access_result else restriction_reason or "Ваш доступ к боту ограничен."
+                    reason = access_reason if not access_result else restriction_reason
+                    logger.debug(f"Отправка причины ограничения: {reason}")
                     await self._send_temp_message(after.channel, after.author, reason)
         except Exception as e:
             logger.error(f"Ошибка обработки редактирования {msg_key}: {e}\n{traceback.format_exc()}")
@@ -236,6 +254,41 @@ class AIChat:
         else:
             await self._send_temp_message(message.channel, message.author, "Неверная команда. Используйте: .model list | .model view | .model use text/vision <модель>")
 
+    async def _send_temp_message(self, channel: discord.abc.Messageable, user: discord.User, content: str) -> None:
+        """Отправка временного сообщения с последующим удалением."""
+        content = self.normalize_message_content(content)
+        logger.debug(f"Отправка временного сообщения в канал {getattr(channel, 'id', 'неизвестно')}: {content}")
+
+        try:
+            if isinstance(channel, discord.TextChannel):
+                permissions = channel.permissions_for(channel.guild.me)
+                if not permissions.send_messages:
+                    logger.warning(f"Нет прав на отправку сообщений в канал {channel.id}")
+                    raise discord.Forbidden(None, "Отсутствуют права на отправку сообщений")
+                if not permissions.manage_messages:
+                    logger.warning(f"Нет прав на удаление сообщений в канал {channel.id}, отправка без удаления")
+                    await channel.send(content)
+                    return
+
+            msg = await channel.send(content)
+            await asyncio.sleep(10)
+            await msg.delete()
+
+        except discord.Forbidden as e:
+            logger.error(f"Ошибка отправки сообщения в канал {getattr(channel, 'id', 'неизвестно')}: {e}")
+            try:
+                dm_channel = user.dm_channel or await user.create_dm()
+                msg = await dm_channel.send(content)
+                logger.info(f"Сообщение отправлено в личные сообщения пользователю {user.id}")
+                await asyncio.sleep(10)
+                await msg.delete()
+            except discord.Forbidden:
+                logger.error(f"Невозможно отправить личное сообщение пользователю {user.id}: Личные сообщения закрыты или бот заблокирован")
+            except Exception as dm_e:
+                logger.error(f"Ошибка отправки в личные сообщения пользователю {user.id}: {dm_e}\n{traceback.format_exc()}")
+        except discord.HTTPException as e:
+            logger.error(f"Ошибка HTTP при отправке сообщения в канал {getattr(channel, 'id', 'неизвестно')}: {e}\n{traceback.format_exc()}")
+
     async def _process_message(self, message: discord.Message) -> None:
         """Обработка сообщения с генерацией ответа."""
         async with message.channel.typing():
@@ -246,6 +299,9 @@ class AIChat:
             parts = await self.generate_response(user_id, message_id, query, message, use_search=use_search)
             if parts:
                 await self._send_split_message(message, parts)
+            else:
+                logger.debug(f"Не удалось сгенерировать ответ для сообщения {message_id}")
+                await self._send_temp_message(message.channel, message.author, "Не удалось сгенерировать ответ.")
 
     async def _process_edit(self, after: discord.Message) -> None:
         """Обработка отредактированного сообщения."""
@@ -260,6 +316,9 @@ class AIChat:
             parts = await self.generate_response(user_id, message_id, query, after, is_edit=True, use_search=use_search)
             if parts:
                 await self._send_split_message(after, parts)
+            else:
+                logger.debug(f"Не удалось сгенерировать ответ для отредактированного сообщения {message_id}")
+                await self._send_temp_message(after.channel, after.author, "Не удалось сгенерировать ответ.")
 
     def _check_trigger_words(self, text: str) -> Tuple[bool, str]:
         """Проверка наличия триггерных слов для активации веб-поиска."""
@@ -298,11 +357,12 @@ class AIChat:
                 parts.append(part)
             remaining = remaining[split_index:]
 
-        return parts if parts else ["Ответ пуст или некорректен."]
+        return parts if parts else [self.normalize_message_content(None, "Ответ пуст или некорректен.")]
 
     async def _send_split_message(self, message: discord.Message, parts: List[str]) -> None:
         """Отправка частей ответа в канал."""
         for i, part in enumerate(parts):
+            part = self.normalize_message_content(part)
             try:
                 sent_msg = await (message.reply(part) if i == 0 else message.channel.send(part))
                 self.bot_client.message_to_response[f"{message.id}_{i}" if i > 0 else message.id] = sent_msg.id
@@ -315,46 +375,14 @@ class AIChat:
                 await self._save_conversation(str(message.author.id), conversation_id)
             except (Forbidden, HTTPException) as e:
                 logger.error(f"Ошибка отправки части {i+1}: {e}\n{traceback.format_exc()}")
-                await self._send_temp_message(message.channel, message.author, "Ошибка отправки.")
-
-    async def _send_temp_message(self, channel: discord.abc.Messageable, user: discord.User, content: str) -> None:
-        """Отправка временного сообщения с последующим удалением."""
-        try:
-            if isinstance(channel, discord.TextChannel):
-                permissions = channel.permissions_for(channel.guild.me)
-                if not permissions.send_messages:
-                    logger.warning(f"Нет прав на отправку сообщений в канал {channel.id}")
-                    raise discord.Forbidden(None, "Отсутствуют права на отправку сообщений")
-                if not permissions.manage_messages:
-                    logger.warning(f"Нет прав на удаление сообщений в канал {channel.id}, отправка без удаления")
-                    await channel.send(content)
-                    return
-
-            msg = await channel.send(content)
-            await asyncio.sleep(10)
-            await msg.delete()
-
-        except discord.Forbidden as e:
-            logger.error(f"Ошибка отправки сообщения в канал {getattr(channel, 'id', 'неизвестно')}: {e}")
-            try:
-                dm_channel = user.dm_channel or await user.create_dm()
-                msg = await dm_channel.send(content)
-                logger.info(f"Сообщение отправлено в личные сообщения пользователю {user.id}")
-                await asyncio.sleep(10)
-                await msg.delete()
-            except discord.Forbidden:
-                logger.error(f"Невозможно отправить личное сообщение пользователю {user.id}: Личные сообщения закрыты или бот заблокирован")
-            except Exception as dm_e:
-                logger.error(f"Ошибка отправки в личные сообщения пользователю {user.id}: {dm_e}\n{traceback.format_exc()}")
-        except discord.HTTPException as e:
-            logger.error(f"Ошибка HTTP при отправке сообщения в канал {getattr(channel, 'id', 'неизвестно')}: {e}\n{traceback.format_exc()}")
+                await self._send_temp_message(message.channel, message.author, "Ошибка отправки ответа.")
 
     async def vision(self, prompt: str, images: List[Tuple[bytes, str]], user_id: str, channel_type: str, channel_id: str, use_search: bool = False, query: str = "") -> Optional[str]:
         """Обработка изображений с использованием PollinationsAI и веб-поиска."""
         for image_data, _ in images:
             if len(image_data) > 10 * 1024 * 1024:
                 logger.warning(f"Изображение слишком большое: {len(image_data)} байт")
-                return "Изображение слишком большое (макс. 10 МБ)."
+                return self.normalize_message_content(None, "Изображение слишком большое (макс. 10 МБ).")
 
         if PSUTIL_AVAILABLE:
             process = psutil.Process()
@@ -439,12 +467,12 @@ class AIChat:
                 # Вызов API
                 selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
                 logger.debug(f"Используется модель для vision: {selected_model}")
-                response = call_vision_api()  # Синхронный вызов
+                response = call_vision_api()
 
                 # Проверка ответа
                 if not hasattr(response, "choices") or not response.choices or not response.choices[0].message.content:
                     logger.warning("Пустой или некорректный ответ от PollinationsAI")
-                    return None
+                    return self.normalize_message_content(None, "Не удалось обработать изображение.")
 
                 response_text = response.choices[0].message.content.strip()
                 logger.debug(f"Успешный ответ от PollinationsAI: {response_text[:100]}...")
@@ -463,16 +491,16 @@ class AIChat:
 
             except (ProviderNotFoundError, ModelNotSupportedError) as e:
                 logger.error(f"Ошибка провайдера/модели: {e}")
-                return "Модель или провайдер недоступны."
+                return self.normalize_message_content(None, "Модель или провайдер недоступны.")
             except RateLimitError as e:
                 logger.error(f"Превышен лимит запросов: {e}")
-                return "Превышен лимит запросов, попробуйте позже."
+                return self.normalize_message_content(None, "Превышен лимит запросов, попробуйте позже.")
             except ResponseError as e:
                 logger.error(f"Ошибка ответа API: {e}")
-                return "Ошибка обработки изображения."
+                return self.normalize_message_content(None, "Ошибка обработки изображения.")
             except Exception as e:
                 logger.error(f"Неизвестная ошибка при обработке изображений: {e}\n{traceback.format_exc()}")
-                return None
+                return self.normalize_message_content(None, "Не удалось обработать изображение.")
             finally:
                 formatted_images = None
                 if PSUTIL_AVAILABLE:
@@ -490,7 +518,7 @@ class AIChat:
 
         try:
             if not (text or message.attachments):
-                return ["Введите текст или прикрепите изображение."]
+                return [self.normalize_message_content(None, "Введите текст или прикрепите изображение.")]
 
             channel_type = "DM" if isinstance(message.channel, discord.DMChannel) else "guild"
             channel_id = str(message.channel.id)
@@ -508,7 +536,7 @@ class AIChat:
                     query=text
                 )
                 if not response:
-                    return ["Не удалось обработать изображение."]
+                    return [self.normalize_message_content(None, "Не удалось обработать изображение.")]
                 return self._split_response(response, self.bot_client.user_settings[user_id]["max_response_length"])
 
             context = await self.get_context(user_id, message.channel)
@@ -529,13 +557,13 @@ class AIChat:
                 query=text
             )
             if not response:
-                return ["Не удалось обработать текст."]
+                return [self.normalize_message_content(None, "Не удалось обработать текст.")]
 
             return self._split_response(response, self.bot_client.user_settings[user_id]["max_response_length"])
 
         except Exception as e:
             logger.error(f"Ошибка генерации ответа для {message_id}: {e}\n{traceback.format_exc()}")
-            return ["Ошибка генерации ответа."]
+            return [self.normalize_message_content(None, "Ошибка генерации ответа.")]
         finally:
             if PSUTIL_AVAILABLE:
                 mem_after = process.memory_info().rss
