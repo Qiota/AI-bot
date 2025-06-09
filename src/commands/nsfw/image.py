@@ -7,7 +7,7 @@ from io import BytesIO
 import aiohttp
 from asyncio import Lock, Queue, TimeoutError
 import asyncio
-from typing import Tuple
+from typing import Tuple, Optional
 import PIL.Image
 import PIL.ImageEnhance
 import io
@@ -97,7 +97,11 @@ def create_progress_bar(progress: float, length: int = 20) -> str:
     filled = int(length * progress)
     return "█" * filled + "□" * (length - filled)
 
-async def update_progress(interaction: discord.Interaction, progress: float, message: discord.Message) -> discord.Message:
+async def update_progress(
+    interaction: discord.Interaction,
+    progress: float,
+    message: discord.Message
+) -> Optional[discord.Message]:
     """
     Обновляет сообщение с прогресс-баром, пересоздавая его, если оно удалено.
 
@@ -107,24 +111,32 @@ async def update_progress(interaction: discord.Interaction, progress: float, mes
         message: Сообщение для обновления.
 
     Returns:
-        discord.Message: Обновлённое или новое сообщение.
+        Optional[discord.Message]: Обновлённое или новое сообщение, или None в случае ошибки.
+
+    Raises:
+        Exception: Если произошла ошибка при редактировании или отправке сообщения.
     """
     embed = Embed(title="⏳ Генерация", color=0x3498DB)
     embed.add_field(name="Прогресс", value=f"```{create_progress_bar(progress)} {int(progress * 100)}%```", inline=False)
 
-    if await check_message_exists(message):
-        try:
-            await message.edit(embed=embed, view=None)
-            return message
-        except discord.errors.NotFound:
-            logger.warning(f"Сообщение {message.id} не найдено при обновлении прогресса, пересоздаём")
-        except Exception as e:
-            logger.error(f"Ошибка обновления прогресс-бара для {interaction.user.id}: {str(e)}")
-    
-    # Пересоздаём сообщение, если оно удалено
-    logger.debug(f"Пересоздаём сообщение для прогресс-бара в канале {interaction.channel.id}")
-    new_message = await interaction.channel.send(embed=embed)
-    return new_message
+    try:
+        if await check_message_exists(message):
+            try:
+                await message.edit(embed=embed, view=None)
+                return message
+            except discord.errors.NotFound:
+                logger.warning(f"Сообщение {message.id} не найдено при обновлении прогресса, пересоздаём")
+            except Exception as e:
+                logger.error(f"Ошибка редактирования прогресс-бара для {interaction.user.id}: {str(e)}")
+                raise Exception(f"Ошибка редактирования сообщения: {str(e)}") from e
+        
+        # Пересоздаём сообщение, если оно удалено
+        logger.debug(f"Пересоздаём сообщение для прогресс-бара в канале {interaction.channel.id}")
+        new_message = await interaction.channel.send(embed=embed)
+        return new_message
+    except Exception as e:
+        logger.error(f"Ошибка в update_progress для {interaction.user.id}: {str(e)}")
+        return None
 
 async def generate_initial_prompt() -> str:
     """Генерирует начальный промпт с выразительными деталями."""
@@ -138,18 +150,17 @@ async def generate_initial_prompt() -> str:
                         {
                             "role": "system",
                             "content": (
-                                "Generate a vivid, structured image generation prompt in the style of: 'Summer trip in Tokyo, sakura lover, sweetheart couple, t-shirt design, balance harmony space, pixel art, Studio Ghibli style, white background, ultra high quality.' "
-                                "Include a clear scene description, emotional tone, specific subjects or characters, artistic style, and color palette. "
+                                "Generate a vivid, structured image generation prompt. "
                                 "Use concise, comma-separated phrases to describe elements. "
                                 "Avoid technical settings like resolution, steps, or CFG scale. "
-                                "Ensure the prompt is safe, coherent, and suitable for image generation. Avoid NSFW content. "
+                                "Ensure the prompt is safe, coherent, and suitable for image generation. NSFW content allow. "
                                 "Return only the prompt, no Markdown or additional formatting."
                             )
                         },
                         {"role": "user", "content": "Generate a prompt."}
                     ],
-                    max_tokens=300,
-                    temperature=0.7
+                    max_tokens=500,
+                    temperature=0.9
                 )
             prompt = response.choices[0].message.content.strip()
             cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', prompt).strip()
@@ -174,19 +185,18 @@ async def improve_prompt(prompt: str, nsfw_allowed: bool = False) -> str:
                         {
                             "role": "system",
                             "content": (
-                                "Enhance the provided image generation prompt to match the style of: 'Summer trip in Tokyo, sakura lover, sweetheart couple, t-shirt design, balance harmony space, pixel art, Studio Ghibli style, white background, ultra high quality.' "
-                                "Focus on improving the scene, emotions, characters, colors, textures, lighting, and artistic style. "
+                                "Enhance the provided image generation prompt. "
                                 "Use concise, comma-separated phrases for clarity. "
                                 "Do NOT include technical settings like resolution, steps, CFG scale, or quality modifiers (e.g., 'ultra high quality'). "
-                                f"{'Allow tasteful NSFW elements if present.' if nsfw_allowed else 'Avoid NSFW content.'} "
+                                f"{'Allow tasteful NSFW elements if present.' if nsfw_allowed else 'NSFW content allow.'} "
                                 "Ensure the prompt is coherent and suitable for image generation. "
                                 "Return only the enhanced prompt, no Markdown or additional formatting."
                             )
                         },
                         {"role": "user", "content": f"Enhance: {prompt}."}
                     ],
-                    max_tokens=300,
-                    temperature=0.6
+                    max_tokens=500,
+                    temperature=0.9
                 )
             improved = response.choices[0].message.content.strip()
             cleaned = re.sub(r'\[.*?\]\(.*?\)|<!--.*?-->|https?://\S+', '', improved).strip()
@@ -257,6 +267,9 @@ async def generate_image(
         original_prompt = prompt
         # Всегда улучшаем промпт перед генерацией
         message = await update_progress(interaction, 0.1, message)
+        if message is None:
+            raise Exception("Не удалось обновить прогресс-бар: ошибка отправки сообщения")
+
         final_prompt = await improve_prompt(prompt, nsfw_allowed=False)
         if not final_prompt or not isinstance(final_prompt, str):
             final_prompt = prompt
@@ -273,6 +286,9 @@ async def generate_image(
         }
 
         message = await update_progress(interaction, 0.3, message)
+        if message is None:
+            raise Exception("Не удалось обновить прогресс-бар: ошибка отправки API-запроса")
+
         try:
             async with asyncio.timeout(CONFIG["api_timeout"]):
                 response = await client.images.async_generate(**params)
@@ -281,8 +297,13 @@ async def generate_image(
             logger.error(f"Таймаут API ImageLabs для {interaction.user.id}: {str(e)}")
             raise Exception(error_msg) from e
         except Exception as e:
-            error_msg = f"Ошибка API ImageLabs: {str(e)}"
-            logger.error(f"Ошибка API ImageLabs для {interaction.user.id}: {str(e)}")
+            error_msg = str(e)
+            if "against our TOS" in error_msg.lower():
+                error_msg = "Запрос нарушает условия использования ImageLabs."
+                logger.error(f"TOS нарушение для {interaction.user.id}: промпт '{final_prompt}'")
+            else:
+                error_msg = f"Ошибка API ImageLabs: {error_msg}"
+                logger.error(f"Ошибка API ImageLabs для {interaction.user.id}: {str(e)}")
             raise Exception(error_msg) from e
 
         if not response or not hasattr(response, "data") or not response.data:
@@ -305,6 +326,9 @@ async def generate_image(
                 "referer": "https://editor.imagelabs.com/"
             }
             message = await update_progress(interaction, 0.6, message)
+            if message is None:
+                raise Exception("Не удалось обновить прогресс-бар: ошибка загрузки изображения")
+
             try:
                 async with asyncio.timeout(CONFIG["api_timeout"]):
                     async with session.get(image_url, headers=headers) as resp:
@@ -323,6 +347,9 @@ async def generate_image(
                 raise Exception(error_msg) from e
 
         message = await update_progress(interaction, 0.8, message)
+        if message is None:
+            raise Exception("Не удалось обновить прогресс-бар: ошибка обработки изображения")
+
         img = PIL.Image.open(BytesIO(image_data)).convert("RGB")
         img = img.resize(aspect_ratio, PIL.Image.LANCZOS)
         if CONFIG["default_settings"]["brightness"] != 0:
@@ -347,6 +374,9 @@ async def generate_image(
         embed = await truncate_embed(embed)
 
         message = await update_progress(interaction, 1.0, message)
+        if message is None:
+            raise Exception("Не удалось обновить прогресс-бар: ошибка финальной отправки")
+
         response_view = ImageResponseView(
             user_id=interaction.user.id,
             prompt=prompt,
@@ -384,19 +414,27 @@ async def generate_image(
             for item in view.children:
                 item.disabled = False
         error_str = str(e)
-        if "400 Bad Request (error code: 20009)" in error_str or "20009" in error_str:
+        if "нарушает условия использования" in error_str.lower():
+            embed = Embed(title="❌ Ошибка", description=error_str, color=0xE74C3C)
+        elif "400 Bad Request (error code: 20009)" in error_str or "20009" in error_str:
             embed = Embed(title="❌ Ошибка", description="Обнаружен явный контент.", color=0xE74C3C)
         else:
             embed = Embed(title="❌ Ошибка", description=f"Ошибка генерации: {error_str[:CONFIG['discord_embed_limits']['description'] - 50]}", color=0xE74C3C)
-        if await check_message_exists(message):
-            await message.edit(embed=embed, view=view if isinstance(view, ImageResponseView) else None)
-        else:
-            await interaction.channel.send(embed=embed)
+        
+        try:
+            if await check_message_exists(message):
+                await message.edit(embed=embed, view=view if isinstance(view, ImageResponseView) else None)
+            else:
+                await interaction.channel.send(embed=embed)
+        except Exception as send_error:
+            logger.error(f"Ошибка отправки сообщения об ошибке для {interaction.user.id}: {str(send_error)}")
+        
         logger.error(f"Ошибка /image для {interaction.user.id}: {error_str}")
 
     finally:
-        await generation_queue.get()
-        generation_queue.task_done()
+        if not success:
+            await generation_queue.get()
+            generation_queue.task_done()
 
 class PromptModal(Modal):
     """Модальное окно для ввода промпта и отрицательного промпта."""
@@ -664,7 +702,7 @@ class SettingsView(View):
         self.generate_button.callback = self.generate_button_callback
         self.add_item(self.generate_button)
 
-        self.prompt_button = Button(label="Укажите промпт", style=ButtonStyle.primary, custom_id="open_prompt", row=3)
+        self.prompt_button = Button(label="Указать промпт", style=ButtonStyle.primary, custom_id="open_prompt", row=3)
         self.prompt_button.callback = self.open_prompt_button
         self.add_item(self.prompt_button)
 
