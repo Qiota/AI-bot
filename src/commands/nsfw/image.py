@@ -7,7 +7,7 @@ from io import BytesIO
 import aiohttp
 from asyncio import Lock, Queue, TimeoutError
 import asyncio
-from typing import Tuple, Optional
+from typing import Tuple
 import PIL.Image
 import PIL.ImageEnhance
 import io
@@ -52,10 +52,10 @@ CONFIG = {
     "prompt_max_length": 1000,
     "negative_prompt_max_length": 500,
     "discord_embed_limits": {
-        "description": 4096,
-        "total": 6000
+        "description": 4096,  # Максимум для description в Embed
+        "total": 6000  # Общий лимит символов для Embed
     },
-    "api_timeout": 30
+    "api_timeout": 30  # Таймаут для запросов к API (в секундах)
 }
 
 # Создание временной директории
@@ -66,32 +66,65 @@ description = "Генерирует изображение, вдохновлён
 command_lock = Lock()
 generation_queue = Queue(maxsize=5)
 
+async def check_message_exists(message: discord.Message) -> bool:
+    """
+    Проверяет, существует ли сообщение в канале.
+
+    Args:
+        message: Сообщение для проверки.
+
+    Returns:
+        bool: True, если сообщение существует, иначе False.
+
+    Raises:
+        discord.errors.Forbidden: Если бот не имеет доступа к каналу.
+    """
+    try:
+        await message.channel.fetch_message(message.id)
+        return True
+    except discord.errors.NotFound:
+        logger.debug(f"Сообщение {message.id} не найдено в канале {message.channel.id}")
+        return False
+    except discord.errors.Forbidden as e:
+        logger.error(f"Нет доступа к каналу {message.channel.id}: {str(e)}")
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка проверки сообщения {message.id}: {str(e)}")
+        return False
+
 def create_progress_bar(progress: float, length: int = 20) -> str:
     """Создает текстовую шкалу прогресса."""
     filled = int(length * progress)
     return "█" * filled + "□" * (length - filled)
 
-async def update_progress(interaction: discord.Interaction, progress: float, message: Optional[discord.Message], ephemeral: bool) -> Optional[discord.Message]:
-    """Обновляет сообщение с прогресс-баром, возвращает новое сообщение, если исходное недоступно."""
+async def update_progress(interaction: discord.Interaction, progress: float, message: discord.Message) -> discord.Message:
+    """
+    Обновляет сообщение с прогресс-баром, пересоздавая его, если оно удалено.
+
+    Args:
+        interaction: Взаимодействие с пользователем.
+        progress: Прогресс генерации (0.0–1.0).
+        message: Сообщение для обновления.
+
+    Returns:
+        discord.Message: Обновлённое или новое сообщение.
+    """
     embed = Embed(title="⏳ Генерация", color=0x3498DB)
     embed.add_field(name="Прогресс", value=f"```{create_progress_bar(progress)} {int(progress * 100)}%```", inline=False)
-    
-    try:
-        if message:
-            await message.edit(embed=embed, view=None, attachments=[])
-            return message
-    except discord.errors.NotFound:
-        logger.debug(f"Сообщение для прогресс-бара не найдено для {interaction.user.id}, создаём новое.")
+
+    if await check_message_exists(message):
         try:
-            new_message = await interaction.followup.send(embed=embed, ephemeral=ephemeral, wait=True)
-            return new_message
-        except discord.errors.InteractionResponded:
-            logger.warning(f"Interaction уже обработан для {interaction.user.id}")
-            return None
-    except Exception as e:
-        logger.error(f"Ошибка при обновлении прогресс-бара для {interaction.user.id}: {str(e)}")
-        return None
-    return message
+            await message.edit(embed=embed, view=None)
+            return message
+        except discord.errors.NotFound:
+            logger.warning(f"Сообщение {message.id} не найдено при обновлении прогресса, пересоздаём")
+        except Exception as e:
+            logger.error(f"Ошибка обновления прогресс-бара для {interaction.user.id}: {str(e)}")
+    
+    # Пересоздаём сообщение, если оно удалено
+    logger.debug(f"Пересоздаём сообщение для прогресс-бара в канале {interaction.channel.id}")
+    new_message = await interaction.channel.send(embed=embed)
+    return new_message
 
 async def generate_initial_prompt() -> str:
     """Генерирует начальный промпт с выразительными деталями."""
@@ -190,19 +223,6 @@ async def truncate_embed(embed: discord.Embed) -> discord.Embed:
 
     return embed
 
-async def check_message_exists(message: Optional[discord.Message]) -> bool:
-    """Проверяет, существует ли сообщение."""
-    if not message:
-        return False
-    try:
-        await message.edit(content=message.content)  # Проверка доступности
-        return True
-    except discord.errors.NotFound:
-        return False
-    except Exception as e:
-        logger.error(f"Ошибка проверки сообщения: {str(e)}")
-        return False
-
 async def generate_image(
     interaction: discord.Interaction,
     prompt: str,
@@ -212,29 +232,32 @@ async def generate_image(
     steps: int,
     cfg_scale: float,
     improve_prompt_flag: bool,
-    ephemeral: bool,
     view: View,
-    message: Optional[discord.Message]
+    message: discord.Message
 ) -> None:
-    """Генерирует изображение на основе параметров с обработкой ошибок API."""
+    """
+    Генерирует изображение на основе параметров с обработкой ошибок API.
+
+    Args:
+        interaction: Взаимодействие с пользователем.
+        prompt: Описание изображения.
+        aspect_ratio: Кортеж (ширина, высота).
+        negative_prompt: Что исключить из изображения.
+        model: Модель генерации.
+        steps: Количество шагов генерации.
+        cfg_scale: Влияние промпта на результат.
+        improve_prompt_flag: Флаг улучшения промпта.
+        view: View для управления кнопками.
+        message: Сообщение для отправки результата.
+    """
     await generation_queue.put(interaction)
     client = AsyncClient(provider=ImageLabs)
     success = False
     try:
         original_prompt = prompt
-        # Проверяем существование сообщения
-        if not await check_message_exists(message):
-            logger.warning(f"Исходное сообщение недоступно для {interaction.user.id}, создаём новое")
-            embed = Embed(title="⏳ Генерация", color=0x3498DB)
-            embed.add_field(name="Прогресс", value=f"```{create_progress_bar(0)} 0%```", inline=False)
-            message = await interaction.followup.send(embed=embed, ephemeral=ephemeral, wait=True)
-
         # Всегда улучшаем промпт перед генерацией
-        message = await update_progress(interaction, 0.1, message, ephemeral)
-        if not message:
-            raise Exception("Не удалось создать или обновить сообщение для прогресс-бара")
-
-        final_prompt = await improve_prompt(prompt, nsfw_allowed=True)
+        message = await update_progress(interaction, 0.1, message)
+        final_prompt = await improve_prompt(prompt, nsfw_allowed=False)
         if not final_prompt or not isinstance(final_prompt, str):
             final_prompt = prompt
 
@@ -249,10 +272,7 @@ async def generate_image(
             "cfg_scale": cfg_scale
         }
 
-        message = await update_progress(interaction, 0.3, message, ephemeral)
-        if not message:
-            raise Exception("Не удалось обновить прогресс-бар на этапе 0.3")
-
+        message = await update_progress(interaction, 0.3, message)
         try:
             async with asyncio.timeout(CONFIG["api_timeout"]):
                 response = await client.images.async_generate(**params)
@@ -284,10 +304,7 @@ async def generate_image(
                 "origin": "https://editor.imagelabs.com",
                 "referer": "https://editor.imagelabs.com/"
             }
-            message = await update_progress(interaction, 0.6, message, ephemeral)
-            if not message:
-                raise Exception("Не удалось обновить прогресс-бар на этапе 0.6")
-
+            message = await update_progress(interaction, 0.6, message)
             try:
                 async with asyncio.timeout(CONFIG["api_timeout"]):
                     async with session.get(image_url, headers=headers) as resp:
@@ -305,10 +322,7 @@ async def generate_image(
                 logger.error(f"Таймаут загрузки изображения для {interaction.user.id}: {str(e)}")
                 raise Exception(error_msg) from e
 
-        message = await update_progress(interaction, 0.8, message, ephemeral)
-        if not message:
-            raise Exception("Не удалось обновить прогресс-бар на этапе 0.8")
-
+        message = await update_progress(interaction, 0.8, message)
         img = PIL.Image.open(BytesIO(image_data)).convert("RGB")
         img = img.resize(aspect_ratio, PIL.Image.LANCZOS)
         if CONFIG["default_settings"]["brightness"] != 0:
@@ -332,13 +346,9 @@ async def generate_image(
 
         embed = await truncate_embed(embed)
 
-        message = await update_progress(interaction, 1.0, message, ephemeral)
-        if not message:
-            message = await interaction.followup.send(embed=embed, ephemeral=ephemeral, wait=True)
-
+        message = await update_progress(interaction, 1.0, message)
         response_view = ImageResponseView(
             user_id=interaction.user.id,
-            ephemeral=ephemeral,
             prompt=prompt,
             aspect_ratio=aspect_ratio,
             negative_prompt=negative_prompt,
@@ -347,16 +357,27 @@ async def generate_image(
             cfg_scale=cfg_scale,
             improve_prompt_flag=improve_prompt_flag
         )
-        await message.edit(
-            content=f"{interaction.user.mention}",
-            embed=embed,
-            attachments=[file],
-            view=response_view
-        )
-        response_view.message = message
+        if await check_message_exists(message):
+            await message.edit(
+                content=f"{interaction.user.mention}",
+                embed=embed,
+                attachments=[file],
+                view=response_view
+            )
+            response_view.message = message
+        else:
+            # Если сообщение удалено, отправляем новое
+            new_message = await interaction.channel.send(
+                content=f"{interaction.user.mention}",
+                embed=embed,
+                file=file,
+                view=response_view
+            )
+            response_view.message = new_message
         success = True
 
     except Exception as e:
+        # Проверка типа view для корректной обработки кнопок
         if isinstance(view, SettingsView):
             view.enable_all()
         elif isinstance(view, ImageResponseView):
@@ -367,13 +388,10 @@ async def generate_image(
             embed = Embed(title="❌ Ошибка", description="Обнаружен явный контент.", color=0xE74C3C)
         else:
             embed = Embed(title="❌ Ошибка", description=f"Ошибка генерации: {error_str[:CONFIG['discord_embed_limits']['description'] - 50]}", color=0xE74C3C)
-        try:
-            if message and await check_message_exists(message):
-                await message.edit(embed=embed, view=view if isinstance(view, ImageResponseView) else None, attachments=[])
-            else:
-                await interaction.followup.send(embed=embed, ephemeral=ephemeral)
-        except Exception as e:
-            logger.error(f"Ошибка отправки сообщения об ошибке для {interaction.user.id}: {str(e)}")
+        if await check_message_exists(message):
+            await message.edit(embed=embed, view=view if isinstance(view, ImageResponseView) else None)
+        else:
+            await interaction.channel.send(embed=embed)
         logger.error(f"Ошибка /image для {interaction.user.id}: {error_str}")
 
     finally:
@@ -402,7 +420,6 @@ class PromptModal(Modal):
             default=self.view.negative_prompt if self.view.negative_prompt != CONFIG["default_negative_prompt"] else "",
             max_length=CONFIG["negative_prompt_max_length"]
         )
-
         self.add_item(self.prompt_input)
         self.add_item(self.negative_prompt_input)
 
@@ -412,22 +429,22 @@ class PromptModal(Modal):
             return
 
         async with self.view.view_lock:
-            await interaction.response.defer(ephemeral=self.view.ephemeral)
+            await interaction.response.defer()
             self.view.prompt = self.prompt_input.value or await generate_initial_prompt()
             self.view.negative_prompt = self.negative_prompt_input.value or CONFIG["default_negative_prompt"]
             self.view.is_prompt_improved = False
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
             embed.description = f"**📝 Промпт**:\n```{self.view.prompt}```"
             embed = await truncate_embed(embed)
-            embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.view.model]}`", inline=True)
-            embed.add_field(name="📏 Соотношение", value=f"> `{self.view.aspect_ratio}`", inline=True)
-            embed.add_field(name="🔄 Шаги", value=f"> `{self.view.steps}`", inline=True)
-            embed.add_field(name="⚖️ CFG", value=f"> `{self.view.cfg_scale}`", inline=True)
+            embed.add_field(name="🤖 Модель", value=f"> {CONFIG['models'][self.view.model]}", inline=True)
+            embed.add_field(name="📏 Соотношение", value=f"> {self.view.aspect_ratio}", inline=True)
+            embed.add_field(name="🔄 Шаги", value=f"> {self.view.steps}", inline=True)
+            embed.add_field(name="⚖️ CFG", value=f"> {self.view.cfg_scale}", inline=True)
             self.view.enable_all()
             if await check_message_exists(interaction.message):
                 await interaction.message.edit(embed=embed, view=self.view)
             else:
-                await interaction.followup.send(embed=embed, view=self.view, ephemeral=self.view.ephemeral)
+                await interaction.channel.send(embed=embed, view=self.view)
 
 class SettingsModal(Modal):
     """Модальное окно для настройки технических параметров."""
@@ -445,13 +462,12 @@ class SettingsModal(Modal):
             max_length=3
         )
         self.cfg_scale_input = TextInput(
-            label="CFG Scale (1.0-20.0)",
+            label="CFG Scale (1.0–20.0)",
             placeholder="Влияние промпта на результат",
             required=True,
             default=str(self.view.cfg_scale),
             max_length=4
         )
-
         self.add_item(self.steps_input)
         self.add_item(self.cfg_scale_input)
 
@@ -461,7 +477,7 @@ class SettingsModal(Modal):
             return
 
         async with self.view.view_lock:
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer()
             try:
                 self.view.steps = int(self.steps_input.value)
                 self.view.cfg_scale = float(self.cfg_scale_input.value)
@@ -471,27 +487,26 @@ class SettingsModal(Modal):
                     raise ValueError("CFG Scale должен быть в диапазоне 1.0–20.0.")
             except ValueError as e:
                 embed = Embed(title="❌ Ошибка", description=str(e), color=0xE74C3C)
-                await interaction.followup.send(embed=embed, ephemeral=True)
+                await interaction.followup.send(embed=embed)
                 return
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
             embed.description = f"**📝 Промпт**:\n```{self.view.prompt}```"
             embed = await truncate_embed(embed)
-            embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.view.model]}`", inline=True)
-            embed.add_field(name="📏 Соотношение", value=f"> `{self.view.aspect_ratio}`", inline=True)
-            embed.add_field(name="🔄 Шаги", value=f"> `{self.view.steps}`", inline=True)
-            embed.add_field(name="⚖️ CFG", value=f"> `{self.view.cfg_scale}`", inline=True)
+            embed.add_field(name="🤖 Модель", value=f"> {CONFIG['models'][self.view.model]}", inline=True)
+            embed.add_field(name="📏 Соотношение", value=f"> {self.view.aspect_ratio}", inline=True)
+            embed.add_field(name="🔄 Шаги", value=f"> {self.view.steps}", inline=True)
+            embed.add_field(name="⚖️ CFG", value=f"> {self.view.cfg_scale}", inline=True)
             self.view.enable_all()
             if await check_message_exists(interaction.message):
                 await interaction.message.edit(embed=embed, view=self.view)
             else:
-                await interaction.followup.send(embed=embed, view=self.view, ephemeral=self.view.ephemeral)
+                await interaction.channel.send(embed=embed, view=self.view)
 
 class ImageResponseView(View):
     """View для взаимодействия с готовым изображением."""
     def __init__(
         self,
         user_id: int,
-        ephemeral: bool,
         prompt: str,
         aspect_ratio: Tuple[int, int],
         negative_prompt: str,
@@ -500,9 +515,8 @@ class ImageResponseView(View):
         cfg_scale: float,
         improve_prompt_flag: bool
     ):
-        super().__init__(timeout=600)
+        super().__init__(timeout=600)  # 10 минут
         self.user_id = user_id
-        self.ephemeral = ephemeral
         self.prompt = prompt
         self.aspect_ratio = aspect_ratio
         self.negative_prompt = negative_prompt
@@ -512,13 +526,12 @@ class ImageResponseView(View):
         self.improve_prompt_flag = improve_prompt_flag
         self.message = None
         self.last_regenerate_time = 0
-        self.cooldown = 60
+        self.cooldown = 60  # 1 минута
 
-        if not ephemeral:
-            self.delete_button = Button(label="🗑️ Удалить", style=ButtonStyle.danger, custom_id="delete_image")
-            self.delete_button.callback = self.delete_message_callback
-            self.add_item(self.delete_button)
-            asyncio.create_task(self.disable_delete_button())
+        self.delete_button = Button(label="🗑️ Удалить", style=ButtonStyle.danger, custom_id="delete_image")
+        self.delete_button.callback = self.delete_message_callback
+        self.add_item(self.delete_button)
+        asyncio.create_task(self.disable_delete_button())
 
         self.regenerate_button = Button(label="🔄 Перегенерировать", style=ButtonStyle.primary, custom_id="regenerate_image")
         self.regenerate_button.callback = self.regenerate_button_callback
@@ -529,9 +542,10 @@ class ImageResponseView(View):
         await asyncio.sleep(60)
         self.delete_button.disabled = True
         if self.message and await check_message_exists(self.message):
-            await self.message.edit(view=self)
-        else:
-            logger.warning("Сообщение для отключения кнопки удаления недоступно")
+            try:
+                await self.message.edit(view=self)
+            except Exception as e:
+                logger.error(f"Ошибка отключения кнопки удаления: {e}")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -540,23 +554,29 @@ class ImageResponseView(View):
         return True
 
     async def delete_message_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=self.ephemeral)
+        await interaction.response.defer()
+        if not self.message or not await check_message_exists(self.message):
+            return
+
         try:
-            if await check_message_exists(interaction.message):
-                await interaction.message.delete()
-            else:
-                logger.warning("Сообщение для удаления уже недоступно")
+            await self.message.delete()
         except Exception as e:
             embed = Embed(title="❌ Ошибка", description="Не удалось удалить сообщение.", color=0xE74C3C)
-            await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+            await interaction.followup.send(embed=embed)
             logger.error(f"Ошибка удаления: {e}")
 
     async def regenerate_button_callback(self, interaction: discord.Interaction):
+        """
+        Обрабатывает повторное нажатие кнопки генерации с проверкой кулдауна.
+
+        Args:
+            interaction: Взаимодействие с пользователем.
+        """
         current_time = time.time()
         if current_time - self.last_regenerate_time < self.cooldown:
             remaining = int(self.cooldown - (current_time - self.last_regenerate_time))
             embed = Embed(title="⏳ Кулдаун", description=f"Подождите {remaining} секунд перед повторной генерацией.", color=0x3498DB)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed)
             return
 
         self.regenerate_button.disabled = True
@@ -564,14 +584,16 @@ class ImageResponseView(View):
         if await check_message_exists(interaction.message):
             await interaction.response.edit_message(view=self)
         else:
-            await interaction.response.defer(ephemeral=self.ephemeral)
+            return
 
         try:
             embed = Embed(title="⏳ Генерация", color=0x3498DB)
             embed.add_field(name="Прогресс", value=f"```{create_progress_bar(0)} 0%```", inline=False)
-            message = interaction.message if await check_message_exists(interaction.message) else None
-            if not message:
-                message = await interaction.followup.send(embed=embed, ephemeral=self.ephemeral, wait=True)
+            if await check_message_exists(interaction.message):
+                await interaction.message.edit(embed=embed, view=None)
+                message = interaction.message
+            else:
+                message = await interaction.channel.send(embed=embed)
 
             await generate_image(
                 interaction=interaction,
@@ -582,7 +604,6 @@ class ImageResponseView(View):
                 steps=self.steps,
                 cfg_scale=self.cfg_scale,
                 improve_prompt_flag=self.improve_prompt_flag,
-                ephemeral=self.ephemeral,
                 view=self,
                 message=message
             )
@@ -593,18 +614,17 @@ class ImageResponseView(View):
             self.regenerate_button.disabled = False
             self.regenerate_button.label = "🔄 Перегенерировать"
             embed = Embed(title="❌ Ошибка", description=str(e)[:CONFIG["discord_embed_limits"]["description"]], color=0xE74C3C)
-            if message and await check_message_exists(message):
-                await message.edit(embed=embed, view=self)
+            if await check_message_exists(interaction.message):
+                await interaction.message.edit(embed=embed, view=self)
             else:
-                await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+                await interaction.channel.send(embed=embed)
             logger.error(f"Ошибка перегенерации для {interaction.user.id}: {str(e)}")
 
 class SettingsView(View):
     """View для настройки параметров генерации."""
-    def __init__(self, bot_client, ephemeral: bool, user_id: int, channel_id: int, message_id: str = None):
-        super().__init__(timeout=600)
+    def __init__(self, bot_client, user_id: int, channel_id: int, message_id: str = None):
+        super().__init__(timeout=600)  # 10 минут
         self.bot_client = bot_client
-        self.ephemeral = ephemeral
         self.user_id = user_id
         self.channel_id = channel_id
         self.message_id = message_id
@@ -653,15 +673,18 @@ class SettingsView(View):
         self.add_item(self.settings_button)
 
     def disable_all(self):
+        """Отключает все элементы управления."""
         for item in self.children:
             item.disabled = True
 
     def enable_all(self):
+        """Включает все элементы управления, кроме улучшенного промпта, если он обработан."""
         for item in self.children:
             item.disabled = False
         self.improve_button.disabled = self.is_prompt_improved
 
     def disable_permanently(self):
+        """Полностью отключает и останавливает View."""
         self.disable_all()
         self.stop()
 
@@ -674,38 +697,46 @@ class SettingsView(View):
     async def model_select_callback(self, interaction: discord.Interaction):
         async with self.view_lock:
             self.disable_all()
-            await interaction.response.edit_message(view=self)
+            if await check_message_exists(interaction.message):
+                await interaction.response.edit_message(view=self)
+            else:
+                return
+
             self.model = self.model_select.values[0]
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
             embed.description = f"**📝 Промпт**:\n```{self.prompt}```"
             embed = await truncate_embed(embed)
-            embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
-            embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
-            embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
-            embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
+            embed.add_field(name="🤖 Модель", value=f"> {CONFIG['models'][self.model]}", inline=True)
+            embed.add_field(name="📏 Соотношение", value=f"> {self.aspect_ratio}", inline=True)
+            embed.add_field(name="🔄 Шаги", value=f"> {self.steps}", inline=True)
+            embed.add_field(name="⚖️ CFG", value=f"> {self.cfg_scale}", inline=True)
             self.enable_all()
             if await check_message_exists(interaction.message):
                 await interaction.message.edit(embed=embed, view=self)
             else:
-                await interaction.followup.send(embed=embed, view=self, ephemeral=self.ephemeral)
+                await interaction.channel.send(embed=embed, view=self)
 
     async def aspect_ratio_select_callback(self, interaction: discord.Interaction):
         async with self.view_lock:
             self.disable_all()
-            await interaction.response.edit_message(view=self)
+            if await check_message_exists(interaction.message):
+                await interaction.response.edit_message(view=self)
+            else:
+                return
+
             self.aspect_ratio = self.aspect_ratio_select.values[0]
             embed = Embed(title="⚙️ Настройки", color=0x3498DB)
             embed.description = f"**📝 Промпт**:\n```{self.prompt}```"
             embed = await truncate_embed(embed)
-            embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
-            embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
-            embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
-            embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
+            embed.add_field(name="🤖 Модель", value=f"> {CONFIG['models'][self.model]}", inline=True)
+            embed.add_field(name="📏 Соотношение", value=f"> {self.aspect_ratio}", inline=True)
+            embed.add_field(name="🔄 Шаги", value=f"> {self.steps}", inline=True)
+            embed.add_field(name="⚖️ CFG", value=f"> {self.cfg_scale}", inline=True)
             self.enable_all()
             if await check_message_exists(interaction.message):
                 await interaction.message.edit(embed=embed, view=self)
             else:
-                await interaction.followup.send(embed=embed, view=self, ephemeral=self.ephemeral)
+                await interaction.channel.send(embed=embed, view=self)
 
     async def open_prompt_button(self, interaction: discord.Interaction):
         async with self.view_lock:
@@ -728,10 +759,10 @@ class SettingsView(View):
             if await check_message_exists(interaction.message):
                 await interaction.response.edit_message(view=self)
             else:
-                await interaction.response.defer(ephemeral=self.ephemeral)
+                return
 
             try:
-                improved = await improve_prompt(self.prompt, nsfw_allowed=True)
+                improved = await improve_prompt(self.prompt, nsfw_allowed=False)
                 self.prompt = improved
                 self.is_prompt_improved = True
                 self.improve_prompt_flag = True
@@ -740,15 +771,15 @@ class SettingsView(View):
                 embed = Embed(title="⚙️ Настройки", color=0x3498DB)
                 embed.description = f"**📝 Улучшенный промпт**:\n```{self.prompt}```"
                 embed = await truncate_embed(embed)
-                embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][self.model]}`", inline=True)
-                embed.add_field(name="📏 Соотношение", value=f"> `{self.aspect_ratio}`", inline=True)
-                embed.add_field(name="🔄 Шаги", value=f"> `{self.steps}`", inline=True)
-                embed.add_field(name="⚖️ CFG", value=f"> `{self.cfg_scale}`", inline=True)
+                embed.add_field(name="🤖 Модель", value=f"> {CONFIG['models'][self.model]}", inline=True)
+                embed.add_field(name="📏 Соотношение", value=f"> {self.aspect_ratio}", inline=True)
+                embed.add_field(name="🔄 Шаги", value=f"> {self.steps}", inline=True)
+                embed.add_field(name="⚖️ CFG", value=f"> {self.cfg_scale}", inline=True)
                 self.enable_all()
                 if await check_message_exists(interaction.message):
                     await interaction.message.edit(embed=embed, view=self)
                 else:
-                    await interaction.followup.send(embed=embed, view=self, ephemeral=self.ephemeral)
+                    await interaction.channel.send(embed=embed, view=self)
             except Exception as e:
                 self.improve_button.label = "Улучшить промпт"
                 self.enable_all()
@@ -756,7 +787,7 @@ class SettingsView(View):
                 if await check_message_exists(interaction.message):
                     await interaction.message.edit(embed=embed, view=self)
                 else:
-                    await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+                    await interaction.channel.send(embed=embed)
                 logger.error(f"Ошибка улучшения промпта для {interaction.user.id}: {str(e)}")
 
     async def generate_button_callback(self, interaction: discord.Interaction):
@@ -764,52 +795,37 @@ class SettingsView(View):
             self.disable_permanently()
             embed = Embed(title="⏳ Генерация", color=0x3498DB)
             embed.add_field(name="Прогресс", value=f"```{create_progress_bar(0)} 0%```", inline=False)
-            message = interaction.message if await check_message_exists(interaction.message) else None
-            if not message:
-                message = await interaction.followup.send(embed=embed, ephemeral=self.ephemeral, wait=True)
+            if await check_message_exists(interaction.message):
+                await interaction.response.edit_message(embed=embed, view=None)
+                message = interaction.message
             else:
-                await interaction.response.edit_message(embed=embed, view=None, attachments=[])
+                message = await interaction.channel.send(embed=embed)
 
             if any(word in self.prompt.lower() for word in CONFIG["forbidden_words"]) or \
                (self.negative_prompt and any(word in self.negative_prompt.lower() for word in CONFIG["forbidden_words"])):
                 embed = Embed(title="❌ Ошибка", description="Обнаружены запрещённые слова.", color=0xE74C3C)
-                if message and await check_message_exists(message):
-                    await message.edit(embed=embed, view=None, attachments=[])
-                else:
-                    await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+                await interaction.channel.send(embed=embed)
                 return
 
             if self.steps < 1 or self.steps > 100:
                 embed = Embed(title="❌ Ошибка", description="Шаги должны быть в диапазоне 1–100.", color=0xE74C3C)
-                if message and await check_message_exists(message):
-                    await message.edit(embed=embed, view=None, attachments=[])
-                else:
-                    await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+                await interaction.channel.send(embed=embed)
                 return
 
             if self.cfg_scale < 1.0 or self.cfg_scale > 20.0:
                 embed = Embed(title="❌ Ошибка", description="CFG Scale должен быть в диапазоне 1.0–20.0.", color=0xE74C3C)
-                if message and await check_message_exists(message):
-                    await message.edit(embed=embed, view=None, attachments=[])
-                else:
-                    await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+                await interaction.channel.send(embed=embed)
                 return
 
             if self.model not in CONFIG["models"]:
                 embed = Embed(title="❌ Ошибка", description=f"Модель должна быть одной из: {', '.join(CONFIG['models'].keys())}.", color=0xE74C3C)
-                if message and await check_message_exists(message):
-                    await message.edit(embed=embed, view=None, attachments=[])
-                else:
-                    await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+                await interaction.channel.send(embed=embed)
                 return
 
             try:
                 if generation_queue.full():
                     embed = Embed(title="⌛ Очередь", description="Очередь заполнена, пожалуйста, подождите.", color=0x3498DB)
-                    if message and await check_message_exists(message):
-                        await message.edit(embed=embed, view=None, attachments=[])
-                    else:
-                        await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+                    await interaction.channel.send(embed=embed)
                     await generation_queue.put(interaction)
 
                 async with command_lock:
@@ -822,16 +838,12 @@ class SettingsView(View):
                         self.steps,
                         self.cfg_scale,
                         self.improve_prompt_flag,
-                        self.ephemeral,
                         self,
                         message
                     )
             except asyncio.QueueFull:
                 embed = Embed(title="❌ Ошибка", description="Очередь заполнена.", color=0xE74C3C)
-                if message and await check_message_exists(message):
-                    await message.edit(embed=embed, view=None, attachments=[])
-                else:
-                    await interaction.followup.send(embed=embed, ephemeral=self.ephemeral)
+                await interaction.channel.send(embed=embed)
 
 def create_command(bot_client):
     """Создает группу команд для генерации изображений."""
@@ -839,14 +851,19 @@ def create_command(bot_client):
     group.dm_only = False
 
     @group.command(name="generate", description="Генерирует изображение на основе параметров")
-    @app_commands.describe(ephemeral="Скрыть сообщения от других пользователей")
-    async def generate(interaction: discord.Interaction, ephemeral: bool = False):
-        await interaction.response.defer(ephemeral=ephemeral)
+    async def generate(interaction: discord.Interaction):
+        """
+        Обрабатывает команду /image generate.
+
+        Args:
+            interaction: Взаимодействие с пользователем.
+        """
+        await interaction.response.defer()
 
         if bot_client is None:
             logger.error("bot_client не предоставлен")
             embed = Embed(title="❌ Ошибка", description="Внутренняя ошибка бота.", color=0xE74C3C)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed)
             return
 
         if not await restrict_command_execution(interaction, bot_client):
@@ -855,23 +872,23 @@ def create_command(bot_client):
         access_result, access_reason = await check_bot_access(interaction, bot_client)
         if not access_result:
             embed = Embed(title="❌ Ошибка", description=access_reason or "У вас нет доступа к этой команде.", color=0xE74C3C)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed)
             return
 
         if interaction.guild is not None and not interaction.channel.nsfw:
             embed = Embed(title="❌ Ошибка", description="Эта команда доступна только в личных сообщениях или в NSFW-каналах.", color=0xE74C3C)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed)
             return
 
-        view = SettingsView(bot_client, ephemeral, interaction.user.id, interaction.channel_id)
+        view = SettingsView(bot_client, interaction.user.id, interaction.channel_id)
         embed = Embed(title="⚙️ Настройки", color=0x3498DB)
         embed.description = f"**📝 Промпт**:\n```{view.prompt}```"
         embed = await truncate_embed(embed)
-        embed.add_field(name="🤖 Модель", value=f"> `{CONFIG['models'][view.model]}`", inline=True)
-        embed.add_field(name="📏 Соотношение", value=f"> `{view.aspect_ratio}`", inline=True)
-        embed.add_field(name="🔄 Шаги", value=f"> `{view.steps}`", inline=True)
-        embed.add_field(name="⚖️ CFG", value=f"> `{view.cfg_scale}`", inline=True)
-        message = await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral, wait=True)
+        embed.add_field(name="🤖 Модель", value=f"> {CONFIG['models'][view.model]}", inline=True)
+        embed.add_field(name="📏 Соотношение", value=f"> {view.aspect_ratio}", inline=True)
+        embed.add_field(name="🔄 Шаги", value=f"> {view.steps}", inline=True)
+        embed.add_field(name="⚖️ CFG", value=f"> {view.cfg_scale}", inline=True)
+        message = await interaction.followup.send(embed=embed, view=view)
         view.message_id = message.id
 
     return group
