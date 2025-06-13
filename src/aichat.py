@@ -9,7 +9,7 @@ import hashlib
 import backoff
 import uuid
 from aiohttp import ClientSession, ClientTimeout
-from g4f.errors import ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError
+from g4f.errors import ProviderNotFoundError, StreamNotSupportedError, ResponseError, RateLimitError
 from g4f.client import Client
 from g4f.Provider import PollinationsAI
 import base64
@@ -22,6 +22,7 @@ from duckduckgo_search.exceptions import DuckDuckGoSearchException
 import tempfile
 import g4f.debug
 import warnings
+
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -58,6 +59,7 @@ SEARCH_TRIGGER_WORDS = [
     "нужно найти", "нужно поискать", "надо найти", "надо поискать",
     "интересно где", "можно ли найти", "есть ли где", "есть ли способ найти"
 ]
+
 
 class AIChat:
     """Класс для обработки сообщений и генерации AI-ответов в Discord-боте."""
@@ -392,14 +394,14 @@ class AIChat:
         async with ClientSession(timeout=ClientTimeout(total=10)) as session:
             @backoff.on_exception(
                 backoff.expo,
-                (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, Exception),
+                (ProviderNotFoundError, StreamNotSupportedError, ResponseError, RateLimitError, Exception),
                 max_tries=3,
                 max_time=30,
                 jitter=backoff.full_jitter
             )
-            def call_vision_api():
+            async def call_vision_api():
                 client = Client(provider=PollinationsAI)
-                return client.chat.completions.create(
+                return await client.chat.completions.create(
                     model=selected_model,
                     messages=messages,
                     images=formatted_images,
@@ -467,7 +469,7 @@ class AIChat:
                 # Вызов API
                 selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
                 logger.debug(f"Используется модель для vision: {selected_model}")
-                response = call_vision_api()
+                response = await call_vision_api()
 
                 # Проверка ответа
                 if not hasattr(response, "choices") or not response.choices or not response.choices[0].message.content:
@@ -489,7 +491,7 @@ class AIChat:
 
                 return response_text
 
-            except (ProviderNotFoundError, ModelNotSupportedError) as e:
+            except (ProviderNotFoundError, StreamNotSupportedError) as e:
                 logger.error(f"Ошибка провайдера/модели: {e}")
                 return self.normalize_message_content(None, "Модель или провайдер недоступны.")
             except RateLimitError as e:
@@ -578,7 +580,7 @@ class AIChat:
 
     @backoff.on_exception(
         backoff.expo,
-        (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, ConnectionError, TimeoutError),
+        (ProviderNotFoundError, StreamNotSupportedError, ResponseError, RateLimitError, ConnectionError, TimeoutError),
         max_tries=3,
         max_time=30,
         jitter=backoff.full_jitter
