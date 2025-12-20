@@ -7,9 +7,6 @@ import json
 import hashlib
 import uuid
 from aiohttp import ClientSession, ClientTimeout
-from g4f.errors import ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError
-from g4f.client import Client
-from g4f.Provider import PollinationsAI
 import base64
 from datetime import datetime, timezone
 from .commands.restrict import check_bot_access
@@ -55,7 +52,6 @@ SEARCH_TRIGGER_WORDS = [
     "нужно найти", "нужно поискать", "надо найти", "надо поискать",
     "интересно где", "можно ли найти", "есть ли где", "есть ли способ найти"
 ]
-
 
 class AIChat:
     """Класс для обработки сообщений и генерации AI-ответов в Discord-боте с поддержкой g4f[search]."""
@@ -281,17 +277,20 @@ class AIChat:
             process = psutil.Process()
             mem_before = process.memory_info().rss
 
-        async with ClientSession(timeout=ClientTimeout(total=10)) as session:
-            @backoff.on_exception(
-                backoff.expo,
-                (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, Exception),
-                max_tries=3,
-                max_time=30,
-                jitter=backoff.full_jitter
-            )
-            def call_vision_api():
-                client = Client(provider=PollinationsAI)
-                return client.chat.completions.create(
+        async with ClientSession(timeout=ClientTimeout(total=20)) as session:
+            try:
+                formatted_images = []
+                for img_data, fname in images:
+                    if len(img_data) > 10 * 1024 * 1024: continue
+                    m_type = "image/jpeg" if fname.lower().endswith((".jpeg", ".jpg")) else "image/webp"
+                    formatted_images.append([f"data:{m_type};base64,{base64.b64encode(img_data).decode()}", fname])
+
+                sys_prompt = await self._build_system_prompt(True, user_id)
+                messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}]
+                selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
+
+                # Прямой вызов g4f_client с параметром web_search
+                response = await self.bot_client.g4f_client.chat.completions.create(
                     model=selected_model,
                     messages=messages,
                     images=formatted_images,
@@ -299,98 +298,10 @@ class AIChat:
                     max_tokens=1000
                 )
 
-            try:
-                # Подготовка изображений
-                formatted_images = []
-                for image_data, filename in images:
-                    mime_type = "image/jpeg" if filename.lower().endswith((".jpeg", ".jpg")) else "image/webp"
-                    base64_image = base64.b64encode(image_data).decode("utf-8")
-                    data_uri = f"data:{mime_type};base64,{base64_image}"
-                    formatted_images.append([data_uri, filename])
+                if hasattr(response, "choices"):
+                    return response.choices[0].message.content.strip()
+                return response['choices'][0]['message']['content'].strip()
 
-                # Формирование промпта и сообщений
-                current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                system_prompt = await self._build_system_prompt(True, user_id)
-                messages = [{"role": "system", "content": system_prompt}]
-
-                # Веб-поиск, если требуется
-                search_results = ""
-                if use_search and query:
-                    search_query = query[:50].strip()
-                    search_params = self.bot_client.user_settings[user_id].get("search_params", {
-                        "max_results": 2,
-                        "max_words": 1000,
-                        "backend": "auto",
-                        "add_text": True,
-                        "timeout": 3
-                    })
-                    try:
-                        async with self._search_semaphore:
-                            from duckduckgo_search import AsyncDDGS
-                            async with AsyncDDGS() as ddgs:
-                                results = await ddgs.text(
-                                    keywords=search_query,
-                                    max_results=search_params["max_results"],
-                                    timelimit="y",
-                                    safesearch="off",
-                                    language="auto"
-                                )
-                                search_results = "\n".join([f"- {r['title']}: {r['body']}" for r in results])[:search_params["max_words"]]
-                                logger.debug(f"Веб-поиск успешен, результаты: {search_results[:100]}...")
-                    except DuckDuckGoSearchException as e:
-                        logger.error(f"Ошибка веб-поиска для '{search_query}': {e}")
-                        search_results = "Веб-поиск недоступен, анализ основан только на изображении и запросе."
-
-                user_message = {"role": "user", "content": prompt}
-                if search_results:
-                    user_message["content"] += f"\n\n[Результаты веб-поиска]\n{search_results}"
-                messages.append(user_message)
-
-                # Проверка кэша
-                cache_key = self._generate_cache_key(messages, "vision", user_id, channel_type, channel_id)
-                if self.bot_client.firebase_manager:
-                    try:
-                        cached_response = await self.bot_client.firebase_manager.load_cache(user_id, channel_type, channel_id, cache_key)
-                        if cached_response and cached_response.get("timestamp", 0) + self.bot_client.cache_limits["cache_ttl_seconds"] > time.time():
-                            logger.debug(f"Кэш найден для {cache_key}")
-                            return cached_response["response"]
-                    except Exception as e:
-                        logger.error(f"Ошибка чтения кэша: {e}")
-
-                # Вызов API
-                selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
-                logger.debug(f"Используется модель для vision: {selected_model}")
-                response = call_vision_api()
-
-                # Проверка ответа
-                if not hasattr(response, "choices") or not response.choices or not response.choices[0].message.content:
-                    logger.warning("Пустой или некорректный ответ от PollinationsAI")
-                    return self.normalize_message_content(None, "Не удалось обработать изображение.")
-
-                response_text = response.choices[0].message.content.strip()
-                logger.debug(f"Успешный ответ от PollinationsAI: {response_text[:100]}...")
-
-                # Сохранение в кэш
-                if self.bot_client.firebase_manager:
-                    try:
-                        await self.bot_client.firebase_manager.save_cache(user_id, channel_type, channel_id, cache_key, {
-                            "response": response_text,
-                            "timestamp": time.time()
-                        })
-                    except Exception as e:
-                        logger.error(f"Ошибка сохранения кэша: {e}")
-
-                return response_text
-
-            except (ProviderNotFoundError, ModelNotSupportedError) as e:
-                logger.error(f"Ошибка провайдера/модели: {e}")
-                return self.normalize_message_content(None, "Модель или провайдер недоступны.")
-            except RateLimitError as e:
-                logger.error(f"Превышен лимит запросов: {e}")
-                return self.normalize_message_content(None, "Превышен лимит запросов, попробуйте позже.")
-            except ResponseError as e:
-                logger.error(f"Ошибка ответа API: {e}")
-                return self.normalize_message_content(None, "Ошибка обработки изображения.")
             except Exception as e:
                 logger.error(f"Vision error: {e}")
                 return None
@@ -436,13 +347,6 @@ class AIChat:
         data = json.dumps(messages, sort_keys=True)
         return f"{user_id}:{channel_type}:{channel_id}:{model_type}:{hashlib.sha256(data.encode()).hexdigest()}"
 
-    @backoff.on_exception(
-        backoff.expo,
-        (ProviderNotFoundError, ModelNotSupportedError, ResponseError, RateLimitError, ConnectionError, TimeoutError),
-        max_tries=3,
-        max_time=30,
-        jitter=backoff.full_jitter
-    )
     async def _generate_response_internal(self, messages: List[Dict], has_image: bool, max_tokens: int, user_id: str, channel_type: str, channel_id: str, use_search: bool, query: str = "") -> Optional[str]:
         """Внутренняя генерация с автоматическим веб-поиском через g4f."""
         if PSUTIL_AVAILABLE:
