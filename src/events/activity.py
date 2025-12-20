@@ -1,5 +1,4 @@
 import discord
-from datetime import datetime
 import asyncio
 from typing import List, Optional
 from ..systemLog import logger
@@ -14,7 +13,7 @@ async def set_bot_activity(
     await bot.wait_until_ready()
 
     if texts is None:
-        texts = ["🛠️-/restrict", lambda: f"v1.1", "с 2026 годом!"]
+        texts = ["🛠️-/restrict", "v1.1", "с 2026 годом!"]
 
     index = 0
     while not bot.is_closed():

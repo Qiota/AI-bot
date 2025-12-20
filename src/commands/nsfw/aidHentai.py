@@ -8,12 +8,11 @@ import asyncio
 import re
 from typing import List, Optional, Dict
 from dataclasses import dataclass
-from contextlib import asynccontextmanager  # Добавлен импорт
+from contextlib import asynccontextmanager
 from ...systemLog import logger
 from ..restrict import check_bot_access, restrict_command_execution
 from ...utils.checker import checker
 import backoff
-import math
 
 description = "Поиск по AnimeIdHentai"
 
