@@ -1,27 +1,15 @@
 import discord
 import asyncio
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from .systemLog import logger
 import time
-import json
-import hashlib
 import uuid
-from aiohttp import ClientSession, ClientTimeout
 import base64
-from datetime import datetime, timezone
-from .commands.restrict import check_bot_access
-from .utils.checker import checker
+from datetime import datetime
 from .client import BotClient
 import tempfile
 import g4f.debug
 import warnings
-
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
-    logger.warning("Модуль psutil не установлен, мониторинг памяти отключен")
 
 # Подавление предупреждений pydub
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
@@ -29,431 +17,189 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
 # Отключение debug-режима для минимизации логов
 g4f.debug.logging = False
 
-# Фиксированные промпты
-DEFAULT_PROMPT = "Ты — Чатбот. Отвечай на своё усмотрение. Текущее время: {now}."
-DEFAULT_VISION_PROMPT = "Ты — эксперт по анализу изображений, мемов и культурных отсылок. Текущее время: {now}."
-
-# Триггерные слова для веб-поиска
-SEARCH_TRIGGER_WORDS = [
-    "найди", "отыщи", "поищи", "разыщи", "ищи", "поиск", "поискни",
-    "найди мне", "отыщи мне", "поищи мне", "разыщи мне", "поиск для меня",
-    "найди-ка", "отыщи-ка", "поищи-ка", "разыщи-ка", "ищи-ка",
-    "поищи пожалуйста", "отыщи пожалуйста", "найди пожалуйста",
-    "глянь", "погляди", "посмотри", "просмотри", "подскажи где найти",
-    "где найти", "где отыскать", "где посмотреть", "где разыскать",
-    "где можно найти", "где можно посмотреть", "где искать",
-    "как найти", "как отыскать", "как искать", "как разыскать",
-    "что если поискать", "что если найдёшь", "что если найдёшь мне",
-    "что можешь найти", "что ты можешь найти", "ты можешь найти",
-    "ты не найдешь", "ты не мог бы найти", "не найдется ли", "не найдёшь ли",
-    "не мог бы ты найти", "не подскажешь где", "сможешь найти", "ищешь ли",
-    "не знаешь где", "не видел ли", "не попадалось ли", "не встречал ли",
-    "ищу", "хочу найти", "мне нужно найти", "мне нужно отыскать",
-    "нужно найти", "нужно поискать", "надо найти", "надо поискать",
-    "интересно где", "можно ли найти", "есть ли где", "есть ли способ найти"
-]
+DEFAULT_PROMPT = """Ты — Кудере~, поддерживай беседу для более живого общения используя все людские качества.
+Текущее время: {now}.
+ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ ВЕБ-ПОИСКА:
+1. Если тебе предоставлены результаты поиска, используй ТОЛЬКО достоверные факты из них.
+2. Если результаты поиска содержат нерелевантные ссылки (соцсети, профили, мусор), ИГНОРИРУЙ ИХ.
+3. НЕ ВЫДУМЫВАЙ ссылки и факты, если их нет в результатах."""
+SEARCH_TRIGGER_WORDS = ["найди", "отыщи", "поищи", "разыщи", "ищи", "поиск", "информация о", "что такое"]
 
 class AIChat:
-    """Класс для обработки сообщений и генерации AI-ответов в Discord-боте с поддержкой g4f[search]."""
+    """Класс для обработки сообщений с авто-очисткой памяти и защитой от переполнения."""
     MAX_MEMORY_SIZE = 10 
+    SAFE_CHAR_LIMIT = 3500 
+    INACTIVITY_TIMEOUT = 3600  # 1 час бездействия
 
     def __init__(self, bot_client: BotClient) -> None:
-        """Инициализация AIChat с привязкой к BotClient."""
         self.bot_client: BotClient = bot_client
-        logger.info("Инициализация AIChat с поддержкой веб-поиска")
+        
+        # Регистрация событий
         self.bot_client.bot.event(self.on_message)
         self.bot_client.bot.event(self.on_message_edit)
 
-        # Используем временную директорию в памяти для cookies
         self.cookies_dir = tempfile.TemporaryDirectory(prefix="g4f_cookies_")
         try:
             g4f.cookies.set_cookies_dir(self.cookies_dir.name)
-            g4f.cookies.read_cookie_files(self.cookies_dir.name)
-            logger.info("Cookies настроены во временной директории в памяти")
         except Exception as e:
-            logger.error(f"Ошибка настройки cookies: {e}")
+            logger.error(f"Ошибка cookies: {e}")
 
-    async def __aenter__(self):
-        return self
+        # ПРАВИЛЬНЫЙ ЗАПУСК ФОНОВОЙ ЗАДАЧИ
+        # Используем asyncio.create_task напрямую, это безопасно в Discord.py 2.0+
+        asyncio.create_task(self._cleanup_inactive_conversations())
+        logger.info("AIChat инициализирован: Запущена фоновая очистка памяти.")
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        try:
-            self.cookies_dir.cleanup()
-            logger.info("Временная директория cookies очищена")
-        except Exception as e:
-            logger.error(f"Ошибка очистки cookies: {e}")
+    async def _cleanup_inactive_conversations(self):
+        """Фоновый цикл для удаления старого контекста неактивных пользователей."""
+        while not self.bot_client.bot.is_closed():
+            try:
+                # Ждем, пока бот подключится, прежде чем начинать проверку
+                if not self.bot_client.bot.is_ready():
+                    await asyncio.sleep(5)
+                    continue
 
-    def normalize_message_content(self, content: Optional[str], default: str = "Произошла ошибка.") -> str:
-        content = content.strip() if content and content.strip() else default
-        if len(content) > 2000:
-            content = content[:1997] + "..."
-        return content
-    
-    def _truncate_messages(self, messages: List[Dict], max_chars: int = 3800) -> List[Dict]:
-        if not messages:
-            return messages
-        system_msg = messages[0] if messages[0]["role"] == "system" else None
-        current_msgs = messages[1:] if system_msg else messages
+                now = time.time()
+                inactive_users = []
+
+                # Проверяем неактивность
+                for user_id, session in list(self.bot_client.current_conversation.items()):
+                    last_active = session.get("last_message_time", 0)
+                    if now - last_active > self.INACTIVITY_TIMEOUT:
+                        inactive_users.append(user_id)
+
+                for user_id in inactive_users:
+                    if user_id in self.bot_client.current_conversation:
+                        conv_id = self.bot_client.current_conversation[user_id]["id"]
+                        if conv_id in self.bot_client.chat_memory:
+                            del self.bot_client.chat_memory[conv_id]
+                        del self.bot_client.current_conversation[user_id]
+                        logger.info(f"Память пользователя {user_id} очищена (таймаут).")
+
+            except Exception as e:
+                logger.error(f"Ошибка в цикле очистки: {e}")
+            
+            await asyncio.sleep(300) # Проверка каждые 5 минут
+
+    def _add_to_memory(self, user_id: str, role: str, content: str) -> None:
+        if user_id not in self.bot_client.current_conversation: return
         
-        while len(json.dumps(messages, ensure_ascii=False)) > max_chars and len(current_msgs) > 1:
-            current_msgs.pop(0)
-            messages = [system_msg] + current_msgs if system_msg else current_msgs
-        return messages
+        conv_id = self.bot_client.current_conversation[user_id]["id"]
+        # Обновляем активность
+        self.bot_client.current_conversation[user_id]["last_message_time"] = time.time()
+        
+        if conv_id not in self.bot_client.chat_memory:
+            self.bot_client.chat_memory[conv_id] = []
+        
+        clean_content = " ".join(content.split())[:1500]
+        self.bot_client.chat_memory[conv_id].append({"role": role, "content": clean_content})
+        
+        if len(self.bot_client.chat_memory[conv_id]) > self.MAX_MEMORY_SIZE:
+            self.bot_client.chat_memory[conv_id] = self.bot_client.chat_memory[conv_id][-self.MAX_MEMORY_SIZE:]
+
+    def _get_safe_context(self, user_id: str, sys_prompt: str) -> List[Dict]:
+        conv_id = self.bot_client.current_conversation[user_id]["id"]
+        history = self.bot_client.chat_memory.get(conv_id, [])
+        
+        safe_history = []
+        chars = len(sys_prompt)
+        for msg in reversed(history):
+            if chars + len(msg['content']) > self.SAFE_CHAR_LIMIT: break
+            safe_history.insert(0, msg)
+            chars += len(msg['content'])
+        return safe_history
 
     async def on_message(self, message: discord.Message) -> None:
-        msg_key = f"{message.id}-{message.channel.id}"
-        if message.author.bot or msg_key in self.bot_client.processed_messages:
-            return
-        if isinstance(message.channel, (discord.StageChannel, discord.VoiceChannel)):
-            return
-        self.bot_client.processed_messages.add(msg_key)
-        try:
-            user_id = str(message.author.id)
-            channel_id = str(message.channel.id)
-
-            if not await self.bot_client.is_bot_mentioned(message):
-                return
-
-            if not self.bot_client.models_loaded:
-                await self._send_temp_message(message.channel, message.author, "Бот инициализируется.")
-                return
-
-            if not await self.bot_client.check_spam(user_id):
-                await self._send_temp_message(message.channel, message.author, "Слишком быстро! Подождите 3 секунды.")
-                return
-
-            text = message.content.replace(f"<@{self.bot_client.bot.user.id}>", "").strip()
-            if text.startswith(".model"):
-                await self._handle_model_command(message, text, user_id)
-                return
-
-            await self.start_new_conversation(user_id, channel_id, text)
-            
-            if isinstance(message.channel, discord.DMChannel):
-                result, reason = await checker.check_user_restriction(message)
-                if result: await self._process_message(message)
-                else: await self._send_temp_message(message.channel, message.author, self.normalize_message_content(reason))
-            else:
-                acc_res, acc_reaz = await check_bot_access(message, self.bot_client)
-                restr_res, restr_reaz = await checker.check_user_restriction(message)
-                if acc_res and restr_res:
-                    await self._process_message(message)
-                else:
-                    reason = acc_reaz if not acc_res else restr_reaz
-                    await self._send_temp_message(message.channel, message.author, self.normalize_message_content(reason))
-        except Exception as e:
-            logger.error(f"Ошибка on_message: {e}")
-            await self._send_temp_message(message.channel, message.author, "Ошибка обработки.")
+        if message.author.bot: return
+        await self._process_any_message(message)
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
-        msg_key = f"{after.id}-{after.channel.id}"
-        if before.content == after.content or after.author.bot or msg_key not in self.bot_client.processed_messages:
-            return
-        try:
-            user_id = str(after.author.id)
-            channel_id = str(after.channel.id)
-            if not await self.bot_client.is_bot_mentioned(after): return
-            if not self.bot_client.models_loaded: return
+        if before.content == after.content or after.author.bot: return
+        await self._process_any_message(after, is_edit=True)
 
-            text = after.content.replace(f"<@{self.bot_client.bot.user.id}>", "").strip()
-            await self.start_new_conversation(user_id, channel_id, text)
-            
-            if isinstance(after.channel, discord.DMChannel):
-                result, reason = await checker.check_user_restriction(after)
-                if result: await self._process_edit(after)
-            else:
-                acc_res, _ = await check_bot_access(after, self.bot_client)
-                restr_res, _ = await checker.check_user_restriction(after)
-                if acc_res and restr_res: await self._process_edit(after)
-        except Exception as e:
-            logger.error(f"Ошибка on_message_edit: {e}")
+    async def _process_any_message(self, message: discord.Message, is_edit: bool = False):
+        user_id = str(message.author.id)
+        if not await self.bot_client.is_bot_mentioned(message): return
 
-    async def _handle_model_command(self, message: discord.Message, text: str, user_id: str) -> None:
-        parts = text.split()
-        if len(parts) < 2:
-            await self._send_temp_message(message.channel, message.author, "Используйте: .model list | .model view | .model use text/vision <модель>")
+        text = message.content.replace(f"<@{self.bot_client.bot.user.id}>", "").strip()
+        if text.lower() == ".reset":
+            await self._handle_reset(message, user_id)
             return
 
-        command = parts[1].lower()
-        if command == "list":
-            models_list = "\n".join([f"- {m}" for m in self.bot_client.models["text"] + self.bot_client.models["vision"]])
-            await message.reply(f"Доступные модели:\n{models_list}")
-        elif command == "view":
-            current_text = self.bot_client.user_settings[user_id].get("selected_text_model", "openai-fast")
-            current_vision = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
-            await message.reply(f"Текущие модели:\nТекст: {current_text}\nVision: {current_vision}")
-        elif command == "use" and len(parts) >= 4:
-            model_type, model_name = parts[2].lower(), parts[3]
-            if model_type not in ["text", "vision"] or model_name not in self.bot_client.models[model_type]:
-                await self._send_temp_message(message.channel, message.author, "Некорректный тип или название модели.")
-                return
-            
-            old_conv_id = self.bot_client.current_conversation[user_id]["id"]
-            for target in [self.bot_client.chat_memory, self.bot_client.topic_memory]:
-                if old_conv_id in target: del target[old_conv_id]
-            
-            new_id = str(uuid.uuid4())
-            self.bot_client.current_conversation[user_id] = {"id": new_id, "last_message_time": time.time(), "request_count": 0, "ttl_seconds": 86400}
-            self.bot_client.chat_memory[new_id], self.bot_client.topic_memory[new_id] = [], []
-            self.bot_client.user_settings[user_id][f"selected_{model_type}_model"] = model_name
-            await self._save_user_settings(user_id)
-            await message.reply(f"Модель {model_name} установлена. Контекст очищен.")
-
-    async def _send_temp_message(self, channel: discord.abc.Messageable, user: discord.User, content: str) -> None:
-        content = self.normalize_message_content(content)
-        try:
-            if isinstance(channel, discord.TextChannel):
-                perms = channel.permissions_for(channel.guild.me)
-                if not perms.send_messages: raise discord.Forbidden(None, "No send perms")
-                if not perms.manage_messages:
-                    await channel.send(content)
-                    return
-            msg = await channel.send(content)
-            await asyncio.sleep(10)
-            await msg.delete()
-        except Exception:
-            try:
-                dm = user.dm_channel or await user.create_dm()
-                msg = await dm.send(content)
-                await asyncio.sleep(10)
-                await msg.delete()
-            except: pass
-
-    async def _process_message(self, message: discord.Message) -> None:
+        await self.start_new_conversation(user_id)
+        
         async with message.channel.typing():
-            text = message.content.replace(f"<@{self.bot_client.bot.user.id}>", "").strip()
-            use_search, _ = self._check_trigger_words(text)
-            parts = await self.generate_response(str(message.author.id), str(message.id), text, message, use_search=use_search)
+            input_text = f"[Изменено]: {text}" if is_edit else text
+            self._add_to_memory(user_id, "user", input_text)
+            
+            use_search = any(w in text.lower() for w in SEARCH_TRIGGER_WORDS)
+            parts = await self.generate_response(user_id, text, message, use_search)
+            
             if parts: await self._send_split_message(message, parts)
 
-    async def _process_edit(self, after: discord.Message) -> None:
-        if after.id in self.bot_client.message_to_response: return
-        async with after.channel.typing():
-            text = after.content.replace(f"<@{self.bot_client.bot.user.id}>", "").strip()
-            use_search, _ = self._check_trigger_words(text)
-            parts = await self.generate_response(str(after.author.id), str(after.id), text, after, is_edit=True, use_search=use_search)
-            if parts: await self._send_split_message(after, parts)
+    async def _handle_reset(self, message: discord.Message, user_id: str):
+        new_id = str(uuid.uuid4())
+        self.bot_client.current_conversation[user_id] = {"id": new_id, "last_message_time": time.time()}
+        self.bot_client.chat_memory[new_id] = []
+        await message.reply("🧹 Память беседы успешно очищена.")
 
-    def _check_trigger_words(self, text: str) -> Tuple[bool, str]:
-        """Проверка триггеров. Для g4f[search] лучше передавать оригинальный текст целиком."""
-        text_lower = text.lower().strip()
-        for trigger in SEARCH_TRIGGER_WORDS:
-            if trigger in text_lower:
-                logger.debug(f"Обнаружен триггер поиска: '{trigger}'")
-                return True, text
-        return False, text
+    async def generate_response(self, user_id: str, text: str, message: discord.Message, use_search: bool) -> List[str]:
+        # Логика для изображений
+        if any(a.content_type and "image" in a.content_type for a in message.attachments):
+            return await self._process_vision(user_id, text, message)
 
-    def _split_response(self, response: str, max_length: int = 2000) -> List[str]:
-        parts, remaining = [], response
-        while remaining:
-            if len(remaining) <= max_length:
-                if remaining.strip(): parts.append(remaining)
-                break
-            split_index = -1
-            for sep in [". ", "! ", "? ", "; "]:
-                idx = remaining[:max_length].rfind(sep)
-                if idx != -1 and idx > split_index: split_index = idx + len(sep)
-            if split_index == -1: split_index = max_length
-            part = remaining[:split_index]
-            if part.strip(): parts.append(part)
-            remaining = remaining[split_index:]
-        return parts if parts else ["Ответ пуст."]
+        sys_prompt = DEFAULT_PROMPT.format(now=datetime.now().strftime("%H:%M"))
+        messages = [{"role": "system", "content": sys_prompt}] + self._get_safe_context(user_id, sys_prompt)
+
+        resp = await self._call_ai(messages, user_id, use_search)
+        return self._split_text(resp or "Ошибка API. Попробуйте ещё раз.")
+
+    async def _call_ai(self, messages: List[Dict], user_id: str, use_search: bool) -> Optional[str]:
+        model = self.bot_client.user_settings[user_id].get("selected_text_model", "openai-fast")
+        try:
+            # Отключаем поиск для gpt-4.1-nano, если контекст уже под лимитом
+            actual_search = use_search if len(str(messages)) < 3000 else False
+            
+            response = await self.bot_client.g4f_client.chat.completions.create(
+                model=model, messages=messages, web_search=actual_search
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            if "500" in str(e) or "length" in str(e):
+                try:
+                    # Режим спасения: только вопрос без истории
+                    res = await self.bot_client.g4f_client.chat.completions.create(
+                        model=model, messages=[messages[0], messages[-1]], web_search=False
+                    )
+                    return "[Контекст сжат] " + res.choices[0].message.content.strip()
+                except: return None
+            logger.error(f"AI Error: {e}")
+            return None
+
+    def _split_text(self, text: str) -> List[str]:
+        return [text[i:i+2000] for i in range(0, len(text), 2000)]
 
     async def _send_split_message(self, message: discord.Message, parts: List[str]) -> None:
+        user_id = str(message.author.id)
         for i, part in enumerate(parts):
             try:
-                sent_msg = await (message.reply(part) if i == 0 else message.channel.send(part))
-                self.bot_client.message_to_response[f"{message.id}_{i}" if i > 0 else message.id] = sent_msg.id
-                conv_id = self.bot_client.current_conversation[str(message.author.id)]["id"]
-                self.bot_client.chat_memory[conv_id].append({"role": "assistant", "content": part})
-                self.bot_client.chat_memory[conv_id] = self.bot_client.chat_memory[conv_id][-self.MAX_MEMORY_SIZE:]
-                await self._save_conversation(str(message.author.id), conv_id)
-            except Exception as e:
-                logger.error(f"Ошибка отправки: {e}")
+                if i == 0: await message.reply(part)
+                else: await message.channel.send(part)
+                self._add_to_memory(user_id, "assistant", part)
+            except: pass
 
-    async def vision(self, prompt: str, images: List[Tuple[bytes, str]], user_id: str, channel_type: str, channel_id: str, use_search: bool = False, query: str = "") -> Optional[str]:
-        """Обработка изображений с поддержкой веб-поиска g4f."""
-        if PSUTIL_AVAILABLE:
-            process = psutil.Process()
-            mem_before = process.memory_info().rss
-
-        async with ClientSession(timeout=ClientTimeout(total=20)) as session:
-            try:
-                formatted_images = []
-                for img_data, fname in images:
-                    if len(img_data) > 10 * 1024 * 1024: continue
-                    m_type = "image/jpeg" if fname.lower().endswith((".jpeg", ".jpg")) else "image/webp"
-                    formatted_images.append([f"data:{m_type};base64,{base64.b64encode(img_data).decode()}", fname])
-
-                sys_prompt = await self._build_system_prompt(True, user_id)
-                messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}]
-                selected_model = self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast")
-
-                # Прямой вызов g4f_client с параметром web_search
-                response = await self.bot_client.g4f_client.chat.completions.create(
-                    model=selected_model,
-                    messages=messages,
-                    images=formatted_images,
-                    web_search=use_search,
-                    max_tokens=1000
-                )
-
-                if hasattr(response, "choices"):
-                    return response.choices[0].message.content.strip()
-                return response['choices'][0]['message']['content'].strip()
-
-            except Exception as e:
-                logger.error(f"Vision error: {e}")
-                return None
-            finally:
-                import gc
-                gc.collect()
-
-    async def generate_response(self, user_id: str, message_id: str, text: str, message: discord.Message, is_edit: bool = False, use_search: bool = False) -> Optional[List[str]]:
-        if PSUTIL_AVAILABLE:
-            process = psutil.Process()
-            mem_before = process.memory_info().rss
-
-        try:
-            if not (text or message.attachments):
-                return [self.normalize_message_content("Введите текст или прикрепите фото.")]
-
-            c_type = "DM" if isinstance(message.channel, discord.DMChannel) else "guild"
-            c_id = str(message.channel.id)
-
-            has_image = any(a.content_type and a.content_type.startswith("image/") for a in message.attachments)
-            if has_image:
-                attachments = [(await a.read(), a.filename) for a in message.attachments if a.content_type.startswith("image/")]
-                resp = await self.vision(text or "Опиши фото", attachments, user_id, c_type, c_id, use_search, text)
-                if not resp: return ["Не удалось обработать изображение."]
-                return self._split_response(resp, self.bot_client.user_settings[user_id]["max_response_length"])
-
-            context = await self.get_context(user_id, message.channel)
-            messages = [{"role": "system", "content": await self._build_system_prompt(False, user_id)}] + context
-            if text: messages.append({"role": "user", "content": text})
-
-            resp = await self._generate_response_internal(messages, False, 1000, user_id, c_type, c_id, use_search, text)
-            if not resp: return ["Не удалось сгенерировать ответ."]
-            return self._split_response(resp, self.bot_client.user_settings[user_id]["max_response_length"])
-
-        except Exception as e:
-            logger.error(f"Error in generate_response: {e}")
-            return ["Ошибка генерации."]
-        finally:
-            import gc
-            gc.collect()
-
-    def _generate_cache_key(self, messages: List[Dict], model_type: str, user_id: str, channel_type: str, channel_id: str) -> str:
-        data = json.dumps(messages, sort_keys=True)
-        return f"{user_id}:{channel_type}:{channel_id}:{model_type}:{hashlib.sha256(data.encode()).hexdigest()}"
-
-    async def _generate_response_internal(self, messages: List[Dict], has_image: bool, max_tokens: int, user_id: str, channel_type: str, channel_id: str, use_search: bool, query: str = "") -> Optional[str]:
-        """Внутренняя генерация с автоматическим веб-поиском через g4f."""
-        if PSUTIL_AVAILABLE:
-            process = psutil.Process()
-            mem_before = process.memory_info().rss
-
-        async with ClientSession(timeout=ClientTimeout(total=30)) as session:
-            try:
-                model_type = "vision" if has_image else "text"
-                selected_model = self.bot_client.user_settings[user_id].get(f"selected_{model_type}_model", "openai-fast")
-                
-                model_stats = self.bot_client.models["model_stats"][model_type]
-                available_models = sorted(
-                    [m for m in self.bot_client.models[model_type] if m not in self.bot_client.models["unavailable"][model_type]],
-                    key=lambda m: model_stats.get(m, {"success": 0, "failure": 0})["success"] / (model_stats.get(m, {"success": 0, "failure": 0})["failure"] + 1),
-                    reverse=True
-                )
-                if selected_model in available_models:
-                    available_models.remove(selected_model); available_models.insert(0, selected_model)
-
-                if not available_models: return None
-
-                cache_key = self._generate_cache_key(messages, model_type, user_id, channel_type, channel_id)
-                if self.bot_client.firebase_manager:
-                    cached = await self.bot_client.firebase_manager.load_cache(user_id, channel_type, channel_id, cache_key)
-                    if cached and cached.get("timestamp", 0) + self.bot_client.cache_limits["cache_ttl_seconds"] > time.time():
-                        return cached["response"]
-
-                for model in available_models:
-                    queue = self.bot_client.model_queues.get(model)
-                    if not queue or queue.qsize() > 5: continue
-
-                    for attempt in range(self.bot_client.request_settings["max_retries"]):
-                        try:
-                            await queue.put((messages, max_tokens, session))
-                            async with self.bot_client.model_semaphores[model]:
-                                curr_messages, curr_max_tokens, curr_session = await queue.get()
-                                
-                                # Использование web_search библиотеки g4f
-                                response = await self.bot_client.g4f_client.chat.completions.create(
-                                    model=model,
-                                    messages=curr_messages,
-                                    max_tokens=curr_max_tokens,
-                                    web_search=use_search,
-                                    session=curr_session,
-                                    stream=False
-                                )
-
-                                if hasattr(response, "choices"):
-                                    response_text = response.choices[0].message.content.strip()
-                                else:
-                                    response_text = response['choices'][0]['message']['content'].strip()
-                                
-                                if not response_text: continue
-
-                                self.bot_client.models["model_stats"][model_type][model]["success"] += 1
-                                self.bot_client.models["last_successful"][model_type] = model
-                                if self.bot_client.firebase_manager:
-                                    await self.bot_client.firebase_manager.save_models({"timestamp": time.time(), **self.bot_client.models})
-                                    await self.bot_client.firebase_manager.save_cache(user_id, channel_type, channel_id, cache_key, {"response": response_text, "timestamp": time.time()})
-                                return response_text
-
-                        except Exception as e:
-                            logger.error(f"Ошибка модели {model}: {e}")
-                            # Если поиск вызвал ошибку, пробуем этот же запрос без поиска
-                            if use_search:
-                                logger.info("Отключение поиска из-за ошибки и повтор попытки...")
-                                use_search = False
-                                continue
-                            await asyncio.sleep(self.bot_client.request_settings["retry_delay_base"])
-                        finally:
-                            queue.task_done()
-
-                return None
-            finally:
-                import gc
-                gc.collect()
-
-    async def _build_system_prompt(self, has_image: bool, user_id: str) -> str:
-        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        prompt = DEFAULT_VISION_PROMPT if has_image else DEFAULT_PROMPT
-        return prompt.format(now=current_date)
-
-    async def get_context(self, user_id: str, channel: discord.abc.Messageable) -> List[Dict]:
-        conv_id = self.bot_client.current_conversation[user_id]["id"]
-        return self.bot_client.chat_memory.get(conv_id, [])[-self.MAX_MEMORY_SIZE:]
-
-    async def _save_user_settings(self, user_id: str) -> None:
-        if self.bot_client.firebase_manager:
-            await self.bot_client.firebase_manager.save_user_settings(user_id, self.bot_client.user_settings[user_id])
-
-    async def _save_conversation(self, user_id: str, conversation_id: str) -> None:
-        if self.bot_client.firebase_manager:
-            try:
-                data = {
-                    "chat_memory": self.bot_client.chat_memory[conversation_id][-self.MAX_MEMORY_SIZE:],
-                    "topic_memory": self.bot_client.topic_memory[conversation_id][-self.MAX_MEMORY_SIZE:]
-                }
-                await self.bot_client.firebase_manager.save_conversation(user_id, conversation_id, data)
-            except Exception as e:
-                logger.error(f"Ошибка сохранения истории: {e}")
-
-    async def start_new_conversation(self, user_id: str, channel_id: str, initial_message: str) -> None:
+    async def start_new_conversation(self, user_id: str):
         if user_id not in self.bot_client.current_conversation:
-            conversation_id = str(uuid.uuid4())
-            self.bot_client.current_conversation[user_id] = {"id": conversation_id, "last_message_time": time.time(), "request_count": 0, "ttl_seconds": 86400}
-            self.bot_client.chat_memory[conversation_id], self.bot_client.topic_memory[conversation_id] = [], []
-            if initial_message:
-                self.bot_client.chat_memory[conversation_id].append({"role": "user", "content": initial_message})
-            await self._save_conversation(user_id, conversation_id)
+            cid = str(uuid.uuid4())
+            self.bot_client.current_conversation[user_id] = {"id": cid, "last_message_time": time.time()}
+
+    async def _process_vision(self, user_id: str, text: str, message: discord.Message) -> List[str]:
+        try:
+            att = [a for a in message.attachments if a.content_type and "image" in a.content_type][0]
+            img_b64 = base64.b64encode(await att.read()).decode()
+            res = await self.bot_client.g4f_client.chat.completions.create(
+                model=self.bot_client.user_settings[user_id].get("selected_vision_model", "openai-fast"),
+                messages=[{"role": "user", "content": text or "Опиши это фото"}],
+                images=[[f"data:image/jpeg;base64,{img_b64}", "img.jpg"]]
+            )
+            return self._split_text(res.choices[0].message.content)
+        except: return ["Ошибка при анализе фото."]
