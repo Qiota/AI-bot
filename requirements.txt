@@ -1,5 +1,6 @@
 discord.py
 g4f[all]
+g4f[search]
 python-decouple
 aiohttp
 colorama
