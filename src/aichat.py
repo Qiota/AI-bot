@@ -10,11 +10,12 @@ from .client import BotClient
 import tempfile
 import g4f.debug
 import warnings
+import re
 
 # Подавление предупреждений pydub
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
 
-# Отключение debug-режима для минимизации логов
+# Отключение debug-режима
 g4f.debug.logging = False
 
 DEFAULT_PROMPT = """Ты — Кудере~, поддерживай беседу для более живого общения используя все людские качества.
@@ -23,18 +24,23 @@ DEFAULT_PROMPT = """Ты — Кудере~, поддерживай беседу 
 1. Если тебе предоставлены результаты поиска, используй ТОЛЬКО достоверные факты из них.
 2. Если результаты поиска содержат нерелевантные ссылки (соцсети, профили, мусор), ИГНОРИРУЙ ИХ.
 3. НЕ ВЫДУМЫВАЙ ссылки и факты, если их нет в результатах."""
+
 SEARCH_TRIGGER_WORDS = ["найди", "отыщи", "поищи", "разыщи", "ищи", "поиск", "информация о", "что такое"]
 
+# Локальный словарь запрещенных корней и слов (регулярные выражения для гибкости)
+FORBIDDEN_PATTERN = re.compile(
+    r"(хуй|пизд|еба|ебл|бля|сук|гандон|чмо|уеб|шлюх|даун|ниггер|хохол|кацап|терроризм|суицид|наркотик)",
+    re.IGNORECASE
+)
+
 class AIChat:
-    """Класс для обработки сообщений с авто-очисткой памяти и защитой от переполнения."""
+    """Класс для обработки сообщений с авто-очисткой памяти и защитой от переполнения/токсичности."""
     MAX_MEMORY_SIZE = 10 
     SAFE_CHAR_LIMIT = 3500 
-    INACTIVITY_TIMEOUT = 3600  # 1 час бездействия
+    INACTIVITY_TIMEOUT = 3600
 
     def __init__(self, bot_client: BotClient) -> None:
         self.bot_client: BotClient = bot_client
-        
-        # Регистрация событий
         self.bot_client.bot.event(self.on_message)
         self.bot_client.bot.event(self.on_message_edit)
 
@@ -44,47 +50,32 @@ class AIChat:
         except Exception as e:
             logger.error(f"Ошибка cookies: {e}")
 
-        # ПРАВИЛЬНЫЙ ЗАПУСК ФОНОВОЙ ЗАДАЧИ
-        # Используем asyncio.create_task напрямую, это безопасно в Discord.py 2.0+
         asyncio.create_task(self._cleanup_inactive_conversations())
-        logger.info("AIChat инициализирован: Запущена фоновая очистка памяти.")
+        logger.info("AIChat инициализирован: Защита и очистка активны.")
 
     async def _cleanup_inactive_conversations(self):
-        """Фоновый цикл для удаления старого контекста неактивных пользователей."""
         while not self.bot_client.bot.is_closed():
             try:
-                # Ждем, пока бот подключится, прежде чем начинать проверку
                 if not self.bot_client.bot.is_ready():
                     await asyncio.sleep(5)
                     continue
-
                 now = time.time()
                 inactive_users = []
-
-                # Проверяем неактивность
                 for user_id, session in list(self.bot_client.current_conversation.items()):
-                    last_active = session.get("last_message_time", 0)
-                    if now - last_active > self.INACTIVITY_TIMEOUT:
+                    if now - session.get("last_message_time", 0) > self.INACTIVITY_TIMEOUT:
                         inactive_users.append(user_id)
-
                 for user_id in inactive_users:
-                    if user_id in self.bot_client.current_conversation:
-                        conv_id = self.bot_client.current_conversation[user_id]["id"]
-                        if conv_id in self.bot_client.chat_memory:
-                            del self.bot_client.chat_memory[conv_id]
-                        del self.bot_client.current_conversation[user_id]
-                        logger.info(f"Память пользователя {user_id} очищена (таймаут).")
-
+                    conv_id = self.bot_client.current_conversation[user_id]["id"]
+                    self.bot_client.chat_memory.pop(conv_id, None)
+                    self.bot_client.current_conversation.pop(user_id, None)
+                    logger.info(f"Память пользователя {user_id} очищена.")
             except Exception as e:
                 logger.error(f"Ошибка в цикле очистки: {e}")
-            
-            await asyncio.sleep(300) # Проверка каждые 5 минут
+            await asyncio.sleep(300)
 
     def _add_to_memory(self, user_id: str, role: str, content: str) -> None:
         if user_id not in self.bot_client.current_conversation: return
-        
         conv_id = self.bot_client.current_conversation[user_id]["id"]
-        # Обновляем активность
         self.bot_client.current_conversation[user_id]["last_message_time"] = time.time()
         
         if conv_id not in self.bot_client.chat_memory:
@@ -99,9 +90,7 @@ class AIChat:
     def _get_safe_context(self, user_id: str, sys_prompt: str) -> List[Dict]:
         conv_id = self.bot_client.current_conversation[user_id]["id"]
         history = self.bot_client.chat_memory.get(conv_id, [])
-        
-        safe_history = []
-        chars = len(sys_prompt)
+        safe_history, chars = [], len(sys_prompt)
         for msg in reversed(history):
             if chars + len(msg['content']) > self.SAFE_CHAR_LIMIT: break
             safe_history.insert(0, msg)
@@ -121,6 +110,12 @@ class AIChat:
         if not await self.bot_client.is_bot_mentioned(message): return
 
         text = message.content.replace(f"<@{self.bot_client.bot.user.id}>", "").strip()
+        
+        # 1. Локальная проверка на запрещенные слова
+        if FORBIDDEN_PATTERN.search(text):
+            await message.reply("🔔 В сообщении есть тема, которую я не могу обсуждать.\nДавай продолжим разговор в вежливом формате.🤔")
+            return
+
         if text.lower() == ".reset":
             await self._handle_reset(message, user_id)
             return
@@ -143,7 +138,6 @@ class AIChat:
         await message.reply("🧹 Память беседы успешно очищена.")
 
     async def generate_response(self, user_id: str, text: str, message: discord.Message, use_search: bool) -> List[str]:
-        # Логика для изображений
         if any(a.content_type and "image" in a.content_type for a in message.attachments):
             return await self._process_vision(user_id, text, message)
 
@@ -156,17 +150,19 @@ class AIChat:
     async def _call_ai(self, messages: List[Dict], user_id: str, use_search: bool) -> Optional[str]:
         model = self.bot_client.user_settings[user_id].get("selected_text_model", "openai-fast")
         try:
-            # Отключаем поиск для gpt-4.1-nano, если контекст уже под лимитом
             actual_search = use_search if len(str(messages)) < 3000 else False
-            
             response = await self.bot_client.g4f_client.chat.completions.create(
                 model=model, messages=messages, web_search=actual_search
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            if "500" in str(e) or "length" in str(e):
+            err_msg = str(e).lower()
+            # 2. Коллектор ошибки 400 (Bad Request / Policy Violation)
+            if "400" in err_msg or "safety" in err_msg or "content_filter" in err_msg:
+                return "🔔 В сообщении есть тема, которую я не могу обсуждать.\nДавай продолжим разговор в вежливом формате.🤔"
+            
+            if "500" in err_msg or "length" in err_msg:
                 try:
-                    # Режим спасения: только вопрос без истории
                     res = await self.bot_client.g4f_client.chat.completions.create(
                         model=model, messages=[messages[0], messages[-1]], web_search=False
                     )
@@ -202,4 +198,7 @@ class AIChat:
                 images=[[f"data:image/jpeg;base64,{img_b64}", "img.jpg"]]
             )
             return self._split_text(res.choices[0].message.content)
-        except: return ["Ошибка при анализе фото."]
+        except Exception as e:
+            if "400" in str(e):
+                return ["🔔 В этом изображении есть контент, который я не могу принять.\nПожалуйста, выбери другое изображение.🥱"]
+            return ["Ошибка при анализе фото."]
