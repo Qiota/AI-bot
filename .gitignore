@@ -8,6 +8,7 @@
 *.rej
 *.out
 *.prof
+*.md
 har_and_cookies/
 
 # Файлы Python
@@ -66,6 +67,7 @@ nox/
 # Файлы Windows
 Thumbs.db
 ehthumbs.db
+guilds.db
 Desktop.ini
 
 # Документация и артефакты

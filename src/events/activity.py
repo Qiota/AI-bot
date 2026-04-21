@@ -13,7 +13,7 @@ async def set_bot_activity(
     await bot.wait_until_ready()
 
     if texts is None:
-        texts = ["🛠️-/restrict", "v1.1", "с 2026 годом!"]
+        texts = ["🛠️-/restrict", "v1.5"]
 
     index = 0
     while not bot.is_closed():

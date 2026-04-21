@@ -5,6 +5,7 @@ from .systemLog import logger
 import time
 from collections import defaultdict
 import uuid
+from src.utils.firebase.firebase_manager import FirebaseManager
 from g4f.client import AsyncClient as G4FClient
 
 class BotClient:
@@ -45,6 +46,12 @@ class BotClient:
 
     async def on_ready(self) -> None:
         logger.info(f"Бот онлайн как {self.bot.user}")
+
+    async def _ensure_firebase_initialized(self):
+        """Ensure FirebaseManager is initialized and return instance."""
+        if self.firebase_manager is None:
+            self.firebase_manager = await FirebaseManager.initialize()
+        return self.firebase_manager
 
     async def is_bot_mentioned(self, message: discord.Message) -> bool:
         if isinstance(message.channel, discord.DMChannel): return True

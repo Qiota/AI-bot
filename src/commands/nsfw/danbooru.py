@@ -30,9 +30,9 @@ SUPPORTED_MIME_TYPES = {
     'video/mp4': '.mp4',
     'video/webm': '.webm'
 }
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 20
 AUTOCOMPLETE_TIMEOUT = 2.5  # Увеличено до 2.5 секунд
-SEMAPHORE_LIMIT = 10
+SEMAPHORE_LIMIT = 15
 INACTIVITY_TIMEOUT = 3600
 TAG_CACHE_TTL = 7200
 TAG_CACHE_SIZE = 5000
@@ -490,32 +490,49 @@ class NavigationView(View):
                 post = chunk_posts[idx]
                 try:
                     content_type, file_size = file_info_cache.get(url, ('unknown', None))
-                    if content_type not in SUPPORTED_MIME_TYPES or (file_size is not None and file_size > self.max_file_size):
+                    if content_type not in SUPPORTED_MIME_TYPES or (file_size is not None and file_size > self.max_file_size * 0.9):  # Conservative pre-check
                         logging.debug(f"Пропущен файл {url} из кэша: MIME={content_type}, размер={file_size}")
                         return None, post
 
+                    start_time = asyncio.get_event_loop().time()
                     async with aiohttp_session() as session:
                         async with session.get(url, timeout=REQUEST_TIMEOUT) as response:
-                            if response.status == 200:
-                                image_data = await response.read()
-                                if len(image_data) > self.max_file_size:
-                                    logging.debug(f"Файл {url} слишком большой ({len(image_data)} байт)")
-                                    return None, post
-                                content_type = response.headers.get('Content-Type', 'application/octet-stream')
-                                if content_type not in SUPPORTED_MIME_TYPES:
-                                    logging.debug(f"Пропущен файл {url} с неподдерживаемым MIME-типом: {content_type}")
-                                    return None, post
-                                extension = SUPPORTED_MIME_TYPES[content_type]
-                                file = discord.File(
-                                    fp=io.BytesIO(image_data),
-                                    filename=f"post_{post.id}{extension}"
-                                )
-                                return file, None
-                            else:
-                                logging.error(f"Ошибка загрузки файла {url}: HTTP {response.status}")
+                            if response.status != 200:
+                                logging.error(f"Ошибка загрузки файла {url}: HTTP {response.status} (elapsed: {asyncio.get_event_loop().time() - start_time:.1f}s)")
                                 return None, post
-                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                    logging.error(f"Ошибка загрузки файла {url}: {e}")
+
+                            content_type = response.headers.get('Content-Type', 'application/octet-stream')
+                            if content_type not in SUPPORTED_MIME_TYPES:
+                                logging.debug(f"Пропущен файл {url} (MIME: {content_type})")
+                                return None, post
+
+                            # Progressive download with size monitoring
+                            image_data = bytearray()
+                            async for chunk in response.content.iter_chunked(8192):
+                                image_data.extend(chunk)
+                                if len(image_data) > self.max_file_size:
+                                    logging.warning(f"Файл {url} превысил лимит {self.max_file_size} байт (actual: {len(image_data)}, elapsed: {asyncio.get_event_loop().time() - start_time:.1f}s)")
+                                    return None, post
+                            
+                            extension = SUPPORTED_MIME_TYPES[content_type]
+                            file = discord.File(
+                                fp=io.BytesIO(image_data),
+                                filename=f"post_{post.id}{extension}"
+                            )
+                            elapsed = asyncio.get_event_loop().time() - start_time
+                            logging.debug(f"Успешно загружен {url} ({len(image_data)} байт, {elapsed:.1f}s)")
+                            return file, None
+                except asyncio.TimeoutError:
+                    logging.error(f"Таймаут загрузки {url} после {REQUEST_TIMEOUT}s")
+                    return None, post
+                except aiohttp.ClientError as e:
+                    if "cdn.donmai.us" in url:
+                        logging.warning(f"CDN ошибка для {url}: {type(e).__name__} - пропуск (возможно throttling)")
+                    else:
+                        logging.error(f"ClientError для {url}: {e}")
+                    return None, post
+                except Exception as e:
+                    logging.error(f"Неожиданная ошибка для {url}: {e}")
                     return None, post
 
         tasks = [fetch_single_image(idx, url) for idx, url in enumerate(image_urls)]
@@ -656,10 +673,12 @@ class NavigationView(View):
             del active_views[self.original_user.id]
             logging.debug(f"Представление удалено из active_views для пользователя {self.original_user.id}")
 
+        # Periodic cache clear (every timeout)
         global file_info_cache, tag_suggestions_cache, used_post_ids
         file_info_cache.clear()
         tag_suggestions_cache.clear()
         used_post_ids.clear()
+        logging.debug("Кэши очищены по таймауту view")
 
 @asynccontextmanager
 async def aiohttp_session():

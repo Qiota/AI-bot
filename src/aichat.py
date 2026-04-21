@@ -65,7 +65,7 @@ class AIChat:
             response = await self._call_ai_with_retry(history, user_id)
             
             if response:
-                await self._send_large_message(message, response)
+                await self._send_single_message(message, response)
                 self._add_to_memory(user_id, "assistant", response)
             else:
                 await message.reply("💢 Извини, сейчас все нейросети заняты. Попробуй позже.")
@@ -93,6 +93,22 @@ class AIChat:
         
         return None
 
+    async def _send_single_message(self, message: discord.Message, text: str):
+        """Send response as single editable message, splitting content progressively."""
+        first_chunk = text[:1900]
+        response_msg = await message.reply(first_chunk)
+        
+        pos = 1900
+        while pos < len(text):
+            chunk = text[pos:pos + 1900]
+            try:
+                await response_msg.edit(content=text[:pos + len(chunk)])
+            except discord.HTTPException:
+                break  # Can't edit, stop
+            pos += 1900
+        
+        return response_msg
+
     def _add_to_memory(self, user_id: str, role: str, content: str):
         conv = self.bot_client.current_conversation[user_id]
         cid = conv["id"]
@@ -106,5 +122,5 @@ class AIChat:
         return self.bot_client.chat_memory.get(cid, [])
 
     async def _send_large_message(self, message: discord.Message, text: str):
-        for i in range(0, len(text), 2000):
-            await message.reply(text[i:i+2000])
+        """Deprecated: use _send_single_message instead"""
+        pass

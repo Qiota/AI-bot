@@ -144,7 +144,7 @@ class FirebaseManager:
 
     @classmethod
     async def initialize(cls) -> 'FirebaseManager':
-        """Инициализация подключения к Firebase Realtime Database с использованием asyncio.Lock."""
+        """Инициализация Firebase or SQLite fallback."""
         async with cls._init_lock:
             if cls._instance and cls._initialized:
                 return cls._instance
@@ -168,12 +168,19 @@ class FirebaseManager:
                 cls._instance = cls()
                 cls._instance._db = db.reference()
                 cls._initialized = True
-                logger.debug(f"Клиент Realtime Database инициализирован: _db={cls._instance._db}")
+                logger.info("Firebase Realtime Database готов")
                 return cls._instance
             except Exception as e:
-                logger.error(f"Ошибка инициализации Firebase: {e}")
-                cls._initialized = False
-                raise Exception(f"Ошибка инициализации Firebase: {e}")
+                logger.warning(f"Firebase недоступен ({e}). Используем SQLite fallback.")
+                from src.utils.sqlite_manager import SQLiteManager
+                sqlite_mgr = await SQLiteManager().initialize()
+                logger.info("SQLite fallback активирован (guilds.db)")
+                cls._instance = type('FallbackManager', (), {
+                    'load_guild_config': sqlite_mgr.load_guild_config,
+                    'update_guild_fields': sqlite_mgr.update_guild_fields
+                })()
+                cls._initialized = True
+                return cls._instance
 
     def _ensure_db_initialized(self) -> None:
         """Проверка, что клиент Realtime Database инициализирован."""

@@ -560,14 +560,25 @@ async def aidhentai(interaction: discord.Interaction, bot_client, query: Optiona
     guild_id = str(interaction.guild.id) if interaction.guild else "DM"
     channel_id = str(interaction.channel.id) if interaction.channel else "DM"
 
+    # Early defer to avoid 3s timeout
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except discord.errors.NotFound:
+        logger.error(f"Interaction expired early in aidhentai")
+        return
+
+    if interaction.guild is None or interaction.guild not in [g for g in bot_client.bot.guilds]:
+        await interaction.followup.send("Бот отсутствует на сервере!", ephemeral=True)
+        return
+
     result, reason = await restrict_command_execution(interaction, bot_client)
     if not result:
-        await interaction.response.send_message(reason or "Конфигурация сервера не найдена!", ephemeral=True)
+        await interaction.followup.send(reason or "Конфигурация сервера не найдена!", ephemeral=True)
         return
 
     result, reason = await check_bot_access(interaction, bot_client)
     if not result:
-        await interaction.response.send_message(reason, ephemeral=True)
+        await interaction.followup.send(reason, ephemeral=True)
         return
 
     if interaction.guild and not interaction.channel.nsfw:
@@ -577,17 +588,8 @@ async def aidhentai(interaction: discord.Interaction, bot_client, query: Optiona
     if interaction.guild:
         restriction, restriction_reason = await checker.check_user_restriction(interaction)
         if not restriction:
-            await interaction.response.send_message(restriction_reason or "Доступ ограничен.", ephemeral=True)
+            await interaction.followup.send(restriction_reason or "Доступ ограничен.", ephemeral=True)
             return
-
-    try:
-        await interaction.response.defer(ephemeral=False)
-    except discord.errors.NotFound as e:
-        logger.error(f"Взаимодействие не найдено: {e}")
-        await interaction.followup.send("Взаимодействие устарело.", ephemeral=True)
-        return
-    except discord.errors.InteractionResponded:
-        pass
 
     try:
         async with aiohttp_session() as session:
@@ -632,10 +634,9 @@ def create_command(bot_client) -> app_commands.Command:
         channel_id = str(interaction.channel.id) if interaction.channel else "DM"
         logger.error(f"Ошибка /aidhentai для {interaction.user.id} в гильдии {guild_id}, канал {channel_id}: {error}")
         try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Ошибка при выполнении команды.", ephemeral=True)
-            else:
-                await interaction.followup.send("Ошибка при выполнении команды.", ephemeral=True)
+            await interaction.followup.send("Ошибка при выполнении команды.", ephemeral=True)
+        except (discord.errors.NotFound, discord.errors.InteractionResponded):
+            logger.debug("Interaction expired in wrapper error handler")
         except discord.DiscordException as e:
             logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
 
