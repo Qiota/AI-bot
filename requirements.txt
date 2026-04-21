@@ -18,3 +18,4 @@ duckduckgo-search
 gtts
 translatepy
 psutil
+cachetools
