@@ -53,6 +53,11 @@ class BotClient:
             self.firebase_manager = await FirebaseManager.initialize()
         return self.firebase_manager
 
+    @property
+    def is_ready(self) -> bool:
+        """Returns whether the underlying Discord client is ready."""
+        return self.bot is not None and self.bot.is_ready()
+
     async def is_bot_mentioned(self, message: discord.Message) -> bool:
         if isinstance(message.channel, discord.DMChannel): return True
         return self.bot.user in message.mentions or f"<@{self.bot.user.id}>" in message.content

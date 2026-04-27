@@ -1,63 +1,27 @@
+"""Команда /info — информация о боте."""
+
 import discord
 from discord import app_commands, Embed
 from datetime import datetime
-from typing import Optional, Tuple
 import time
-from ..systemLog import logger
-from .restrict import check_bot_access, restrict_command_execution
 
-# Константы
-COLOR_DEFAULT = discord.Color.dark_grey()
-ERROR_MESSAGE = "Произошла ошибка при выполнении команды."
-CONFIG_ERROR = "Ошибка конфигурации бота."
-ACCESS_DENIED = "Бот не имеет доступа к этому каналу."
+from ..systemLog import logger
+from ..core.middleware import require_bot_access
+from ..core.constants import COLOR_DEFAULT, ERROR_GENERIC
+
 COMMAND_DESCRIPTION = "Отображает информацию о боте и время работы"
 
-async def check_access(
-    interaction: discord.Interaction, 
-    bot_client: Optional[object]
-) -> Tuple[bool, Optional[str]]:
-    """Проверяет доступ бота и ограничения команды.
 
-    Args:
-        interaction: Взаимодействие с пользователем.
-        bot_client: Клиент бота.
-
-    Returns:
-        Tuple[bool, Optional[str]]: Результат проверки и причина отказа (если есть).
-    """
-    if bot_client is None:
-        logger.error("bot_client не предоставлен")
-        return False, CONFIG_ERROR
-    
-    if not await restrict_command_execution(interaction, bot_client):
-        return False, None
-    
-    access_result, access_reason = await check_bot_access(interaction, bot_client)
-    if not access_result:
-        return False, access_reason or ACCESS_DENIED
-    
-    return True, None
-
-async def info(interaction: discord.Interaction, bot_client: Optional[object]) -> None:
-    """Команда /info: Отображает информацию о боте, включая время работы, в виде Embed.
-
-    Args:
-        interaction: Взаимодействие с пользователем.
-        bot_client: Клиент бота.
-    """
-    access_result, access_reason = await check_access(interaction, bot_client)
-    if not access_result:
-        await interaction.response.send_message(access_reason, ephemeral=True)
-        return
-
+@require_bot_access
+async def info(interaction: discord.Interaction, bot_client) -> None:
+    """Команда /info: Отображает информацию о боте, включая время работы, в виде Embed."""
     await interaction.response.defer(ephemeral=True)
 
     try:
         embed = Embed(
             title="Информация о боте",
             description="Основные системные данные о боте:",
-            color=COLOR_DEFAULT
+            color=COLOR_DEFAULT,
         )
 
         # Основные поля
@@ -106,14 +70,13 @@ async def info(interaction: discord.Interaction, bot_client: Optional[object]) -
             embed.add_field(name="Время работы", value="Недоступно", inline=True)
             logger.warning(f"Ошибка доступа к start_time: {e}")
 
-        # Установка аватара
+        # Аватар
         if bot_client.bot.user.avatar:
             try:
                 embed.set_thumbnail(url=bot_client.bot.user.avatar.url)
             except Exception as e:
                 logger.warning(f"Ошибка установки аватара: {e}")
 
-        # Футер и временная метка
         embed.set_footer(text=f"Запрос от {interaction.user.name} (ID: {interaction.user.id})")
         embed.timestamp = datetime.utcnow()
 
@@ -121,18 +84,14 @@ async def info(interaction: discord.Interaction, bot_client: Optional[object]) -
 
     except Exception as e:
         logger.error(f"Ошибка команды /info для пользователя {interaction.user.id}: {e}")
-        await interaction.followup.send(ERROR_MESSAGE, ephemeral=True)
+        await interaction.followup.send(ERROR_GENERIC, ephemeral=True)
 
-def create_command(bot_client: object) -> app_commands.Command:
-    """Создаёт команду /info.
 
-    Args:
-        bot_client: Клиент бота.
-
-    Returns:
-        app_commands.Command: Объект команды /info.
-    """
+def create_command(bot_client) -> app_commands.Command:
+    """Создаёт команду /info."""
     @app_commands.command(name="info", description=COMMAND_DESCRIPTION)
     async def info_command(interaction: discord.Interaction) -> None:
         await info(interaction, bot_client)
+
     return info_command
+

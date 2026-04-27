@@ -1,169 +1,33 @@
-import discord
-from discord import app_commands, ButtonStyle, Interaction
-from discord.ui import Button, View, Modal, TextInput
-import aiohttp
-import io
-import math
-from typing import List, Optional, Dict, Tuple, Any
-from dataclasses import dataclass
 import asyncio
-from contextlib import asynccontextmanager
-import backoff
+import io
 import logging
-from cachetools import TTLCache
-from concurrent.futures import ThreadPoolExecutor
+import math
 import time
+from typing import Dict, List, Optional, Tuple
 
-# Отключаем логирование aiohttp.access для снижения шума
-aiohttp_access_logger = logging.getLogger("aiohttp.access")
-aiohttp_access_logger.propagate = False
-aiohttp_access_logger.addHandler(logging.NullHandler())
+import aiohttp
+import discord
+from discord import ButtonStyle, Interaction
+from discord.ui import Button, Modal, TextInput, View
 
-# Конфигурационные константы
-MAX_FILE_SIZE_DEFAULT = 10 * 1024 * 1024  # 10 МБ
-MAX_FILE_SIZE_TIER_2 = 25 * 1024 * 1024  # 25 МБ
-MAX_FILE_SIZE_TIER_3 = 100 * 1024 * 1024  # 100 МБ
-SUPPORTED_MIME_TYPES = {
-    'image/jpeg': '.jpg',
-    'image/png': '.png',
-    'image/gif': '.gif',
-    'video/mp4': '.mp4',
-    'video/webm': '.webm'
-}
-REQUEST_TIMEOUT = 20
-AUTOCOMPLETE_TIMEOUT = 2.5  # Увеличено до 2.5 секунд
-SEMAPHORE_LIMIT = 15
-INACTIVITY_TIMEOUT = 3600
-TAG_CACHE_TTL = 7200
-TAG_CACHE_SIZE = 5000
-VIEW_TIMEOUT = 3600
-COOLDOWN_TIME = 5
-COOLDOWN_RATE = 1
-MAX_QUERY_LENGTH = 100
-MAX_WORKERS = 4
-POSTS_PER_PAGE = 20
-POSTS_PER_CHUNK = 10
+from ....systemLog import logger
+from .api import (
+    SUPPORTED_MIME_TYPES,
+    POSTS_PER_CHUNK,
+    POSTS_PER_PAGE,
+    REQUEST_TIMEOUT,
+    SEMAPHORE_LIMIT,
+    file_info_cache,
+    used_post_ids,
+    aiohttp_session,
+    fetch_danbooru_posts,
+    filter_duplicates,
+)
+from .models import DanbooruAPIError, DanbooruPost
+from ....core.constants import INACTIVITY_TIMEOUT
 
-# Пользовательские исключения
-class DanbooruAPIError(Exception):
-    """Исключение для ошибок Danbooru API."""
-    pass
-
-# Структурированные данные для постов Danbooru
-@dataclass
-class DanbooruPost:
-    id: int
-    file_url: str
-    preview_url: str
-    tags: List[str]
-    rating: str
-    source: Optional[str]
-    created_at: str
-
-# Глобальное состояние
-file_info_cache: Dict[str, Tuple[str, Optional[int]]] = {}
-tag_suggestions_cache: TTLCache = TTLCache(maxsize=TAG_CACHE_SIZE, ttl=TAG_CACHE_TTL)
-used_post_ids: set = set()
 active_views: Dict[int, 'NavigationView'] = {}
-autocomplete_cache: TTLCache = TTLCache(maxsize=1000, ttl=3600)  # Локальный кэш для автодополнения
 
-def format_post_count(count: int) -> str:
-    """Форматирует количество постов в читаемый вид."""
-    if count < 1000:
-        return str(count)
-    elif count < 1000000:
-        return f"{count / 1000:.1f}k".replace(".0k", "k")
-    else:
-        return f"{count / 1000000:.1f}M".replace(".0M", "M")
-
-def parse_post_count(count_str: str) -> int:
-    """Парсит форматированное количество постов в число."""
-    count_str = count_str.strip().lower()
-    try:
-        if count_str.endswith('k'):
-            return int(float(count_str[:-1]) * 1000)
-        elif count_str.endswith('m'):
-            return int(float(count_str[:-1]) * 1000000)
-        else:
-            return int(count_str)
-    except (ValueError, TypeError) as e:
-        logging.error(f"Ошибка парсинга post-count '{count_str}': {e}")
-        raise ValueError(f"Неверный формат post-count: {count_str}")
-
-async def process_api_data(
-    data: List[Dict[str, Any]],
-    data_type: str,
-    session: Optional[aiohttp.ClientSession] = None
-) -> List[Any]:
-    """Обрабатывает данные API в параллельном режиме."""
-    def process_post(item: Dict[str, Any]) -> Optional[DanbooruPost]:
-        if not all(key in item for key in ["id", "file_url", "preview_file_url", "tag_string", "rating"]):
-            return None
-        post_id = item["id"]
-        if post_id in used_post_ids:
-            logging.debug(f"Пропущен дубликат поста с ID {post_id}")
-            return None
-        return DanbooruPost(
-            id=post_id,
-            file_url=item["file_url"] or "",
-            preview_url=item["preview_file_url"] or "",
-            tags=item["tag_string"].split(),
-            rating=item["rating"],
-            source=item.get("source"),
-            created_at=item.get("created_at", "Неизвестно")
-        )
-
-    def process_tag(item: Dict[str, Any]) -> Optional[Tuple[str, int, str]]:
-        if not isinstance(item, dict) or "name" not in item or "post_count" not in item:
-            logging.warning(f"Пропущен некорректный элемент тега: {item}")
-            return None
-        tag_name = item["name"]
-        post_count = item["post_count"]
-        if not isinstance(post_count, int) or post_count < 0:
-            logging.warning(f"Некорректное значение post_count для тега '{tag_name}': {post_count}")
-            return None
-        formatted_count = f"{tag_name} ({format_post_count(post_count)})"
-        return (tag_name, post_count, formatted_count)
-
-    async def check_file_info(url: str) -> None:
-        if url in file_info_cache:
-            return
-        try:
-            async with session.head(url, timeout=REQUEST_TIMEOUT) as response:
-                if response.status == 200:
-                    content_type = response.headers.get('Content-Type', 'application/octet-stream')
-                    content_length = response.headers.get('Content-Length')
-                    file_size = int(content_length) if content_length else None
-                    file_info_cache[url] = (content_type, file_size)
-                else:
-                    file_info_cache[url] = ('unknown', None)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logging.debug(f"Ошибка проверки файла для {url}: {e}")
-            file_info_cache[url] = ('unknown', None)
-
-    start_time = asyncio.get_event_loop().time()
-    results = []
-
-    if data_type not in ('posts', 'tags'):
-        raise ValueError(f"Неподдерживаемый тип данных: {data_type}")
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        if data_type == 'posts':
-            loop = asyncio.get_event_loop()
-            tasks = [loop.run_in_executor(executor, process_post, item) for item in data]
-            results = await asyncio.gather(*tasks)
-            results = [r for r in results if r is not None]
-            if session and results:
-                mime_tasks = [check_file_info(post.file_url) for post in results if post.file_url]
-                await asyncio.gather(*mime_tasks, return_exceptions=True)
-        else:
-            loop = asyncio.get_event_loop()
-            tasks = [loop.run_in_executor(executor, process_tag, item) for item in data]
-            results = await asyncio.gather(*tasks)
-            results = [r for r in results if r is not None]
-
-    logging.debug(f"Обработка {len(data)} элементов ({data_type}) выполнена за {asyncio.get_event_loop().time() - start_time:.2f} сек")
-    return results
 
 class PageInputModal(Modal, title="Перейти к странице"):
     """Модальное окно для ввода номера страницы в навигации."""
@@ -256,6 +120,7 @@ class PageInputModal(Modal, title="Перейти к странице"):
             self.view.update_buttons()
             await interaction.followup.send("Не удалось загрузить страницу. Попробуйте снова.", ephemeral=True)
 
+
 class NavigationView(View):
     """View для навигации по чанкам и страницам Danbooru."""
     def __init__(
@@ -267,7 +132,7 @@ class NavigationView(View):
         total_pages: int,
         max_file_size: int,
         current_chunk: int = 0,
-        timeout: int = VIEW_TIMEOUT
+        timeout: int = 3600
     ):
         super().__init__(timeout=timeout)
         self.results = results
@@ -490,7 +355,7 @@ class NavigationView(View):
                 post = chunk_posts[idx]
                 try:
                     content_type, file_size = file_info_cache.get(url, ('unknown', None))
-                    if content_type not in SUPPORTED_MIME_TYPES or (file_size is not None and file_size > self.max_file_size * 0.9):  # Conservative pre-check
+                    if content_type not in SUPPORTED_MIME_TYPES or (file_size is not None and file_size > self.max_file_size * 0.9):
                         logging.debug(f"Пропущен файл {url} из кэша: MIME={content_type}, размер={file_size}")
                         return None, post
 
@@ -506,14 +371,13 @@ class NavigationView(View):
                                 logging.debug(f"Пропущен файл {url} (MIME: {content_type})")
                                 return None, post
 
-                            # Progressive download with size monitoring
                             image_data = bytearray()
                             async for chunk in response.content.iter_chunked(8192):
                                 image_data.extend(chunk)
                                 if len(image_data) > self.max_file_size:
                                     logging.warning(f"Файл {url} превысил лимит {self.max_file_size} байт (actual: {len(image_data)}, elapsed: {asyncio.get_event_loop().time() - start_time:.1f}s)")
                                     return None, post
-                            
+
                             extension = SUPPORTED_MIME_TYPES[content_type]
                             file = discord.File(
                                 fp=io.BytesIO(image_data),
@@ -673,338 +537,8 @@ class NavigationView(View):
             del active_views[self.original_user.id]
             logging.debug(f"Представление удалено из active_views для пользователя {self.original_user.id}")
 
-        # Periodic cache clear (every timeout)
-        global file_info_cache, tag_suggestions_cache, used_post_ids
+        from .api import tag_suggestions_cache as api_tag_cache
         file_info_cache.clear()
-        tag_suggestions_cache.clear()
+        api_tag_cache.clear()
         used_post_ids.clear()
         logging.debug("Кэши очищены по таймауту view")
-
-@asynccontextmanager
-async def aiohttp_session():
-    """Контекстный менеджер для сессии aiohttp с оптимизированными настройками."""
-    timeout = aiohttp.ClientTimeout(total=20, connect=10)
-    connector = aiohttp.TCPConnector(limit=50)
-    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-        yield session
-
-def filter_duplicates(posts: List[DanbooruPost]) -> List[DanbooruPost]:
-    """Удаляет дубликаты постов на основе их идентификаторов."""
-    seen_ids = set()
-    unique_posts = []
-    for post in posts:
-        if post.id not in seen_ids and post.id not in used_post_ids:
-            seen_ids.add(post.id)
-            unique_posts.append(post)
-    return unique_posts
-
-@backoff.on_exception(
-    backoff.expo,
-    (aiohttp.ClientError, asyncio.TimeoutError, DanbooruAPIError),
-    max_tries=3,
-    max_time=10
-)
-async def fetch_post_count(session: aiohttp.ClientSession, tags: Optional[str]) -> int:
-    """Получает общее количество постов для заданных тегов."""
-    url = "https://danbooru.donmai.us/counts/posts.json"
-    params = {}
-    if tags:
-        params["tags"] = tags.strip()
-
-    async with session.get(url, params=params) as response:
-        rate_limit_remaining = response.headers.get('X-Rate-Limit-Remaining', 'unknown')
-        logging.debug(f"Rate-Limit-Remaining for /counts/posts.json: {rate_limit_remaining}")
-        if response.status != 200:
-            error_map = {
-                403: "Доступ к API ограничен.",
-                429: "Превышен лимит запросов.",
-                500: "Внутренняя ошибка сервера Danbooru."
-            }
-            response_text = await response.text()
-            logging.error(f"API Error: {error_map.get(response.status, f'Неизвестная ошибка API: Код {response.status}')}, Response: {response_text[:200]}")
-            raise DanbooruAPIError(error_map.get(response.status, f"Неизвестная ошибка API: Код {response.status}"))
-
-        data = await response.json()
-        if not isinstance(data, dict) or "counts" not in data or "posts" not in data["counts"]:
-            raise DanbooruAPIError("Неправильный формат ответа от API")
-
-        return data["counts"]["posts"]
-
-@backoff.on_exception(
-    backoff.expo,
-    (aiohttp.ClientError, asyncio.TimeoutError, DanbooruAPIError),
-    max_tries=3,
-    max_time=10
-)
-async def fetch_danbooru_posts(session: aiohttp.ClientSession, tags: Optional[str], page: int) -> List[DanbooruPost]:
-    """Получает посты из Danbooru API."""
-    start_time = asyncio.get_event_loop().time()
-    base_url = "https://danbooru.donmai.us/posts.json"
-    params = {"page": page, "limit": POSTS_PER_PAGE}
-    if tags:
-        params["tags"] = tags.strip()
-
-    async with session.get(base_url, params=params) as response:
-        rate_limit_remaining = response.headers.get('X-Rate-Limit-Remaining', 'unknown')
-        logging.debug(f"Rate-Limit-Remaining for /posts.json: {rate_limit_remaining}")
-        if response.status != 200:
-            error_map = {
-                403: "Доступ к API ограничен.",
-                429: "Превышен лимит запросов.",
-                500: "Внутренняя ошибка сервера Danbooru."
-            }
-            response_text = await response.text()
-            logging.error(f"API Error: {error_map.get(response.status, f'Неизвестная ошибка API: Код {response.status}')}, Response: {response_text[:200]}")
-            raise DanbooruAPIError(error_map.get(response.status, f"Неизвестная ошибка API: Код {response.status}"))
-
-        data = await response.json()
-        if not isinstance(data, list):
-            raise DanbooruAPIError("Неправильный формат ответа от API")
-
-        posts = await process_api_data(data, 'posts', session)
-        logging.debug(f"Загрузка постов (страница {page}, теги: {tags}) выполнена за {asyncio.get_event_loop().time() - start_time:.2f} сек")
-        return posts
-
-@backoff.on_exception(
-    backoff.expo,
-    (aiohttp.ClientError, asyncio.TimeoutError, DanbooruAPIError),
-    max_tries=3,
-    max_time=10
-)
-async def fetch_tag_suggestions(session: aiohttp.ClientSession, query: str) -> List[Tuple[str, int, str]]:
-    """Получает предложения тегов через Danbooru Tags API."""
-    global tag_suggestions_cache
-    query = query.strip().lower()
-    cache_key = query or "__all_tags__"
-
-    if cache_key in tag_suggestions_cache:
-        logging.debug(f"Использован кэш для запроса '{query}': {len(tag_suggestions_cache[cache_key])} тегов")
-        return tag_suggestions_cache[cache_key]
-
-    start_time = asyncio.get_event_loop().time()
-    url = "https://danbooru.donmai.us/tags.json"
-    params = {
-        "search[hide_empty]": "yes",
-        "search[order]": "count",
-        "limit": 25  # Ограничение количества тегов для автодополнения
-    }
-    if query:
-        params["search[name_matches]"] = f"{query}*"
-    else:
-        params["limit"] = 25  # Устанавливаем тот же лимит для пустого запроса
-
-    logging.debug(f"Запрос тегов с параметрами: {params}")
-
-    async with session.get(url, params=params, timeout=REQUEST_TIMEOUT) as response:
-        rate_limit_remaining = response.headers.get('X-Rate-Limit-Remaining', 'unknown')
-        logging.debug(f"Rate-Limit-Remaining for /tags.json: {rate_limit_remaining}")
-        if response.status != 200:
-            error_map = {
-                403: "Доступ к API ограничен.",
-                429: "Превышен лимит запросов.",
-                500: "Внутренняя ошибка сервера Danbooru."
-            }
-            response_text = await response.text()
-            logging.error(f"API Error: {error_map.get(response.status, f'Неизвестная ошибка API: Код {response.status}')}, Response: {response_text[:200]}")
-            raise DanbooruAPIError(error_map.get(response.status, f"Неизвестная ошибка API: Код {response.status}"))
-
-        data = await response.json()
-        if not isinstance(data, list):
-            logging.error(f"Неправильный формат ответа от /tags.json: {data}")
-            raise DanbooruAPIError("Неправильный формат ответа от API")
-
-        tags = await process_api_data(data, 'tags')
-        tag_suggestions_cache[cache_key] = tags
-        logging.debug(f"Кэшировано {len(tags)} тегов для запроса '{query}' за {asyncio.get_event_loop().time() - start_time:.2f} сек")
-        return tags
-
-async def tags_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
-    """Обработчик автодополнения для тегов с локальным кэшем."""
-    start_time = asyncio.get_event_loop().time()
-    try:
-        if len(current) > MAX_QUERY_LENGTH:
-            logging.debug(f"Запрос автодополнения '{current}' слишком длинный")
-            return []
-
-        # Проверка, не было ли взаимодействие уже обработано
-        if interaction.response.is_done():
-            logging.debug(f"Взаимодействие для автодополнения '{current}' уже обработано")
-            return []
-
-        tags = current.strip().split()
-        query = tags[-1] if tags else ""
-        cache_key = query.lower() or "__all_tags__"
-
-        # Используем блокировку для синхронизации доступа к кэшу
-        async with asyncio.Lock():
-            # Проверка локального кэша автодополнения
-            if cache_key in autocomplete_cache:
-                suggestions = autocomplete_cache[cache_key]
-                logging.debug(f"Использован локальный кэш автодополнения для '{query}': {len(suggestions)} тегов")
-            else:
-                # Проверка глобального кэша тегов
-                if cache_key in tag_suggestions_cache:
-                    suggestions = tag_suggestions_cache[cache_key]
-                    logging.debug(f"Использован глобальный кэш для автодополнения '{query}': {len(suggestions)} тегов")
-                else:
-                    async with aiohttp_session() as session:
-                        suggestions = await fetch_tag_suggestions(session, query)
-                    autocomplete_cache[cache_key] = suggestions
-                    logging.debug(f"Добавлено в локальный кэш автодополнения для '{query}': {len(suggestions)} тегов")
-
-        prefix = ' '.join(tags[:-1]) + ' ' if tags[:-1] else ''
-        choices = [
-            app_commands.Choice(
-                name=formatted_count,
-                value=f"{prefix}{tag}".strip()
-            )
-            for tag, _, formatted_count in suggestions[:25]
-        ]
-
-        # Отправляем ответ только если взаимодействие еще активно
-        try:
-            await interaction.response.autocomplete(choices)
-        except discord.errors.InteractionResponded:
-            logging.debug(f"Взаимодействие для '{current}' уже обработано")
-            return []
-        except discord.errors.NotFound as e:
-            logging.debug(f"Взаимодействие для '{current}' устарело: {e}")
-            return []
-
-        logging.debug(f"Автодополнение для '{current}' выполнено за {asyncio.get_event_loop().time() - start_time:.2f} сек")
-        return choices
-    except Exception as e:
-        logging.error(f"Ошибка автодополнения тегов для '{current}': {e}")
-        return []
-
-async def disable_previous_view(user_id: int) -> None:
-    """Отключает предыдущее активное представление для пользователя."""
-    view = active_views.get(user_id)
-    if not view:
-        logging.debug(f"Нет активного представления для пользователя {user_id}")
-        return
-
-    view.disable_navigation_buttons()
-    await view.on_timeout()
-    if view.message:
-        try:
-            await view.message.edit(view=None)
-            logging.debug(f"Кнопки удалены из предыдущего сообщения для пользователя {user_id}")
-        except discord.HTTPException as e:
-            logging.error(f"Ошибка при удалении кнопок из предыдущего сообщения: {e}")
-
-    if user_id in active_views:
-        del active_views[user_id]
-        logging.debug(f"Предыдущее представление для пользователя {user_id} отключено")
-
-async def danbooru(interaction: discord.Interaction, bot_client, tags: Optional[str] = None) -> None:
-    """Слеш-команда для поиска постов на Danbooru."""
-    guild_id = str(interaction.guild.id) if interaction.guild else "ЛС"
-    channel_id = str(interaction.channel.id) if interaction.channel else "ЛС"
-    logging.debug(f"Команда /danbooru вызвана пользователем {interaction.user.id} в гильдии {guild_id}, канал {channel_id}, теги: {tags}")
-
-    if interaction.guild and not interaction.channel.nsfw:
-        await interaction.response.send_message("Команда доступна только в NSFW-каналах или ЛС.", ephemeral=True)
-        return
-
-    if tags and any(tag.strip() == "" for tag in tags.split()):
-        await interaction.response.send_message("Теги содержат пустые значения.", ephemeral=True)
-        return
-
-    if interaction.guild:
-        if interaction.guild.premium_tier == 2:
-            max_file_size = MAX_FILE_SIZE_TIER_2
-        elif interaction.guild.premium_tier == 3:
-            max_file_size = MAX_FILE_SIZE_TIER_3
-        else:
-            max_file_size = MAX_FILE_SIZE_DEFAULT
-    else:
-        max_file_size = MAX_FILE_SIZE_DEFAULT
-
-    await disable_previous_view(interaction.user.id)
-
-    try:
-        await interaction.response.defer(ephemeral=False)
-    except discord.errors.NotFound as e:
-        logging.error(f"Взаимодействие не найдено при defer: {e}")
-        await interaction.followup.send("Взаимодействие устарело.", ephemeral=True)
-        return
-
-    try:
-        async with aiohttp_session() as session:
-            total_posts_task = fetch_post_count(session, tags)
-            posts_task = fetch_danbooru_posts(session, tags, page=1)
-            total_posts, posts = await asyncio.gather(total_posts_task, posts_task, return_exceptions=True)
-
-            if isinstance(total_posts, Exception):
-                raise DanbooruAPIError(f"Ошибка получения количества постов: {total_posts}")
-            if isinstance(posts, Exception):
-                raise DanbooruAPIError(f"Ошибка получения постов: {posts}")
-
-            total_pages = min(1000, math.ceil(total_posts / POSTS_PER_PAGE)) if total_posts > 0 else 1
-            if not posts:
-                await interaction.followup.send(
-                    f"Посты по тегам '{tags or 'без тегов'}' не найдены.",
-                    ephemeral=False
-                )
-                return
-
-            posts = filter_duplicates(posts)
-            for post in posts:
-                used_post_ids.add(post.id)
-
-            view = NavigationView(
-                posts,
-                interaction.user,
-                tags,
-                current_page=1,
-                total_pages=total_pages,
-                max_file_size=max_file_size
-            )
-            view.page_cache[1] = posts
-            content, image_urls, skipped_posts, chunk_posts = await view.create_message()
-            files = await view.fetch_images(image_urls, interaction, skipped_posts, chunk_posts)
-            message = await interaction.followup.send(content=content, view=view, files=files, ephemeral=False)
-            view.message = message
-
-    except DanbooruAPIError as e:
-        logging.error(f"Ошибка Danbooru API для тегов '{tags}': {e}")
-        await interaction.followup.send(f"Не удалось получить посты: {str(e)}", ephemeral=False)
-    except Exception as e:
-        logging.error(f"Неизвестная ошибка в /danbooru для тегов '{tags}': {e}")
-        await interaction.followup.send("Произошла ошибка команды.", ephemeral=False)
-
-def create_command(bot_client) -> app_commands.Command:
-    """Создает слеш-команду /danbooru с автодополнением тегов."""
-    @app_commands.command(name="danbooru", description="Поиск постов на Danbooru по тегам")
-    @app_commands.describe(tags="Теги для поиска (например, 'blue_archive')")
-    @app_commands.autocomplete(tags=tags_autocomplete)
-    @app_commands.checks.cooldown(rate=COOLDOWN_RATE, per=COOLDOWN_TIME)
-    async def wrapper(interaction: discord.Interaction, tags: Optional[str] = None) -> None:
-        await danbooru(interaction, bot_client, tags)
-
-    @wrapper.error
-    async def command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-        guild_id = str(interaction.guild.id) if interaction.guild else "ЛС"
-        channel_id = str(interaction.channel.id) if interaction.channel else "ЛС"
-        tags = getattr(interaction.namespace, 'tags', None)
-
-        if isinstance(error, app_commands.CommandOnCooldown):
-            retry_after = int(error.retry_after)
-            logging.debug(f"Кулдаун /danbooru для {interaction.user.id} (гильдия: {guild_id}, канал: {channel_id}, теги: {tags}, осталось: {retry_after} сек)")
-            await interaction.response.send_message(
-                f"Команда на кулдауне. Попробуйте снова через {retry_after} секунд.",
-                ephemeral=True
-            )
-            return
-
-        logging.error(f"Ошибка в /danbooru для {interaction.user.id} (гильдия: {guild_id}, канал: {channel_id}, теги: {tags}): {error}")
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Ошибка команды.", ephemeral=True)
-            else:
-                await interaction.followup.send("Ошибка команды.", ephemeral=True)
-        except discord.DiscordException as e:
-            logging.error(f"Не удалось отправить сообщение об ошибке: {e}")
-
-    return wrapper
