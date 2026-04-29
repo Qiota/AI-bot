@@ -77,9 +77,7 @@ async def run_bot() -> None:
         # Start Flask health server
         Thread(target=run_flask, daemon=True).start()
 
-        # Attach shared aiohttp session to bot for legacy compatibility
-        session = ClientSession()
-        bot_client.bot.session = session
+        # Removed manual session override to fix Discord gateway WS 520 errors (discord.py manages its own session)
 
         # Inject bot_client reference for middleware access
         bot_client.bot.bot_client = bot_client
@@ -89,8 +87,7 @@ async def run_bot() -> None:
         logger.error(f"Critical startup error: {e}\n{traceback.format_exc()}")
         raise
     finally:
-        if session and not session.closed:
-            await session.close()
+        pass  # No manual session to close (override removed)
         await close_connector()
         await bot_client.close()
         logger.info("Bot stopped")
