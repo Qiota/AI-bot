@@ -13,23 +13,48 @@ async def set_bot_activity(
     await bot.wait_until_ready()
 
     if texts is None:
-        texts = ["🛠️-/restrict", "v1.5"]
+        texts = ["v1.7"]
 
     index = 0
     while not bot.is_closed():
         try:
+            # Проверка состояния бота перед изменением активности
+            if bot.is_closed():
+                break
+                
             current_text = texts[index]() if callable(texts[index]) else texts[index]
             activity = discord.Streaming(
                 name=current_text,
                 url=stream_url
             )
-            await bot.change_presence(activity=activity)
+            
+            # Используем asyncio.wait_for с таймаутом для предотвращения зависания
+            await asyncio.wait_for(
+                bot.change_presence(activity=activity),
+                timeout=10.0
+            )
             logger.debug(f"Активность установлена: {current_text}")
             index = (index + 1) % len(texts)
             await asyncio.sleep(interval)
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут при установке активности, пропускаем этот цикл")
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            logger.info("Задача установки активности отменена (завершение бота)")
+            break
         except discord.HTTPException as e:
             logger.error(f"Временная ошибка API при установке активности: {e}")
             await asyncio.sleep(5)
+        except OSError as e:
+            # Обработка ошибок сети/транспорта
+            logger.error(f"Ошибка сети при установке активности: {e}")
+            if bot.is_closed():
+                break
+            await asyncio.sleep(5)
         except Exception as e:
             logger.error(f"Неизвестная ошибка установки активности: {e}")
-            break
+            # Проверяем, закрыт ли бот перед выходом
+            if bot.is_closed():
+                break
+            # Для других ошибок пробуем продолжить после паузы
+            await asyncio.sleep(5)

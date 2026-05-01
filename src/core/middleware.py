@@ -37,7 +37,7 @@ async def _send_or_followup(
         else:
             await interaction.followup.send(message, ephemeral=ephemeral)
     except Exception as e:
-        logger.error(f"Failed to send error message: {e}")
+        logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
 
 
 def require_bot_ready(func: Callable) -> Callable:
@@ -49,7 +49,7 @@ def require_bot_ready(func: Callable) -> Callable:
             interaction.client, "bot_client", None
         )
         if bot is None or not hasattr(bot, "bot") or not bot.bot.is_ready():
-            logger.warning(f"Command {interaction.command.name} blocked: bot not ready")
+            logger.warning(f"Команда {interaction.command.name} заблокирована: бот не готов")
             await _send_or_followup(interaction, ERROR_NOT_READY)
             return
         return await func(interaction, *args, **kwargs)
@@ -89,7 +89,7 @@ def require_bot_access(func: Callable) -> Callable:
             interaction.client, "bot_client", None
         )
         if bot is None:
-            logger.error("BotClient not available for access check")
+            logger.error("BotClient недоступен для проверки доступа")
             await _send_or_followup(interaction, ERROR_CONFIG)
             return
 
@@ -177,4 +177,3 @@ def require_permissions(**perms: bool) -> Callable:
         return wrapper
 
     return decorator
-

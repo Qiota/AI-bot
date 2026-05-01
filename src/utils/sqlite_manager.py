@@ -24,7 +24,7 @@ class SQLiteManager:
             )
         ''')
         await self.db.commit()
-        logger.info(f"SQLiteManager initialized: {self.db_path}")
+        logger.info(f"SQLiteManager инициализирован: {self.db_path}")
         return self
 
     async def load_guild_config(self, guild_id: str) -> Dict[str, Any]:
@@ -50,10 +50,9 @@ class SQLiteManager:
             (guild_id, json.dumps(current))
         )
         await self.db.commit()
-        logger.debug(f"SQLite updated guild {guild_id}")
+        logger.debug(f"SQLite обновлена гильдия {guild_id}")
 
     async def close(self):
         """Close DB."""
         if self.db:
             await self.db.close()
-

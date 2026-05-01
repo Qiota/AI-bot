@@ -14,7 +14,7 @@ def _get_connector() -> aiohttp.TCPConnector:
     global _connector
     if _connector is None or _connector.closed:
         _connector = aiohttp.TCPConnector(limit=AIOHTTP_CONNECTOR_LIMIT)
-        logger.debug("Created shared aiohttp TCPConnector")
+        logger.debug("Создан общий aiohttp TCPConnector")
     return _connector
 
 
@@ -36,5 +36,5 @@ async def close_connector() -> None:
     global _connector
     if _connector and not _connector.closed:
         await _connector.close()
-        logger.info("Shared aiohttp connector closed")
+        logger.info("Общий aiohttp коннектор закрыт")
         _connector = None

@@ -20,7 +20,7 @@ class BotConfig:
             self.FLASK_HOST = config("FLASK_HOST", default="0.0.0.0")
             self.ENV = config("ENV", default="development")
         except UndefinedValueError as e:
-            logger.critical(f"Отсутствует переменная: {e}")
+            logger.critical(f"Отсутствует переменная окружения: {e}")
             raise RuntimeError("Ошибка конфигурации") from e
 
     def validate(self):

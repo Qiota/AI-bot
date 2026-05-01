@@ -33,8 +33,8 @@ async def _on_command_error(
     channel_id = interaction.channel_id or "DM"
 
     logger.error(
-        f"Command error /{command_name} for {interaction.user.id} "
-        f"in {guild_id}/{channel_id}: {error}"
+        f"Ошибка команды /{command_name} для {interaction.user.id} "
+        f"в {guild_id}/{channel_id}: {error}"
     )
 
     try:
@@ -47,7 +47,7 @@ async def _on_command_error(
         else:
             await interaction.followup.send(msg, ephemeral=True)
     except Exception as e:
-        logger.error(f"Failed to send error message: {e}")
+        logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
 
 
 async def run_bot() -> None:
@@ -65,13 +65,13 @@ async def run_bot() -> None:
 
         @bot_client.bot.event
         async def on_ready() -> None:
-            logger.debug("on_ready fired")
+            logger.debug("on_ready запущен")
             try:
                 bot_client.bot.loop.create_task(set_bot_activity(bot_client.bot))
                 await register_commands(bot_client.tree, bot_client)
-                logger.success(f"Bot {bot_client.bot.user} is ready!")
+                logger.success(f"Бот {bot_client.bot.user} готов!")
             except Exception as e:
-                logger.error(f"Error in on_ready: {e}\n{traceback.format_exc()}")
+                logger.error(f"Ошибка в on_ready: {e}\n{traceback.format_exc()}")
                 raise
 
         # Start Flask health server
@@ -84,13 +84,13 @@ async def run_bot() -> None:
 
         await bot_client.bot.start(config.TOKEN)
     except Exception as e:
-        logger.error(f"Critical startup error: {e}\n{traceback.format_exc()}")
+        logger.error(f"Критическая ошибка запуска: {e}\n{traceback.format_exc()}")
         raise
     finally:
         pass  # No manual session to close (override removed)
         await close_connector()
         await bot_client.close()
-        logger.info("Bot stopped")
+        logger.info("Бот остановлен")
 
 
 def start_bot() -> None:
@@ -102,12 +102,11 @@ def start_bot() -> None:
         else:
             loop.run_until_complete(run_bot())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Бот остановлен пользователем")
     except Exception as e:
-        logger.error(f"Critical error: {e}\n{traceback.format_exc()}")
+        logger.error(f"Критическая ошибка: {e}\n{traceback.format_exc()}")
         exit(1)
 
 
 if __name__ == "__main__":
     start_bot()
-
