@@ -123,30 +123,26 @@ async def danbooru(
         async with aiohttp_session() as session:
             total_posts_task = fetch_post_count(session, tags)
             posts_task = fetch_danbooru_posts(session, tags, page=1)
-            total_posts, posts = await asyncio.gather(
-                total_posts_task, posts_task, return_exceptions=True
+            total_posts_result, posts_result = await asyncio.gather(
+                total_posts_task, posts_task
             )
 
-            if isinstance(total_posts, Exception):
-                raise DanbooruAPIError(f"Ошибка получения количества постов: {total_posts}")
-            if isinstance(posts, Exception):
-                raise DanbooruAPIError(f"Ошибка получения постов: {posts}")
-
-            total_pages = min(1000, math.ceil(total_posts / POSTS_PER_PAGE)) if total_posts > 0 else 1
-            if not posts:
+            total_pages = min(1000, math.ceil(total_posts_result / POSTS_PER_PAGE)) if total_posts_result > 0 else 1
+            if not posts_result:
                 await interaction.followup.send(
                     f"Посты по тегам '{tags or 'без тегов'}' не найдены.", ephemeral=False
                 )
                 return
 
-            posts = filter_duplicates(posts)
-            for post in posts:
+            posts_result = filter_duplicates(posts_result)
+            for post in posts_result:
                 used_post_ids.add(post.id)
 
+            from typing import cast
             view = NavigationView(
-                posts, interaction.user, tags, 1, total_pages, max_file_size
+                posts_result, cast(discord.User, interaction.user), tags, 1, total_pages, max_file_size
             )
-            view.page_cache[1] = posts
+            view.page_cache[1] = posts_result
             content, image_urls, skipped_posts, chunk_posts = await view.create_message()
             files = await view.fetch_images(
                 image_urls, interaction, skipped_posts, chunk_posts
