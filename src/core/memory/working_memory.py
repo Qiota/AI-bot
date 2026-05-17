@@ -4,8 +4,12 @@ import json
 import time
 from typing import Dict, List, Optional
 from pathlib import Path
+import os
 
-DATA_DIR = Path("data")
+from ...utils.koyeb_files import create_and_write_file, delete_file
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+
 MAX_ITEMS = 3              # Absolute minimum to save RAM
 ITEM_TTL_MINUTES = 30      # Short TTL: 30 minutes
 MAX_CONTENT_LENGTH = 30    # Very aggressive truncation
@@ -47,8 +51,14 @@ class WorkingMemory:
                         content = str(item["c"])
                         if len(content) > MAX_CONTENT_LENGTH:
                             item["c"] = content[:MAX_CONTENT_LENGTH] + "..."
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(self.items, f, ensure_ascii=False, separators=(",", ":"))
+            # Atomic write через volume
+            create_and_write_file(
+                base_dir=self.file_path.parent,
+                rel_path=self.file_path.name,
+                content=self.items,
+                content_type="json",
+            )
+
         except Exception:
             pass  # Ignore save errors
 

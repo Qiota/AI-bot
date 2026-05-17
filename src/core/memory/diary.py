@@ -6,8 +6,12 @@ import time
 import uuid
 from typing import Dict, List, Optional
 from pathlib import Path
+import os
 
-DATA_DIR = Path("data")
+from ...utils.koyeb_files import create_and_write_file
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+
 DIARY_DIR = DATA_DIR / "diary"
 MAX_ENTRIES = 20           # Very aggressive limit for 512MB RAM
 MAX_ENTRY_LENGTH = 100     # Aggressive truncation
@@ -64,10 +68,15 @@ class Diary:
                     if len(content) > MAX_ENTRY_LENGTH:
                         entry["content"] = content[:MAX_ENTRY_LENGTH] + "..."
         try:
-            with open(self.diary_path, "w", encoding="utf-8") as f:
-                json.dump(self.entries, f, ensure_ascii=False, separators=(",", ":"))
-        except (IOError, OSError):
+            create_and_write_file(
+                base_dir=self.diary_path.parent,
+                rel_path=self.diary_path.name,
+                content=self.entries,
+                content_type="json",
+            )
+        except Exception:
             pass  # Silently fail if disk is full or permission denied
+
 
     def add_entry(
         self,
@@ -256,7 +265,7 @@ class Diary:
         confidence_factor: float = 0.0
     ) -> List[tuple]:
         """Semantic search using embeddings."""
-        from ..core.memory.embedding import find_similar_entries
+        from .embedding import find_similar_entries
         
         entries_with_emb = self.get_entries_with_embeddings()
         if not entries_with_emb:

@@ -80,13 +80,17 @@ class ModelManager:
         """g4f as primary - fallback to OpenRouter router."""
         
 # g4f Client - новий інтерфейс (auto provider)
+        # g4f as primary
         try:
             from g4f.client import Client as G4FClient
-            
+            import g4f
+
+            # g4f primary, keep it resilient: if a provider chain fails (e.g. DeepInfra auth),
+            # we still want OpenRouter backup to produce an answer.
             all_messages = messages.copy()
             if system_prompt:
                 all_messages = [{"role": "system", "content": system_prompt}] + all_messages
-            
+
             client = G4FClient()
             loop = asyncio.get_event_loop()
             response = await asyncio.wait_for(
@@ -97,56 +101,73 @@ class ModelManager:
                         messages=all_messages  # type: ignore[arg-type]
                     )
                 ),
-                timeout=35
+                timeout=35,
             )
-            
+
             if response:
-                return response.choices[0].message.content.strip()
-                    
+                content = response.choices[0].message.content
+                if isinstance(content, str):
+                    content = content.strip()
+                if content:
+                    logger.info("[MODEL] g4f success")
+                    return content
+
         except asyncio.TimeoutError:
-            logger.warning("[MODEL] g4f timeout")
+            logger.warning("[MODEL] g4f timeout -> OpenRouter fallback")
         except Exception as e:
-            logger.warning(f"[MODEL] g4f: {str(e)[:40]}")
-        
-        # Fallback to OpenRouter router
-        return await self._openrouter_fallback(messages, max_tokens, system_prompt)
-        
-        # Fallback to OpenRouter router
+            logger.warning(f"[MODEL] g4f failed -> OpenRouter fallback: {str(e)}")
+
+        # OpenRouter as backup
         return await self._openrouter_fallback(messages, max_tokens, system_prompt)
     
     async def _openrouter_fallback(
         self, messages: List[Dict[str, Any]], max_tokens: int, system_prompt: Optional[str]
     ) -> Optional[str]:
-        """Fallback to OpenRouter router."""
-        
-        try:
-            all_messages = messages.copy()
-            if system_prompt:
-                all_messages = [{"role": "system", "content": system_prompt}] + messages
-            
-            payload = {
-                "model": "openrouter/free",
-                "messages": all_messages,
-                "max_tokens": max_tokens
-            }
-            
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self._session.post(
-                    f"{OPENROUTER_BASE_URL}/chat/completions",
-                    json=payload,
-                    timeout=25
+        """OpenRouter backup (tries a few times)."""
+
+        if not OPENROUTER_API_KEY:
+            logger.warning("[MODEL] OPENROUTER_API_KEY missing -> skip OpenRouter fallback")
+            return None
+
+        # OpenRouter as backup
+        for attempt in range(3):
+            try:
+                all_messages = messages.copy()
+                if system_prompt:
+                    all_messages = [{"role": "system", "content": system_prompt}] + messages
+
+                payload = {
+                    "model": "openrouter/free",
+                    "messages": all_messages,
+                    "max_tokens": max_tokens,
+                }
+
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._session.post(
+                        f"{OPENROUTER_BASE_URL}/chat/completions",
+                        json=payload,
+                        timeout=25,
+                    ),
                 )
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    
-        except Exception as e:
-            logger.warning(f"[MODEL] Router fallback failed: {e}")
-        
+
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if content:
+                        logger.info(f"[MODEL] OpenRouter success (attempt {attempt+1})")
+                        return content
+
+                logger.warning(
+                    f"[MODEL] OpenRouter non-200 (attempt {attempt+1}): {response.status_code}"
+                )
+
+            except Exception as e:
+                logger.warning(f"[MODEL] OpenRouter fallback failed (attempt {attempt+1}): {e}")
+
+            await asyncio.sleep(0.7 * (attempt + 1))
+
         return None
     
     async def vision_chat(

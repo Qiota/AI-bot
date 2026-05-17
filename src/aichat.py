@@ -969,15 +969,17 @@ class AIChat:
                         except Exception as e:
                             logger.warning(f"[IMPORTANT] Помилка: {e}")
                 else:
-                    # No result - but still acknowledge in DMs
+                    # No result - always respond (DM too)
                     is_dm = isinstance(message.channel, discord.DMChannel)
                     if is_dm:
                         try:
                             check_emoji = discord.PartialEmoji(name="✅")
                             await message.add_reaction(check_emoji)
-                            logger.info(f"[REACT] {user_name} - acknowledged (no result)")
                         except Exception:
                             pass
+                        await message.reply(
+                            "(・∀・) Зараз LLM тимчасово не відповідає. Спробуй коротко переформулювати або напиши ще раз трохи пізніше."
+                        )
                     else:
                         await message.reply("💢 Не вдалося отримати відповідь. Спробуй ще раз.")
             except Exception as e:
