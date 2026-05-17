@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from typing import Dict
+from typing import Dict, Optional
 from .systemLog import logger
 import time
 from collections import defaultdict
@@ -9,18 +9,18 @@ from src.utils.firebase.firebase_manager import FirebaseManager
 from g4f.client import AsyncClient as G4FClient
 
 class BotDiscordClient(discord.Client):
-    bot_client: "BotClient"
+    bot_client: Optional["BotClient"]
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.bot_client: "BotClient" = None
+        self.bot_client: Optional["BotClient"] = None
 
 class BotClient:
     def __init__(self, config) -> None:
         logger.info("Инициализация BotClient")
         self.config = config
         self.start_time: float = 0.0
-        self.bot = discord.Client(intents=self._setup_intents())
+        self.bot = BotDiscordClient(intents=self._setup_intents())
         self.bot.bot_client = self  # Allow access to BotClient from discord.Client
         self.tree = app_commands.CommandTree(self.bot)
 
