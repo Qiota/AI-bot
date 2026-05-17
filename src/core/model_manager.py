@@ -97,10 +97,9 @@ class ModelManager:
                         loop.run_in_executor(
                     None,
                     lambda: client.chat.completions.create(
-                        # NOTE: g4f provider chains differ by environment.
-                        # "deepseek-v3" breaks on some providers (e.g. PollinationsAI legacy).
-                        # "default" lets g4f auto-select a working backend/model.
-                        model="default",
+                        # Спробуй deepseek-v3, але якщо provider не має legacy-нейму (404),
+                        # впадемо в g4f "default".
+                        model="deepseek-v3",
                         messages=all_messages  # type: ignore[arg-type]
                     )
                 ),
@@ -118,10 +117,37 @@ class ModelManager:
         except asyncio.TimeoutError:
             logger.warning("[MODEL] g4f timeout -> OpenRouter fallback")
         except Exception as e:
+            err = str(e).lower()
+            if "model not found" in err or "404" in err or "legacy" in err:
+                try:
+                    from g4f.client import Client as G4FClient
+                    client2 = G4FClient()
+                    loop = asyncio.get_event_loop()
+                    response2 = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            lambda: client2.chat.completions.create(
+                                model="default",
+                                messages=all_messages  # type: ignore[arg-type]
+                            )
+                        ),
+                        timeout=35,
+                    )
+                    if response2:
+                        content2 = response2.choices[0].message.content
+                        if isinstance(content2, str):
+                            content2 = content2.strip()
+                        if content2:
+                            logger.info("[MODEL] g4f success (default retry)")
+                            return content2
+                except Exception:
+                    pass
+
             logger.warning(f"[MODEL] g4f failed -> OpenRouter fallback: {str(e)}")
 
         # OpenRouter as backup
         return await self._openrouter_fallback(messages, max_tokens, system_prompt)
+
 
     
     async def _openrouter_fallback(

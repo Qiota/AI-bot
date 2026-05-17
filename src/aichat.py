@@ -904,7 +904,35 @@ class AIChat:
             messages: list = [{"role": "system", "content": system_prompt}] + history
             messages.append({"role": "user", "content": content})
 
+            # Language/mix sanity check: if user uses both UA/RU and lots of English,
+            # instruct model to reply ONLY in the dominant user language and avoid gibberish.
+            def _needs_deconflict(text: str) -> tuple[bool, str]:
+                t = text.strip()
+                if not t:
+                    return False, "unknown"
+
+                # count script usage (rough, but cheap)
+                ua_chars = sum(1 for c in t if '\u0400' <= c <= '\u04FF' and c.lower() in 'абвгдеєжзиіїйклмнопрстуфхцчшщьюя')
+                ru_chars = sum(1 for c in t if '\u0400' <= c <= '\u04FF' and c.lower() in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя')
+                en_chars = sum(1 for c in t if ('A' <= c <= 'Z' or 'a' <= c <= 'z'))
+
+                # English-heavy + Cyrillic present => likely mixing
+                if en_chars >= 20 and (ua_chars > 0 or ru_chars > 0):
+                    dominant = 'uk' if ua_chars >= ru_chars else 'ru'
+                    return True, dominant
+
+                return False, "unknown"
+
+            deconflict_needed, dominant_lang = _needs_deconflict(content)
+            if deconflict_needed:
+                system_prompt += (
+                    f"\n\nLANGUAGE GUARD: Відповідай ТІЛЬКИ {dominant_lang.upper()} мовою. "
+                    "Якщо ти змішуєш мови або пишеш безглуздо — виправ себе. "
+                    "Коротко, природно, без 'нісенітниці'."
+                )
+
             # Check if message contains search keywords
+
             has_search_keyword = bool(SEARCH_PATTERN.search(content))
             use_web_search = has_search_keyword
 
