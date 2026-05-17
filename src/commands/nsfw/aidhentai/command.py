@@ -37,25 +37,25 @@ async def aidhentai(
             total_pages = parse_total_pages(soup)
 
             if not results:
-                await interaction.followup.send("Ничего не найдено.", ephemeral=False)
+                await interaction.followup.send("Ничего не найдено.", ephemeral=True)
                 return
 
             view = NavigationView(
                 results, interaction.user, query, current_page=1, total_pages=total_pages
             )
             embed = view.create_embed()
-            message = await interaction.followup.send(embed=embed, view=view, ephemeral=False)
+            message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
             view.message = message
 
     except HttpError as e:
         logger.error(f"HTTP ошибка для URL {url}: {e}")
-        await interaction.followup.send("Сайт не отвечает.", ephemeral=False)
+        await interaction.followup.send("Сайт не отвечает.", ephemeral=True)
     except ParseError as e:
         logger.error(f"Ошибка парсинга: {e}")
-        await interaction.followup.send("Ошибка обработки данных.", ephemeral=False)
+        await interaction.followup.send("Ошибка обработки данных.", ephemeral=True)
     except Exception as e:
         logger.error(f"Неизвестная ошибка /aidhentai: {e}")
-        await interaction.followup.send("Произошла ошибка.", ephemeral=False)
+        await interaction.followup.send("Произошла ошибка.", ephemeral=True)
 
 
 def create_command(bot_client) -> app_commands.Command:

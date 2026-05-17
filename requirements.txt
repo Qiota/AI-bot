@@ -5,17 +5,21 @@ python-decouple
 aiohttp
 colorama
 flask
-asyncio
 aiofiles
 Pillow
 firebase_admin
 backoff
 flask_socketio
 eventlet
-bs4
 beautifulsoup4
 duckduckgo-search
 gtts
 translatepy
 psutil
 cachetools
+
+# Локальна LLM (опціонально):
+# ollama — встановіть з https://ollama.ai
+# transformers>=4.35
+# torch>=2.0
+# llama-cpp-python>=0.2.0

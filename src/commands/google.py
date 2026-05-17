@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Optional, List, Tuple, TYPE_CHECKING, Dict
 from ..systemLog import logger
 from ..commands.restrict import check_bot_access, restrict_command_execution
+from ..commands.styles import create_embed, create_error_embed, create_success_embed, EMOJI, COLORS
 import traceback
 import asyncio
 import backoff
-import aiohttp
 
 if TYPE_CHECKING:
     from ..client import BotClient
@@ -56,24 +56,24 @@ class SearchView(ui.View):
     def update_buttons(self) -> None:
         """Обновляет состояние кнопок пагинации."""
         if len(self.children) > 3:
-            self.children[2].disabled = self.current_page == 1
-            self.children[3].disabled = self.current_page >= self.max_page
+            self.children[2].disabled = self.current_page == 1  # type: ignore[reportAttributeAccessIssue]
+            self.children[3].disabled = self.current_page >= self.max_page  # type: ignore[reportAttributeAccessIssue]
 
     async def toggle_search_type_callback(self, interaction: discord.Interaction) -> None:
         """Переключает тип поиска (текст/изображения)."""
         await interaction.response.defer()
         toggle_button = self.children[1]
-        self.button_state = (toggle_button.label, toggle_button.style, toggle_button.disabled, 1)
-        toggle_button.label = "⏳"
-        toggle_button.style = ButtonStyle.grey
-        toggle_button.disabled = True
+        self.button_state = (toggle_button.label, toggle_button.style, toggle_button.disabled, 1)  # type: ignore[reportAttributeAccessIssue]
+        toggle_button.label = "⏳"  # type: ignore[reportAttributeAccessIssue]
+        toggle_button.style = ButtonStyle.grey  # type: ignore[reportAttributeAccessIssue]
+        toggle_button.disabled = True  # type: ignore[reportAttributeAccessIssue]
 
         self.disabled_states = []
         for i, child in enumerate(self.children):
             if i == 0 or i == 1:
                 continue
-            self.disabled_states.append(child.disabled)
-            child.disabled = True
+            self.disabled_states.append(child.disabled)  # type: ignore[reportAttributeAccessIssue]
+            child.disabled = True  # type: ignore[reportAttributeAccessIssue]
 
         await interaction.edit_original_response(view=self)
 
@@ -81,9 +81,9 @@ class SearchView(ui.View):
             self.image = not self.image
             self.image_cache.clear()
             self.current_page = 1
-            self.children[1].label = "Поиск изображений" if not self.image else "Поиск Google"
-            self.children[1].style = ButtonStyle.green
-            self.children[1].disabled = False
+            self.children[1].label = "Поиск изображений" if not self.image else "Поиск Google"  # type: ignore[reportAttributeAccessIssue]
+            self.children[1].style = ButtonStyle.green  # type: ignore[reportAttributeAccessIssue]
+            self.children[1].disabled = False  # type: ignore[reportAttributeAccessIssue]
             self.children[1].callback = self.toggle_search_type_callback
 
             for i in range(len(self.children) - 1, 1, -1):
@@ -111,17 +111,17 @@ class SearchView(ui.View):
         """Переходит на предыдущую страницу результатов."""
         await interaction.response.defer()
         prev_button = self.children[2]
-        self.button_state = (prev_button.label, prev_button.style, prev_button.disabled, 2)
-        prev_button.label = "⏳"
-        prev_button.style = ButtonStyle.grey
-        prev_button.disabled = True
+        self.button_state = (prev_button.label, prev_button.style, prev_button.disabled, 2)  # type: ignore[reportAttributeAccessIssue]
+        prev_button.label = "⏳"  # type: ignore[reportAttributeAccessIssue]
+        prev_button.style = ButtonStyle.grey  # type: ignore[reportAttributeAccessIssue]
+        prev_button.disabled = True  # type: ignore[reportAttributeAccessIssue]
 
         self.disabled_states = []
         for i, child in enumerate(self.children):
             if i == 0 or i == 2:
                 continue
-            self.disabled_states.append(child.disabled)
-            child.disabled = True
+            self.disabled_states.append(child.disabled)  # type: ignore[reportAttributeAccessIssue]
+            child.disabled = True  # type: ignore[reportAttributeAccessIssue]
 
         await interaction.edit_original_response(view=self)
 
@@ -137,17 +137,17 @@ class SearchView(ui.View):
         """Переходит на следующую страницу результатов."""
         await interaction.response.defer()
         next_button = self.children[3]
-        self.button_state = (next_button.label, next_button.style, next_button.disabled, 3)
-        next_button.label = "⏳"
-        next_button.style = ButtonStyle.grey
-        next_button.disabled = True
+        self.button_state = (next_button.label, next_button.style, next_button.disabled, 3)  # type: ignore[reportAttributeAccessIssue]
+        next_button.label = "⏳"  # type: ignore[reportAttributeAccessIssue]
+        next_button.style = ButtonStyle.grey  # type: ignore[reportAttributeAccessIssue]
+        next_button.disabled = True  # type: ignore[reportAttributeAccessIssue]
 
         self.disabled_states = []
         for i, child in enumerate(self.children):
-            if i == 0 or i == 3:
+            if i == 0 or i == 2:
                 continue
-            self.disabled_states.append(child.disabled)
-            child.disabled = True
+            self.disabled_states.append(child.disabled)  # type: ignore[reportAttributeAccessIssue]
+            child.disabled = True  # type: ignore[reportAttributeAccessIssue]
 
         await interaction.edit_original_response(view=self)
 
@@ -163,17 +163,17 @@ class SearchView(ui.View):
         """Обновляет изображения для текущего запроса."""
         await interaction.response.defer()
         refresh_button = self.children[2]
-        self.button_state = (refresh_button.label, refresh_button.style, refresh_button.disabled, 2)
-        refresh_button.label = "⏳"
-        refresh_button.style = ButtonStyle.grey
-        refresh_button.disabled = True
+        self.button_state = (refresh_button.label, refresh_button.style, refresh_button.disabled, 2)  # type: ignore[reportAttributeAccessIssue]
+        refresh_button.label = "⏳"  # type: ignore[reportAttributeAccessIssue]
+        refresh_button.style = ButtonStyle.grey  # type: ignore[reportAttributeAccessIssue]
+        refresh_button.disabled = True  # type: ignore[reportAttributeAccessIssue]
 
         self.disabled_states = []
         for i, child in enumerate(self.children):
             if i == 0 or i == 2:
                 continue
-            self.disabled_states.append(child.disabled)
-            child.disabled = True
+            self.disabled_states.append(child.disabled)  # type: ignore[reportAttributeAccessIssue]
+            child.disabled = True  # type: ignore[reportAttributeAccessIssue]
 
         await interaction.edit_original_response(view=self)
 
@@ -203,9 +203,9 @@ class SearchView(ui.View):
 
                 if self.button_state:
                     label, style, disabled, index = self.button_state
-                    self.children[index].label = label
-                    self.children[index].style = style
-                    self.children[index].disabled = disabled
+                    self.children[index].label = label  # type: ignore[reportAttributeAccessIssue]
+                    self.children[index].style = style  # type: ignore[reportAttributeAccessIssue]
+                    self.children[index].disabled = disabled  # type: ignore[reportAttributeAccessIssue]
                     self.button_state = None
                 else:
                     index = None
@@ -215,44 +215,45 @@ class SearchView(ui.View):
                     if i == 0 or (index is not None and i == index):
                         continue
                     if disabled_index < len(self.disabled_states):
-                        child.disabled = self.disabled_states[disabled_index]
+                        child.disabled = self.disabled_states[disabled_index]  # type: ignore[reportAttributeAccessIssue]
                         disabled_index += 1
                     else:
-                        child.disabled = False
+                        child.disabled = False  # type: ignore[reportAttributeAccessIssue]
                 self.disabled_states = []
 
-                self.children[1].label = "Поиск Google" if self.image else "Поиск изображений"
+                self.children[1].label = "Поиск Google" if self.image else "Поиск изображений"  # type: ignore[reportAttributeAccessIssue]
 
                 if not image_files:
-                    self.children[2].style = ButtonStyle.grey
-                    self.children[2].label = "🔄"
-                    self.children[2].disabled = True
+                    self.children[2].style = ButtonStyle.grey  # type: ignore[reportAttributeAccessIssue]
+                    self.children[2].label = "🔄"  # type: ignore[reportAttributeAccessIssue]
+                    self.children[2].disabled = True  # type: ignore[reportAttributeAccessIssue]
                     await interaction.edit_original_response(content="Не удалось загрузить изображения", embed=None, attachments=[], view=self)
                     return
 
                 if len(image_files) < 10:
                     content = "Больше изображений не найдено" if len(self.image_cache) + len(image_files) < self.total_results else "Все изображения просмотрены"
-                    embed = Embed(
+                    embed = create_embed(
                         title="Google Images",
                         description=f"Найдено: {self.total_results} изображений\nЗапрос: `{self.query}`\nПоказано: {len(self.image_cache) + len(image_files)} из {self.total_results}",
-                        colour=Colour.blue(),
+                        color="info",
+                        thumbnail="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png"
                     )
-                    embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
-                    self.children[2].style = ButtonStyle.grey
-                    self.children[2].label = "🔄"
-                    self.children[2].disabled = True
+                    self.children[2].style = ButtonStyle.grey  # type: ignore[reportAttributeAccessIssue]
+                    self.children[2].label = "🔄"  # type: ignore[reportAttributeAccessIssue]
+                    self.children[2].disabled = True  # type: ignore[reportAttributeAccessIssue]
                     await interaction.edit_original_response(content=content, embed=embed, attachments=image_files, view=self)
                     return
 
-                embed = Embed(
+                embed = create_embed(
                     title="Google Images",
                     description=f"Найдено: {self.total_results} изображений\nЗапрос: `{self.query}`\nПоказано: {len(self.image_cache) + len(image_files)} из {self.total_results}",
-                    colour=Colour.blue(),
+                    color="info",
+                    thumbnail="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png"
                 )
                 embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
-                self.children[2].style = ButtonStyle.primary
-                self.children[2].label = "🔄"
-                self.children[2].disabled = False
+                self.children[2].style = ButtonStyle.primary  # type: ignore[reportAttributeAccessIssue]
+                self.children[2].label = "🔄"  # type: ignore[reportAttributeAccessIssue]
+                self.children[2].disabled = False  # type: ignore[reportAttributeAccessIssue]
                 await interaction.edit_original_response(embed=embed, attachments=image_files, view=self)
 
             else:
@@ -262,9 +263,9 @@ class SearchView(ui.View):
 
                 if self.button_state:
                     label, style, disabled, index = self.button_state
-                    self.children[index].label = label
-                    self.children[index].style = style
-                    self.children[index].disabled = disabled
+                    self.children[index].label = label  # type: ignore[reportAttributeAccessIssue]
+                    self.children[index].style = style  # type: ignore[reportAttributeAccessIssue]
+                    self.children[index].disabled = disabled  # type: ignore[reportAttributeAccessIssue]
                     self.button_state = None
                 else:
                     index = None
@@ -274,26 +275,26 @@ class SearchView(ui.View):
                     if i == 0 or (index is not None and i == index):
                         continue
                     if disabled_index < len(self.disabled_states):
-                        child.disabled = self.disabled_states[disabled_index]
+                        child.disabled = self.disabled_states[disabled_index]  # type: ignore[reportAttributeAccessIssue]
                         disabled_index += 1
                     else:
-                        child.disabled = False
+                        child.disabled = False  # type: ignore[reportAttributeAccessIssue]
                 self.disabled_states = []
 
-                self.children[1].label = "Поиск Google" if self.image else "Поиск изображений"
+                self.children[1].label = "Поиск Google" if self.image else "Поиск изображений"  # type: ignore[reportAttributeAccessIssue]
 
                 if not items:
                     self.update_buttons()
                     await interaction.edit_original_response(content="Результаты не найдены на этой странице", embed=None, attachments=[], view=self)
                     return
 
-                embed = Embed(
-                    title=f"Google (Страница {self.current_page}/{self.max_page})",
+                embed = create_embed(
+                    title=f"{EMOJI['search']} Google (Страница {self.current_page}/{self.max_page})",
                     description=f"Найдено результатов: {self.total_results}\nЗапрос: `{self.query}`",
-                    colour=Colour.blue(),
+                    color="info",
+                    thumbnail="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png",
+                    footer=f"Страница {self.current_page}/{self.max_page}"
                 )
-                embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
-                embed.set_footer(text=f"Страница {self.current_page}/{self.max_page}")
 
                 for i, hit in enumerate(items, 1):
                     url = hit["link"]
@@ -312,9 +313,9 @@ class SearchView(ui.View):
             logger.error(f"Ошибка при обновлении страницы: {e}\n{traceback.format_exc()}")
             if self.button_state:
                 label, style, disabled, index = self.button_state
-                self.children[index].label = label
-                self.children[index].style = style
-                self.children[index].disabled = disabled
+                self.children[index].label = label  # type: ignore[reportAttributeAccessIssue]
+                self.children[index].style = style  # type: ignore[reportAttributeAccessIssue]
+                self.children[index].disabled = disabled  # type: ignore[reportAttributeAccessIssue]
                 self.button_state = None
             else:
                 index = None
@@ -324,17 +325,17 @@ class SearchView(ui.View):
                 if i == 0 or (index is not None and i == index):
                     continue
                 if disabled_index < len(self.disabled_states):
-                    child.disabled = self.disabled_states[disabled_index]
+                    child.disabled = self.disabled_states[disabled_index]  # type: ignore[reportAttributeAccessIssue]
                     disabled_index += 1
                 else:
-                    child.disabled = False
+                    child.disabled = False  # type: ignore[reportAttributeAccessIssue]
             self.disabled_states = []
 
-            self.children[1].label = "Поиск Google" if self.image else "Поиск изображений"
+            self.children[1].label = "Поиск Google" if self.image else "Поиск изображений"  # type: ignore[reportAttributeAccessIssue]
             if self.image and len(self.children) > 2:
-                self.children[2].style = ButtonStyle.grey
-                self.children[2].label = "🔄"
-                self.children[2].disabled = True
+                self.children[2].style = ButtonStyle.grey  # type: ignore[reportAttributeAccessIssue]
+                self.children[2].label = "🔄"  # type: ignore[reportAttributeAccessIssue]
+                self.children[2].disabled = True  # type: ignore[reportAttributeAccessIssue]
             else:
                 self.update_buttons()
             await interaction.edit_original_response(content="Произошла ошибка при загрузке страницы", embed=None, attachments=[], view=self)
@@ -354,8 +355,8 @@ class GoogleSearch:
 
     def __init__(self, bot_client: 'BotClient') -> None:
         self.bot_client: BotClient = bot_client
-        self.G_SEARCH_KEY: Optional[str] = config("G_SEARCH_KEY", default=None)
-        self.G_CSE: Optional[str] = config("G_CSE", default=None)
+        self.G_SEARCH_KEY: Optional[str] = str(config("G_SEARCH_KEY", default=None)) if config("G_SEARCH_KEY", default=None) else None
+        self.G_CSE: Optional[str] = str(config("G_CSE", default=None)) if config("G_CSE", default=None) else None
         if not (self.G_SEARCH_KEY and self.G_CSE):
             logger.error("Отсутствуют ключи Google API (G_SEARCH_KEY, G_CSE)")
             raise ValueError("Требуются ключи Google API (G_SEARCH_KEY, G_CSE).")
@@ -363,12 +364,12 @@ class GoogleSearch:
 
     @backoff.on_exception(
         backoff.expo,
-        (aiohttp.ClientError, asyncio.TimeoutError),
-        max_tries=2,  # Уменьшено с 3 до 2
-        max_time=15,  # Уменьшено с 30 до 15
+        (ClientError, asyncio.TimeoutError),
+        max_tries=2,
+        max_time=15,
         jitter=backoff.full_jitter
     )
-    async def _fetch_google_results(self, session: ClientSession, query: str, search_type: Optional[str] = None, start: int = 1) -> dict:
+    async def _fetch_google_results(self, query: str, search_type: Optional[str] = None, start: int = 1, session: Optional[ClientSession] = None) -> dict:
         """Запрашивает результаты поиска через Google Custom Search API."""
         if not query.strip():
             raise ValueError("Запрос не может быть пустым")
@@ -387,6 +388,10 @@ class GoogleSearch:
         if search_type:
             params["searchType"] = search_type
 
+        own_session = session is None
+        if own_session:
+            session = ClientSession(timeout=ClientTimeout(total=10))
+
         try:
             async with session.get(self.GSEARCH_BASE_URL, params=params) as response:
                 response.raise_for_status()
@@ -401,12 +406,15 @@ class GoogleSearch:
         except ClientError as e:
             logger.error(f"Ошибка соединения с Google API: {e}\n{traceback.format_exc()}")
             raise ValueError(f"Ошибка соединения с Google API: {e}") from e
+        finally:
+            if own_session:
+                await session.close()
 
     @backoff.on_exception(
         backoff.expo,
-        (aiohttp.ClientError, asyncio.TimeoutError),
-        max_tries=2,  # Уменьшено с 3 до 2
-        max_time=10,  # Уменьшено с 15 до 10
+        (ClientError, asyncio.TimeoutError),
+        max_tries=2,
+        max_time=10,
         jitter=backoff.full_jitter
     )
     async def _fetch_image(self, session: ClientSession, image_url: str, semaphore: asyncio.Semaphore) -> Optional[Tuple[File, str]]:
@@ -439,7 +447,7 @@ class GoogleSearch:
         async with ClientSession(timeout=ClientTimeout(total=10)) as session:
             # Предварительная загрузка страниц
             page_tasks = [
-                self._fetch_google_results(session, query, search_type="image", start=start)
+                self._fetch_google_results(query, search_type="image", start=start, session=session)
                 for start in start_indices
                 if start <= total_results
             ]
@@ -450,8 +458,9 @@ class GoogleSearch:
                 if isinstance(result, Exception):
                     logger.error(f"Ошибка загрузки страницы {start_indices[idx]}: {result}\n{traceback.format_exc()}")
                     continue
-                self.page_cache[start_indices[idx]] = result
-                items.extend(result.get("items", []))
+                if isinstance(result, dict):
+                    self.page_cache[start_indices[idx]] = result
+                    items.extend(result.get("items", []))
 
             # Параллельная загрузка изображений
             semaphore = asyncio.Semaphore(5)  # Ограничение на 5 одновременных запросов
@@ -466,8 +475,8 @@ class GoogleSearch:
                 if isinstance(result, Exception):
                     logger.debug(f"Ошибка загрузки изображения: {result}")
                     continue
-                if result:
-                    image_file, image_url = result
+                if result and not isinstance(result, Exception):
+                    image_file, image_url = result  # type: ignore[reportGeneralTypeIssues]
                     image_files.append(image_file)
                     new_cached_urls.add(image_url)
                 if len(image_files) >= 10:
@@ -520,7 +529,7 @@ async def google(interaction: discord.Interaction, cog: 'GoogleSearch', query: s
         async with ClientSession(timeout=ClientTimeout(total=10)) as session:
             if image:
                 # Первая загрузка страницы
-                data = await cog._fetch_google_results(session, query, search_type="image")
+                data = await cog._fetch_google_results(query, search_type="image", session=session)
                 total_results = int(data.get("searchInformation", {}).get("totalResults", "0"))
                 if not data.get("items", []):
                     await interaction.followup.send("Изображения не найдены", ephemeral=True)
@@ -540,30 +549,30 @@ async def google(interaction: discord.Interaction, cog: 'GoogleSearch', query: s
 
                 if len(image_files) < 10:
                     content = "Больше изображений не найдено" if len(view.image_cache) + len(image_files) < total_results else "Все изображения просмотрены"
-                    embed = Embed(
-                        title="Google Images",
+                    embed = create_embed(
+                        title=f"{EMOJI['image']} Google Images",
                         description=f"Найдено: {total_results} изображений\nЗапрос: `{query}`\nПоказано: {len(view.image_cache) + len(image_files)} из {total_results}",
-                        colour=Colour.blue(),
+                        color="info",
+                        thumbnail="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png"
                     )
-                    embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
-                    view.children[2].style = ButtonStyle.grey
-                    view.children[2].label = "🔄"
-                    view.children[2].disabled = True
-                    view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"
+                    view.children[2].style = ButtonStyle.grey  # type: ignore[reportAttributeAccessIssue]
+                    view.children[2].label = "🔄"  # type: ignore[reportAttributeAccessIssue]
+                    view.children[2].disabled = True  # type: ignore[reportAttributeAccessIssue]
+                    view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"  # type: ignore[reportAttributeAccessIssue]
                     await interaction.followup.send(content=content, embed=embed, files=image_files, view=view, ephemeral=True)
                     return
 
-                embed = Embed(
-                    title="Google Images",
+                embed = create_embed(
+                    title=f"{EMOJI['image']} Google Images",
                     description=f"Найдено: {total_results} изображений\nЗапрос: `{query}`\nПоказано: {len(view.image_cache) + len(image_files)} из {total_results}",
-                    colour=Colour.blue(),
+                    color="info",
+                    thumbnail="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png"
                 )
-                embed.set_thumbnail(url="https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png")
-                view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"
+                view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"  # type: ignore[reportAttributeAccessIssue]
                 await interaction.followup.send(embed=embed, files=image_files, view=view, ephemeral=True)
 
             else:
-                data = await cog._fetch_google_results(session, query)
+                data = await cog._fetch_google_results(query, session=session)
                 items = data.get("items", [])
                 total_results = int(data.get("searchInformation", {}).get("totalResults", "0"))
 
@@ -591,7 +600,7 @@ async def google(interaction: discord.Interaction, cog: 'GoogleSearch', query: s
                     )
 
                 view = SearchView(cog, query, image, total_results)
-                view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"
+                view.children[1].label = "Поиск Google" if view.image else "Поиск изображений"  # type: ignore[reportAttributeAccessIssue]
                 await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     except ValueError as e:
         logger.error(f"Ошибка при выполнении /google: {e}\n{traceback.format_exc()}")

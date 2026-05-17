@@ -49,7 +49,8 @@ def require_bot_ready(func: Callable) -> Callable:
             interaction.client, "bot_client", None
         )
         if bot is None or not hasattr(bot, "bot") or not bot.bot.is_ready():
-            logger.warning(f"Команда {interaction.command.name} заблокирована: бот не готов")
+            cmd_name = interaction.command.name if interaction.command else "unknown"
+            logger.warning(f"Команда {cmd_name} заблокирована: бот не готов")
             await _send_or_followup(interaction, ERROR_NOT_READY)
             return
         return await func(interaction, *args, **kwargs)
@@ -73,9 +74,12 @@ def require_nsfw(func: Callable) -> Callable:
     """Ensures the command is used in an NSFW channel or DM."""
     @functools.wraps(func)
     async def wrapper(interaction: discord.Interaction, *args, **kwargs):
-        if interaction.guild is not None and not interaction.channel.nsfw:
-            await _send_or_followup(interaction, ERROR_NSFW_ONLY)
-            return
+        channel = interaction.channel
+        if interaction.guild is not None and channel is not None:
+            is_nsfw = getattr(channel, "nsfw", False)
+            if not is_nsfw:
+                await _send_or_followup(interaction, ERROR_NSFW_ONLY)
+                return
         return await func(interaction, *args, **kwargs)
 
     return wrapper
@@ -98,7 +102,11 @@ def require_bot_access(func: Callable) -> Callable:
             return await func(interaction, *args, **kwargs)
 
         # Bot permissions in channel
-        permissions = interaction.channel.permissions_for(interaction.guild.me)
+        channel = interaction.channel
+        if channel is None:
+            await _send_or_followup(interaction, ERROR_ACCESS_DENIED)
+            return
+        permissions = channel.permissions_for(interaction.guild.me)  # type: ignore[union-attr]
         if not (permissions.read_messages and permissions.send_messages and permissions.embed_links):
             await _send_or_followup(interaction, ERROR_ACCESS_DENIED)
             return
@@ -133,10 +141,11 @@ def require_admin_or_developer(func: Callable) -> Callable:
         from decouple import config
 
         dev_id = config("DEVELOPER_ID", cast=int, default=None)
-        is_admin = (
-            interaction.guild is not None
-            and interaction.user.guild_permissions.administrator
-        )
+        is_admin = False
+        if interaction.guild is not None:
+            member = interaction.guild.get_member(interaction.user.id)
+            if member is not None:
+                is_admin = getattr(member.guild_permissions, "administrator", False)
         is_dev = dev_id is not None and interaction.user.id == dev_id
 
         if not is_admin and not is_dev:
@@ -161,11 +170,14 @@ def require_permissions(**perms: bool) -> Callable:
                 await _send_or_followup(interaction, ERROR_GUILD_ONLY)
                 return
 
-            missing = [
-                name
-                for name, value in perms.items()
-                if not getattr(interaction.user.guild_permissions, name, False)
-            ]
+            member = interaction.guild.get_member(interaction.user.id)
+            missing = []
+            if member is not None:
+                for name, value in perms.items():
+                    if not getattr(member.guild_permissions, name, False):
+                        missing.append(name)
+            else:
+                missing = list(perms.keys())
             if missing:
                 await _send_or_followup(
                     interaction,

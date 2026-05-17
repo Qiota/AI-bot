@@ -114,7 +114,7 @@ async def danbooru(
     await disable_previous_view(interaction.user.id)
 
     try:
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
     except discord.errors.NotFound:
         logger.error("Interaction expired during defer")
         return
@@ -130,7 +130,7 @@ async def danbooru(
             total_pages = min(1000, math.ceil(total_posts_result / POSTS_PER_PAGE)) if total_posts_result > 0 else 1
             if not posts_result:
                 await interaction.followup.send(
-                    f"Посты по тегам '{tags or 'без тегов'}' не найдены.", ephemeral=False
+                    f"Посты по тегам '{tags or 'без тегов'}' не найдены.", ephemeral=True
                 )
                 return
 
@@ -148,16 +148,16 @@ async def danbooru(
                 image_urls, interaction, skipped_posts, chunk_posts
             )
             message = await interaction.followup.send(
-                content=content, view=view, files=files, ephemeral=False
+                content=content, view=view, files=files, ephemeral=True
             )
             view.message = message
 
     except DanbooruAPIError as e:
         logger.error(f"Danbooru API error for tags '{tags}': {e}")
-        await interaction.followup.send(f"Не удалось получить посты: {e}", ephemeral=False)
+        await interaction.followup.send(f"Не удалось получить посты: {e}", ephemeral=True)
     except Exception as e:
         logger.error(f"Unknown error in /danbooru for tags '{tags}': {e}")
-        await interaction.followup.send("Произошла ошибка команды.", ephemeral=False)
+        await interaction.followup.send("Произошла ошибка команды.", ephemeral=True)
 
 
 def create_command(bot_client) -> app_commands.Command:

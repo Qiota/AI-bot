@@ -29,31 +29,31 @@ async def _get_message_reference(
         channel_id, message_id = map(int, match.groups())
         try:
             channel = interaction.client.get_channel(channel_id) or await interaction.client.fetch_channel(channel_id)
-            if channel.id != interaction.channel.id:
+            if channel.id != interaction.channel.id:  # type: ignore[reportOptionalMemberAccess]
                 raise ValueError(
                     "Сообщение для реплая должно находиться в том же канале."
                 )
             if (
                 not isinstance(channel, (discord.TextChannel, discord.Thread))
-                or not channel.permissions_for(interaction.guild.me).read_messages
+                or not channel.permissions_for(interaction.guild.me).read_messages  # type: ignore[reportOptionalMemberAccess]
             ):
                 raise ValueError("Бот не имеет доступа к указанному каналу.")
-            target = await channel.fetch_message(message_id)
+            target = await channel.fetch_message(message_id)  # type: ignore[reportAttributeAccessIssue]
             return target.to_reference(fail_if_not_exists=False), target
+        except discord.NotFound:
+            raise ValueError("Указанное сообщение не найдено в этом канале.")
         except (discord.Forbidden, discord.HTTPException) as e:
             logger.error(f"Ошибка доступа к сообщению {message_id}: {e}")
             raise ValueError("Бот не может получить доступ к сообщению или каналу.")
-        except discord.NotFound:
-            raise ValueError("Указанное сообщение не найдено в этом канале.")
 
     try:
         message_id = int(reply)
-        target = await interaction.channel.fetch_message(message_id)
+        target = await interaction.channel.fetch_message(message_id)  # type: ignore[reportAttributeAccessIssue]
         return target.to_reference(fail_if_not_exists=False), target
-    except ValueError:
-        raise ValueError("reply должен быть числовым ID или ссылкой на сообщение в этом канале.")
     except discord.NotFound:
         raise ValueError(f"Сообщение с ID {reply} не найдено в этом канале.")
+    except ValueError:
+        raise ValueError("reply должен быть числовым ID или ссылкой на сообщение в этом канале.")
 
 
 async def _download_attachment(
@@ -105,7 +105,8 @@ async def _send_error(interaction: discord.Interaction, text: str) -> None:
         return
     try:
         msg = await interaction.followup.send(text, ephemeral=True)
-        asyncio.create_task(_delete_after(msg))
+        if msg:
+            asyncio.create_task(_delete_after(msg))
     except discord.DiscordException:
         pass
 
@@ -124,7 +125,8 @@ async def say(
 
     try:
         attachments = [attachment] if attachment else []
-        additional = interaction.data.get("resolved", {}).get("attachments", {}).values()
+        resolved = interaction.data.get("resolved") if interaction.data else None
+        additional = resolved.get("attachments", {}).values() if resolved else []
         for att_data in additional:
             if not attachment or str(att_data.get("id")) != str(attachment.id):
                 attachments.append(discord.Attachment(data=att_data, state=interaction._state))
@@ -136,17 +138,17 @@ async def say(
         discord_files = await _process_attachments(attachments) if attachments else None
 
         try:
-            await interaction.channel.send(
+            await interaction.channel.send(  # type: ignore[reportAttributeAccessIssue]
                 content=message[:2000] if message else None,
-                files=discord_files or None,
-                reference=reference,
+                files=discord_files,  # type: ignore[reportArgumentType]
+                reference=reference,  # type: ignore[reportArgumentType]
             )
             await interaction.delete_original_response()
         except discord.HTTPException as e:
             if e.code == 50035 and reference and target_message:
-                await target_message.reply(
+                await target_message.reply(  # type: ignore[reportCallIssue]
                     content=message[:2000] if message else None,
-                    files=discord_files or None,
+                    files=discord_files,  # type: ignore[reportArgumentType]
                 )
                 await interaction.delete_original_response()
             else:

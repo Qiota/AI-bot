@@ -5,6 +5,8 @@ and background services (Flask, activity).
 """
 
 import asyncio
+import time
+import traceback
 from threading import Thread
 from typing import Optional
 
@@ -15,13 +17,11 @@ from aiohttp import ClientSession
 from .config import BotConfig
 from .client import BotClient
 from .aichat import AIChat
-from .systemLog import logger
+from .systemLog import logger, print_banner
 from .utils.server.flask import run_flask
 from .events.activity import set_bot_activity
 from .core.registry import register_commands
 from .core.session import close_connector
-import time
-import traceback
 
 
 async def _on_command_error(
@@ -50,63 +50,39 @@ async def _on_command_error(
         logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
 
 
-async def run_bot() -> None:
+async def start_bot() -> None:
     """Main bot runtime."""
+    print_banner()
     config = BotConfig()
+    config.validate()
+
     bot_client = BotClient(config)
     bot_client.start_time = time.time()
+
     ai_chat = AIChat(bot_client)
-    session: Optional[ClientSession] = None
+
+    bot_client.tree.error(_on_command_error)
+
+    @bot_client.bot.event
+    async def on_ready() -> None:
+        logger.debug("on_ready запущен")
+        try:
+            bot_client.bot.loop.create_task(set_bot_activity(bot_client.bot))
+            await register_commands(bot_client.tree, bot_client)
+            logger.success(f"Бот {bot_client.bot.user} готов!")  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.error(f"Ошибка в on_ready: {e}\n{traceback.format_exc()}")
+            raise
+
+    Thread(target=run_flask, daemon=True).start()
 
     try:
-        config.validate()
-
-        bot_client.tree.error(_on_command_error)
-
-        @bot_client.bot.event
-        async def on_ready() -> None:
-            logger.debug("on_ready запущен")
-            try:
-                bot_client.bot.loop.create_task(set_bot_activity(bot_client.bot))
-                await register_commands(bot_client.tree, bot_client)
-                logger.success(f"Бот {bot_client.bot.user} готов!")
-            except Exception as e:
-                logger.error(f"Ошибка в on_ready: {e}\n{traceback.format_exc()}")
-                raise
-
-        # Start Flask health server
-        Thread(target=run_flask, daemon=True).start()
-
-        # Removed manual session override to fix Discord gateway WS 520 errors (discord.py manages its own session)
-
-        # Inject bot_client reference for middleware access
-        bot_client.bot.bot_client = bot_client
-
-        await bot_client.bot.start(config.TOKEN)
-    except Exception as e:
-        logger.error(f"Критическая ошибка запуска: {e}\n{traceback.format_exc()}")
-        raise
+        await bot_client.bot.start(str(config.TOKEN))
     finally:
-        pass  # No manual session to close (override removed)
         await close_connector()
-        await bot_client.close()
         logger.info("Бот остановлен")
 
 
-def start_bot() -> None:
-    """Entry point — starts the async event loop."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.create_task(run_bot())
-        else:
-            loop.run_until_complete(run_bot())
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
-    except Exception as e:
-        logger.error(f"Критическая ошибка: {e}\n{traceback.format_exc()}")
-        exit(1)
-
-
 if __name__ == "__main__":
-    start_bot()
+    import asyncio
+    asyncio.run(start_bot())

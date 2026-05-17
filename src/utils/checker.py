@@ -1,7 +1,10 @@
 from typing import Tuple, Optional, Union
+import time
 import discord
 from ..utils.firebase.firebase_manager import FirebaseManager
 from ..systemLog import logger
+
+CACHE_TTL = 300
 
 class Checker:
     """Класс для проверки ограничений пользователей."""
@@ -26,7 +29,6 @@ class Checker:
         guild_id = str(obj.guild.id) if obj.guild else None
         user_id = None
         try:
-            # Определение user_id в зависимости от типа объекта
             if isinstance(obj, discord.Interaction):
                 user_id = str(obj.user.id)
             elif isinstance(obj, discord.Message):
@@ -34,30 +36,26 @@ class Checker:
             else:
                 raise ValueError(f"Неподдерживаемый тип объекта: {type(obj)}")
 
-            # Проверка в Firebase
             if not guild_id:
                 logger.debug(f"Нет guild_id для {user_id}, доступ разрешен (DM)")
                 return True, None
 
-            # Инициализация FirebaseManager
-            firebase_manager = await self.initialize()
-            if not guild_id:
-                raise ValueError("guild_id не определен для проверки конфигурации гильдии")
-            
-            # Очистка кэша для пользователя перед проверкой
-            self.clear_cache(user_id)
-            logger.debug(f"Кэш очищен для пользователя {user_id}")
+            cache_key = f"{guild_id}:{user_id}"
+            cached = self._restriction_cache.get(cache_key)
+            if cached and (time.time() - cached["timestamp"]) < CACHE_TTL:
+                logger.debug(f"Кэш hit для {cache_key}")
+                return cached["allowed"], None
 
-            # Загрузка конфигурации
-            logger.debug(f"Вызов load_guild_config для guild_id={guild_id}")
+            firebase_manager = await self.initialize()
             config = await firebase_manager.load_guild_config(guild_id)
             restricted_users = config.get("restricted_users", []) if config else []
-            logger.debug(f"restricted_users для guild_id={guild_id}: {restricted_users}")
-            
+
             is_restricted = user_id in restricted_users
-            cache_key = f"{guild_id}:{user_id}"
-            self._restriction_cache[cache_key] = not is_restricted
-            logger.debug(f"Обновлен кэш для {cache_key}: {not is_restricted}")
+            self._restriction_cache[cache_key] = {
+                "allowed": not is_restricted,
+                "timestamp": time.time()
+            }
+            logger.debug(f"Кэш обновлен для {cache_key}: {not is_restricted}")
 
             return not is_restricted, None if not is_restricted else "Ваш доступ к боту ограничен."
 
@@ -75,5 +73,17 @@ class Checker:
         else:
             self._restriction_cache.clear()
             logger.debug("Кэш ограничений полностью очищен")
+
+    def cleanup_expired(self):
+        """Удаление просроченных записей кэша."""
+        now = time.time()
+        expired = [
+            key for key, val in self._restriction_cache.items()
+            if (now - val["timestamp"]) > CACHE_TTL
+        ]
+        for key in expired:
+            del self._restriction_cache[key]
+        if expired:
+            logger.debug(f"Очищено {len(expired)} просроченных записей кэша")
 
 checker = Checker()

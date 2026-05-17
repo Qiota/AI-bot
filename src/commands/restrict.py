@@ -5,6 +5,7 @@ from decouple import config
 from ..systemLog import logger
 from ..utils.firebase.firebase_manager import FirebaseManager
 from ..utils.checker import checker
+from ..commands.styles import create_embed, create_error_embed, create_success_embed, EMOJI, COLORS
 from typing import Dict, List, Optional
 import asyncio
 import traceback
@@ -86,7 +87,7 @@ class SearchModal(Modal, title="Поиск пользователей"):
 
 class SelectView(BaseView):
     """Представление для выбора каналов или пользователей."""
-    
+
     ACTION_CONFIG = {
         "bot_access": {
             "title": "Настройка каналов 📡",
@@ -203,6 +204,20 @@ class SelectView(BaseView):
         start = self.current_page * self.items_per_page
         return items[start:start + self.items_per_page]
 
+    def _get_total_pages(self) -> int:
+        """Calculate total pages for current items."""
+        filtered = self.all_items
+        if self.search_queries and self.action != "bot_access":
+            filtered = [
+                i for i in self.all_items if any(
+                    query in i["label"].lower() or
+                    query in i["true_name"].lower() or
+                    query == i["id"]
+                    for query in self.search_queries
+                )
+            ]
+        return max(1, (len(filtered) + self.items_per_page - 1) // self.items_per_page)
+
     def setup_select(self):
         """Настройка меню выбора."""
         self.clear_items()
@@ -210,14 +225,7 @@ class SelectView(BaseView):
         if not paginated_items:
             return
 
-        total_pages = max(1, (len(self.all_items if not self.search_queries else [
-            i for i in self.all_items if any(
-                query in i["label"].lower() or
-                query in i["true_name"].lower() or
-                query == i["id"]
-                for query in self.search_queries
-            )
-        ]) + self.items_per_page - 1) // self.items_per_page)
+        total_pages = self._get_total_pages()
         select = Select(
             custom_id=f"{self.action}_select",
             placeholder=f"{self.ACTION_CONFIG[self.action]['placeholder']} ({self.current_page + 1}/{total_pages})",
@@ -257,10 +265,9 @@ class SelectView(BaseView):
         self.setup_select()
         if not self.children:
             await interaction.followup.send(
-                embed=discord.Embed(
+                embed=create_error_embed(
                     title="Нет данных",
                     description="Нет каналов или пользователей для настройки. Проверьте поисковый запрос.",
-                    color=discord.Color.red()
                 ),
                 ephemeral=True
             )
@@ -272,17 +279,18 @@ class SelectView(BaseView):
             if self.action == "bot_access"
             else "\n".join(f"<@{value}> (ID: {value})" for value in self.selected_values)
         ) or "- Ничего не выбрано"
-        embed = discord.Embed(
-            title=self.ACTION_CONFIG[self.action]["title"],
+        page_items = self.get_paginated_items()
+        page_list = "\n".join(f"<@{item['value']}> (ID: {item['value']})" for item in page_items) if page_items else "- Пусто"
+        embed = create_embed(
+            title=f"{EMOJI['settings']} {self.ACTION_CONFIG[self.action]['title']}",
             description=(
                 self.ACTION_CONFIG[self.action]["description"]
                 + f"\n\n**Выбрано ({len(self.selected_values)}):**"
                 + f"\n{selected_text[:1000]}"
-                + (f"\n\n**На странице ({len(self.get_paginated_items())}):**"
-                   + f"\n{'\n'.join(f'<@{item['value']}> (ID: {item['value']})' for item in self.get_paginated_items()) or '- Пусто'}"
-                   if self.search_queries and self.action != "bot_access" else "")
+                + (f"\n\n**На странице ({len(page_items)}):**\n{page_list}"
+                    if self.search_queries and self.action != "bot_access" else "")
             ),
-            color=discord.Color.blue()
+            color="info"
         )
         try:
             await interaction.edit_original_response(embed=embed, view=self)
@@ -298,7 +306,7 @@ class SelectView(BaseView):
         paginated_items = self.get_paginated_items()
         current_page_values = {item["value"] for item in paginated_items}
         preserved_values = [value for value in self.selected_values if value not in current_page_values]
-        new_values = self.children[0].values
+        new_values = self.children[0].values  # type: ignore[union-attr]
         self.selected_values = list(set(preserved_values + new_values))
         await self.update_view(interaction)
 
@@ -316,14 +324,7 @@ class SelectView(BaseView):
         if await self.restrict_interaction(interaction):
             return
         await interaction.response.defer(ephemeral=True)
-        total_pages = (len(self.all_items if not self.search_queries else [
-            i for i in self.all_items if any(
-                query in i["label"].lower() or
-                query in i["true_name"].lower() or
-                query == i["id"]
-                for query in self.search_queries
-            )
-        ]) + self.items_per_page - 1) // self.items_per_page
+        total_pages = self._get_total_pages()
         if self.current_page < total_pages - 1:
             self.current_page += 1
         await self.update_view(interaction)
@@ -346,9 +347,9 @@ class SelectView(BaseView):
         if await self.restrict_interaction(interaction):
             return
         await interaction.response.defer(ephemeral=True)
-        self.children[-1].label = "⏳ Сохранение..."
-        self.children[-1].style = ButtonStyle.blurple
-        self.children[-1].disabled = True
+        self.children[-1].label = "⏳ Сохранение..."  # type: ignore[union-attr]
+        self.children[-1].style = ButtonStyle.blurple  # type: ignore[union-attr]
+        self.children[-1].disabled = True  # type: ignore[union-attr]
         await interaction.edit_original_response(view=self)
 
         try:
@@ -362,12 +363,12 @@ class SelectView(BaseView):
             if self.action == "bot_access":
                 update_data["bot_allowed_channels"] = self.selected_values
             elif self.action == "restrict_users":
-                current_restricted = set(self.config.get("restricted_users", []))
+                current_restricted = set(self.config.get("restricted_users", []) if self.config else [])  # type: ignore[union-attr]
                 new_restricted = set(self.selected_values)
                 update_data["restricted_users"] = list(current_restricted | new_restricted)
             elif self.action == "unrestrict_users":
                 update_data["restricted_users"] = [
-                    uid for uid in self.config.get("restricted_users", []) if uid not in self.selected_values
+                    uid for uid in (self.config.get("restricted_users", []) if self.config else []) if uid not in self.selected_values  # type: ignore[union-attr]
                 ]
                 for uid in self.selected_values:
                     checker.clear_cache(user_id=uid)
@@ -399,23 +400,23 @@ class SelectView(BaseView):
         if self.user_id not in active_views:
             return
         main_view = active_views[self.user_id]
-        embed = discord.Embed(
-            title="Настройка доступа бота 🛠️",
+        embed = create_embed(
+            title=f"{EMOJI['settings']} Настройка доступа бота",
             description=(
                 "Выберите действие для настройки бота:\n"
-                "• **Каналы**: Укажите текстовые каналы, где бот будет работать.\n"
-                "• **Ограничить пользователей**: Запретите доступ к боту.\n"
-                "• **Снять ограничения**: Верните доступ пользователям.\n"
+                f"- **{EMOJI['channel']} Каналы**: Укажите текстовые каналы, где бот будет работать.\n"
+                f"- **{EMOJI['lock']} Ограничить пользователей**: Запретите доступ к боту.\n"
+                f"- **{EMOJI['unlock']} Снять ограничения**: Верните доступ пользователям.\n"
                 "\nНажмите кнопку, чтобы начать."
             ),
-            color=discord.Color.blue()
+            color="info"
         )
         try:
-            await main_view.message.edit(embed=embed, view=main_view)
+            await main_view.message.edit(embed=embed, view=main_view)  # type: ignore[union-attr]
         except (discord.NotFound, discord.Forbidden):
             new_main_view = ActionSelectView(self.user_id, self.guild_id, self.bot_client)
             msg = await interaction.followup.send(embed=embed, view=new_main_view, ephemeral=True)
-            new_main_view.message = msg
+            new_main_view.message = msg  # type: ignore[union-attr]
             active_views[self.user_id] = new_main_view
 
 class ActionSelectView(BaseView):
@@ -440,7 +441,12 @@ class ActionSelectView(BaseView):
                 style=ButtonStyle.primary,
                 custom_id=f"{action}_btn"
             )
-            button.callback = lambda i, a=action: self.handle_action(i, a)
+            async def make_callback(act: str):
+                async def callback(interaction: discord.Interaction):
+                    await self.handle_action(interaction, act)
+                return callback
+            
+            button.callback = make_callback(action)  # type: ignore[assignment]
             self.add_item(button)
 
     async def handle_action(self, interaction: discord.Interaction, action: str):
@@ -448,59 +454,72 @@ class ActionSelectView(BaseView):
         if await self.restrict_interaction(interaction):
             return
         await interaction.response.defer(ephemeral=True)
-        view = SelectView(interaction.guild, self.user_id, self.guild_id, action, self, self.bot_client)
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send("Cannot process: guild is None", ephemeral=True)
+            return
+        view = SelectView(guild, self.user_id, self.guild_id, action, self, self.bot_client)
         await view.initialize()
-        if view.is_finished():
+        if view.is_finished():  # type: ignore[reportAttributeAccessIssue]
             await interaction.followup.send(
-                embed=discord.Embed(
+                embed=create_error_embed(
                     title="Нет данных",
                     description="Blacklist пуст." if action == "unrestrict_users" else "Нет пользователей или каналов.",
-                    color=discord.Color.red()
                 ),
                 ephemeral=True
             )
             return
 
-        embed = discord.Embed(
-            title=SelectView.ACTION_CONFIG[action]["title"],
+        embed = create_embed(
+            title=f"{EMOJI['settings']} {SelectView.ACTION_CONFIG[action]['title']}",
             description=SelectView.ACTION_CONFIG[action]["description"],
-            color=discord.Color.blue()
+            color="info"
         )
         msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        view.messages.append(msg)
+        if msg:
+            view.messages.append(msg)
+
+async def _load_guild_config(guild_id_str: str, bot_client=None) -> Optional[Dict]:
+    """Load guild config with caching. Returns None if not found."""
+    current_time = asyncio.get_event_loop().time()
+    if guild_id_str in guild_config_cache:
+        cfg, timestamp = guild_config_cache[guild_id_str]
+        if current_time - timestamp < CONFIG_CACHE_TTL:
+            return cfg
+
+    try:
+        if bot_client:
+            firebase_manager = await bot_client._ensure_firebase_initialized()
+        else:
+            firebase_manager = await FirebaseManager.initialize()
+        cfg = await firebase_manager.load_guild_config(guild_id_str)
+        guild_config_cache[guild_id_str] = (cfg or {}, current_time)
+        return cfg
+    except Exception as e:
+        logger.error(f"Ошибка загрузки конфига гильдии {guild_id_str}: {e}")
+        return None
 
 async def check_channels_setup(obj: discord.Interaction | discord.Message) -> tuple[bool, Optional[str]]:
     """Проверка настройки каналов для гильдии."""
     try:
-        if isinstance(obj, discord.Message) and isinstance(obj.channel, discord.DMChannel):
+        if isinstance(obj, discord.Message) and isinstance(obj.channel, discord.DMChannel):  # type: ignore[reportOptionalMemberAccess]
             return True, None
         if isinstance(obj, discord.Interaction) and obj.guild is None:
             return True, None
-        if isinstance(obj, discord.Interaction) and obj.command.name == "restrict":
+        if isinstance(obj, discord.Interaction) and obj.command and obj.command.name == "restrict":  # type: ignore[reportOptionalMemberAccess]
             return True, None
 
-        guild_id_str = str(obj.guild.id)
-        current_time = asyncio.get_event_loop().time()
-        if guild_id_str in guild_config_cache:
-            config, timestamp = guild_config_cache[guild_id_str]
-            if current_time - timestamp < CONFIG_CACHE_TTL:
-                return config, None
-            config = None
-        else:
-            config = None
-
-        if config is None:
-            firebase_manager = await FirebaseManager.initialize()
-            config = await firebase_manager.load_guild_config(guild_id_str)
-            guild_config_cache[guild_id_str] = (config or {}, current_time)
+        guild = obj.guild
+        if guild is None:
+            return True, None
+        guild_id_str = str(guild.id)
+        config = await _load_guild_config(guild_id_str)
 
         if config is None:
             logger.warning(f"Конфигурация для гильдии {guild_id_str} не найдена")
             return False, "Конфигурация сервера не найдена."
 
         allowed_channels = config.get("bot_allowed_channels", [])
-        if not allowed_channels:
-            return True, None
         return True, None
     except Exception as e:
         logger.error(f"Ошибка в check_channels_setup для гильдии {obj.guild.id if obj.guild else 'DM'}: {e}\n{traceback.format_exc()}")
@@ -514,41 +533,33 @@ async def check_bot_access(obj: discord.Interaction | discord.Message, bot_clien
         if isinstance(obj, discord.Interaction) and obj.guild is None:
             return True, None
 
-        channel = obj.channel if isinstance(obj, discord.Message) else obj.channel
-        guild_id_str = str(obj.guild.id)
+        guild = obj.guild
+        if guild is None:
+            return True, None
+        
+        channel = obj.channel  # type: ignore[reportOptionalMemberAccess]
+        if channel is None:
+            return True, None
+        guild_id_str = str(guild.id)
         channel_id = str(obj.channel_id if isinstance(obj, discord.Interaction) else obj.channel.id)
 
-        # Проверка прав бота в канале
-        permissions = channel.permissions_for(obj.guild.me)
-        required_permissions = (
-            permissions.read_messages and
-            permissions.send_messages and
-            permissions.embed_links
-        )
-        if not required_permissions:
-            logger.error(f"Бот не имеет необходимых прав в канале {channel_id} гильдии {guild_id_str}: "
-                        f"read_messages={permissions.read_messages}, "
-                        f"send_messages={permissions.send_messages}, "
-                        f"embed_links={permissions.embed_links}")
+        bot_member = guild.me
+        if bot_member is None:
+            return True, None
+        permissions = channel.permissions_for(bot_member)  # type: ignore[reportOptionalMemberAccess]
+        if not (permissions.read_messages and permissions.send_messages and permissions.embed_links):
+            logger.error(f"Бот не имеет необходимых прав в канале {channel_id} гильдии {guild_id_str}")
             return False, "Бот не имеет необходимых прав в этом канале! Проверьте настройки разрешений в Discord."
 
-        # Проверка конфигурации
         result, reason = await check_channels_setup(obj)
         if not result:
             return False, reason
 
-        config = (guild_config_cache.get(guild_id_str) or (None, 0))[0]
+        config = await _load_guild_config(guild_id_str, bot_client)
         if config is None:
-            firebase_manager = await bot_client._ensure_firebase_initialized()
-            config = await firebase_manager.load_guild_config(guild_id_str)
-            guild_config_cache[guild_id_str] = (config or {}, asyncio.get_event_loop().time())
-
-        if config is None:
-            logger.warning(f"Конфигурация для гильдии {guild_id_str} не найдена")
             return False, "Конфигурация сервера не найдена! Настройте через /restrict."
 
         allowed_channels = config.get("bot_allowed_channels", [])
-
         if allowed_channels and channel_id not in allowed_channels:
             return False, f"Бот не имеет доступа к этому каналу! Добавьте канал через /restrict."
 
@@ -574,14 +585,8 @@ async def restrict_command_execution(obj: discord.Interaction, bot_client) -> tu
                     logger.error(f"Не удалось отправить сообщение в ЛС пользователю {obj.user.id}: {e}")
                 return False, None
 
-            config = (guild_config_cache.get(str(obj.guild.id)) or (None, 0))[0]
+            config = await _load_guild_config(str(obj.guild.id), bot_client)
             if config is None:
-                firebase_manager = await bot_client._ensure_firebase_initialized()
-                config = await firebase_manager.load_guild_config(str(obj.guild.id))
-                guild_config_cache[str(obj.guild.id)] = (config or {}, asyncio.get_event_loop().time())
-
-            if config is None:
-                logger.warning(f"Конфигурация для гильдии {obj.guild.id} не найдена")
                 return False, "Конфигурация сервера не найдена! Настройте через /restrict."
 
         return True, None
@@ -600,21 +605,26 @@ async def handle_mention(message: discord.Message, bot_client) -> bool:
         result, reason = await check_bot_access(message, bot_client)
         if not result:
             if reason:
-                await message.channel.send(
-                    f"{message.author.mention}, {reason}",
-                    ephemeral=True
-                )
+                await message.channel.send(f"{message.author.mention}, {reason}")
             return False
 
         return True
     except Exception as e:
-        logger.error(f"Ошибка в handle_mention для гильдии {message.guild.id}: {e}\n{traceback.format_exc()}")
+        guild_id = message.guild.id if message.guild else "unknown"
+        logger.error(f"Ошибка в handle_mention для гильдии {guild_id}: {e}\n{traceback.format_exc()}")
         return False
 
 async def restrict(interaction: discord.Interaction, bot_client):
     """Логика команды /restrict."""
     # Check permissions first
-    if not interaction.user.guild_permissions.administrator and str(interaction.user.id) != str(DEVELOPER_ID):
+    guild = interaction.guild
+    is_admin = False
+    if guild:
+        member = guild.get_member(interaction.user.id)
+        if member:
+            is_admin = getattr(member.guild_permissions, "administrator", False)
+    
+    if not is_admin and str(interaction.user.id) != str(DEVELOPER_ID):
         if not interaction.response.is_done():
             await interaction.response.send_message("Требуются права администратора или статус разработчика.", ephemeral=True)
         return
@@ -633,19 +643,19 @@ async def restrict(interaction: discord.Interaction, bot_client):
 
     await interaction.response.defer(ephemeral=True)
     view = ActionSelectView(interaction.user.id, interaction.guild.id, bot_client)
-    embed = discord.Embed(
-        title="Настройка доступа бота 🛠️",
+    embed = create_embed(
+        title=f"{EMOJI['settings']} Настройка доступа бота",
         description=(
-            "Выберите действие для настройки бота:\n"
-            "• **Каналы**: Укажите текстовые каналы, где бот будет работать.\n"
-            "• **Ограничить пользователей**: Запретите доступ к боту.\n"
-            "• **Снять ограничения**: Верните доступ пользователям.\n"
+            f"Выберите действие для настройки бота:\n"
+            f"- **{EMOJI['channel']} Каналы**: Укажите текстовые каналы, где бот будет работать.\n"
+            f"- **{EMOJI['lock']} Ограничить пользователей**: Запретите доступ к боту.\n"
+            f"- **{EMOJI['unlock']} Снять ограничения**: Верните доступ пользователям.\n"
             "\nНажмите кнопку, чтобы начать."
         ),
-        color=discord.Color.blue()
+        color="info"
     )
     msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-    view.message = msg
+    view.message = msg  # type: ignore[reportAttributeAccessIssue]
     active_views[interaction.user.id] = view
 
 def create_command(bot_client):

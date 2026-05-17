@@ -15,7 +15,7 @@ async def check_nsfw(interaction: discord.Interaction) -> Tuple[bool, Optional[s
         # Личные сообщения — разрешено
         return True, None
 
-    if not interaction.channel.nsfw:
+    if not interaction.channel.nsfw:  # type: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
         return False, "Команда доступна только в NSFW-каналах или ЛС."
 
     return True, None

@@ -6,6 +6,7 @@ from discord import ButtonStyle, Interaction, Embed
 from discord.ui import Modal, TextInput, Button, View
 
 from ....systemLog import logger
+from ....commands.styles import create_embed, EMOJI, COLORS
 from .models import SearchResult
 
 
@@ -327,14 +328,14 @@ class NavigationView(View):
                 description = description[:2000 - len(tags_text) - 3] + "..."
             description += tags_text
 
-        embed = Embed(
-            title=f"🎬 {result.title}"[:256],
-            url=result.url,
+        embed = create_embed(
+            title=f"{EMOJI['play']} {result.title}"[:256],
             description=description[:2048],
-            color=0xFF5733
+            color="nsfw",
+            thumbnail=result.banner_url or "https://via.placeholder.com/100",
+            footer=f"{self.current_index + 1}/{len(self.results)} | Страница {self.current_page}/{self.total_pages}"
         )
 
-        embed.set_thumbnail(url=result.banner_url or "https://via.placeholder.com/100")
         if result.image_url:
             embed.set_image(url=result.image_url)
 
@@ -344,8 +345,6 @@ class NavigationView(View):
                 value=field['value'][:512],
                 inline=True
             )
-
-        embed.set_footer(text=f"{self.current_index + 1}/{len(self.results)} | Страница {self.current_page}/{self.total_pages}")
         return embed
 
     async def on_timeout(self) -> None:

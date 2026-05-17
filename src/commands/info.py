@@ -7,7 +7,8 @@ import time
 
 from ..systemLog import logger
 from ..core.middleware import require_bot_access
-from ..core.constants import COLOR_DEFAULT, ERROR_GENERIC
+from ..core.constants import ERROR_GENERIC
+from ..commands.styles import create_embed, EMOJI, COLORS
 
 COMMAND_DESCRIPTION = "Отображает информацию о боте и время работы"
 
@@ -18,10 +19,10 @@ async def info(interaction: discord.Interaction, bot_client) -> None:
     await interaction.response.defer(ephemeral=True)
 
     try:
-        embed = Embed(
-            title="Информация о боте",
+        embed = create_embed(
+            title=f"{EMOJI['info']} Информация о боте",
             description="Основные системные данные о боте:",
-            color=COLOR_DEFAULT,
+            color="default",
         )
 
         # Основные поля

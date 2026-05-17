@@ -32,8 +32,8 @@ async def load_command_module(
         )
         module = importlib.import_module(module_name)
         create_command = getattr(module, "create_command", None)
-        if not create_command:
-            logger.warning(f"create_command не найден в {module_name}")
+        if not create_command or create_command is None:
+            logger.debug(f"Пропуск {module_name} (не команда)")
             return None
 
         # Determine the cog/object to pass
@@ -51,6 +51,9 @@ async def load_command_module(
             if asyncio.iscoroutinefunction(create_command)
             else create_command(cog)
         )
+        if command is None:
+            logger.debug(f"Команда из {module_name} повернула None, пропуск")
+            return None
         commands = command if isinstance(command, tuple) else (command,)
         result = []
         loaded = []
