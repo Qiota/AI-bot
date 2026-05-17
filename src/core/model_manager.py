@@ -94,10 +94,13 @@ class ModelManager:
             client = G4FClient()
             loop = asyncio.get_event_loop()
             response = await asyncio.wait_for(
-                loop.run_in_executor(
+                        loop.run_in_executor(
                     None,
                     lambda: client.chat.completions.create(
-                        model="deepseek-v3",
+                        # NOTE: g4f provider chains differ by environment.
+                        # "deepseek-v3" breaks on some providers (e.g. PollinationsAI legacy).
+                        # "default" lets g4f auto-select a working backend/model.
+                        model="default",
                         messages=all_messages  # type: ignore[arg-type]
                     )
                 ),
@@ -119,6 +122,7 @@ class ModelManager:
 
         # OpenRouter as backup
         return await self._openrouter_fallback(messages, max_tokens, system_prompt)
+
     
     async def _openrouter_fallback(
         self, messages: List[Dict[str, Any]], max_tokens: int, system_prompt: Optional[str]
