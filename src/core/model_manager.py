@@ -1,17 +1,23 @@
-"""Model Manager - розподіл моделей по компонентах мозку Noxi."""
+"""Model Manager - розподіл моделей по компонентах мозку Noxi з підтримкою локальної Ollama."""
 
 import asyncio
-import requests
-from typing import Optional, List, Dict, Any
-from decouple import config
+import json
 import logging
+from typing import Optional, List, Dict, Any
+import requests
+from decouple import config
 
 logger = logging.getLogger("Noxi")
 
+# Настройки внешних API
 OPENROUTER_API_KEY = config("OPENROUTER_API_KEY", default=None)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MISTRAL_API_KEY = config("MISTRAL_API_KEY", default="J6QyRoQf4JkxvtoV9Cod9VyMGIwGzpXg")
 MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
+
+# Настройки локальной Ollama в Termux
+OLLAMA_BASE_URL = config("OLLAMA_BASE_URL", default="http://localhost:11434")
+OLLAMA_MODEL = config("OLLAMA_MODEL", default="qwen2.5:3b")
 
 
 class ModelManager:
@@ -94,16 +100,8 @@ class ModelManager:
         text_lower = text.lower()
 
         nonsense_patterns = [
-            "rundfunk",
-            "однформація",
-            "білебирда",
-            "ufffd",
-            "\ufffd",
-            "стоп стоп",
-            "одна формація",
-            "інформація про",
-            "ufffc",
-            "",
+            "rundfunk", "однформація", "білебирда", "ufffd", "\ufffd",
+            "стоп стоп", "одна формація", "інформація про", "ufffc", ""
         ]
         for pattern in nonsense_patterns:
             if pattern.lower() in text_lower:
@@ -165,6 +163,33 @@ class ModelManager:
 
         return False
 
+    async def _call_ollama(self, messages: List[Dict[str, Any]], max_tokens: int) -> Optional[str]:
+        """Прямой синхронный запрос к локальной Ollama, обернутый в executor."""
+        url = f"{OLLAMA_BASE_URL}/api/chat"
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens,
+                "think": False,       # Отключение режима генерации мыслей (размышлений) для экономии ресурсов
+                "temperature": 0.7    # Оптимально для удержания роли и предотвращения бреда
+            }
+        }
+        
+        def _request():
+            return requests.post(url, json=payload, timeout=60)
+            
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, _request)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("message", {}).get("content", "")
+        else:
+            logger.warning(f"[OLLAMA] Server returned status code {response.status_code}")
+            return None
+
     async def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -181,10 +206,27 @@ class ModelManager:
         elif category == "balanced":
             max_tokens = min(max_tokens, 300)
 
-        model_to_use = self._working_model
-        if model_to_use is None:
-            model_to_use = ""
-        
+        # ПРИОРЕТЕТ 1: Локальный запуск через Ollama (внутри Termux)
+        logger.info(f"[MODEL] Trying local Ollama ({OLLAMA_MODEL})...")
+        for attempt in range(2):
+            try:
+                content = await asyncio.wait_for(
+                    self._call_ollama(all_msgs, max_tokens),
+                    timeout=65
+                )
+                if content and self._is_valid(content):
+                    if self._is_repeated(content):
+                        logger.warning("[MODEL] Ollama response repeated, retrying...")
+                        continue
+                    logger.info(f"[MODEL] Ollama success (attempt {attempt + 1})")
+                    return content.strip()
+            except Exception as e:
+                logger.warning(f"[MODEL] Ollama failed (attempt {attempt + 1}): {e}")
+            await asyncio.sleep(1)
+
+        # ПРИОРЕТЕТ 2: Резерв через g4f (если Ollama упала или выключена)
+        logger.info("[MODEL] Ollama failed. Falling back to g4f...")
+        model_to_use = self._working_model or ""
         provider_to_use = self._working_provider
         
         if provider_to_use is None:
@@ -212,7 +254,7 @@ class ModelManager:
                     content = resp.choices[0].message.content
                     if isinstance(content, str) and self._is_valid(content):
                         if self._is_repeated(content):
-                            logger.warning(f"[MODEL] Response repeated, retrying...")
+                            logger.warning("[MODEL] g4f response repeated, retrying...")
                             continue
                         logger.info(f"[MODEL] g4f success (attempt {attempt + 1})")
                         return content.strip()
@@ -220,262 +262,35 @@ class ModelManager:
                 logger.warning(f"[MODEL] g4f failed (attempt {attempt + 1}): {e}")
             await asyncio.sleep(2)
 
+        # ПРИОРЕТЕТ 3: Финальный резерв через Mistral API
         if MISTRAL_API_KEY:
-            logger.info("[MODEL] Trying Mistral...")
+            logger.info("[MODEL] Trying Mistral API fallback...")
+            headers = {
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "mistral-tiny",
+                "messages": all_msgs,
+                "max_tokens": max_tokens
+            }
             for attempt in range(3):
                 try:
-                    loop = asyncio.get_event_loop()
-
                     def _mistral_request():
-                        import requests
-                        return requests.post(
-                            MISTRAL_CHAT_URL,
-                            json={
-                                "model": "mistral-small-latest",
-                                "messages": all_msgs,
-                                "max_tokens": max_tokens,
-                            },
-                            headers={
-                                "Authorization": f"Bearer {MISTRAL_API_KEY}",
-                                "Content-Type": "application/json",
-                            },
-                            timeout=30,
-                        )
-
-                    resp = await loop.run_in_executor(None, _mistral_request)
+                        return requests.post(MISTRAL_CHAT_URL, json=payload, headers=headers, timeout=30)
+                    
+                    loop = asyncio.get_event_loop()
+                    resp = await asyncio.wait_for(
+                        loop.run_in_executor(None, _mistral_request),
+                        timeout=35
+                    )
                     if resp.status_code == 200:
-                        content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-                        if self._is_valid(content):
-                            logger.info(f"[MODEL] Mistral success (attempt {attempt + 1})")
+                        content = resp.json()["choices"][0]["message"]["content"]
+                        if content and self._is_valid(content):
+                            logger.info("[MODEL] Mistral API success")
                             return content.strip()
-                    else:
-                        logger.warning(f"[MODEL] Mistral non-200 (attempt {attempt + 1}): {resp.status_code} - {resp.text[:100]}")
                 except Exception as e:
-                    logger.warning(f"[MODEL] Mistral error (attempt {attempt + 1}): {e}")
+                    logger.warning(f"[MODEL] Mistral failed (attempt {attempt + 1}): {e}")
                 await asyncio.sleep(2)
 
-        # Try Puter.js direct (free, no API key)
-        logger.info("[MODEL] Trying Puter.js direct...")
-        try:
-            loop = asyncio.get_event_loop()
-
-            def _puter_request():
-                import requests
-                return requests.post(
-                    "https://api.puter.com/drivers/call",
-                    json={
-                        "interface": "puter-chat-completion",
-                        "driver": "ai-chat",
-                        "method": "complete",
-                        "args": {
-                            "messages": all_msgs,
-                            "model": "gpt-4o-mini",
-                            "stream": False
-                        }
-                    },
-                    headers={
-                        "Content-Type": "application/json;charset=UTF-8",
-                        "Origin": "http://docs.puter.com",
-                        "Referer": "http://docs.puter.com/",
-                    },
-                    timeout=25,
-                )
-
-            resp = await loop.run_in_executor(None, _puter_request)
-            if resp.status_code == 200:
-                data = resp.json()
-                choice = data.get("choices", [{}])[0] if "choices" in data else data.get("result", {})
-                message = choice.get("message", {})
-                content = message.get("content", "")
-                if isinstance(content, list):
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            text = item.get("text", "").strip()
-                            if text and self._is_valid(text):
-                                logger.info("[MODEL] Puter.js success!")
-                                return text
-                elif content and self._is_valid(content):
-                    logger.info("[MODEL] Puter.js success!")
-                    return content.strip()
-            elif resp.status_code == 401:
-                logger.warning("[MODEL] Puter.js requires auth, skipping...")
-        except Exception as e:
-            logger.warning(f"[MODEL] Puter.js error: {e}")
-
-        user_message = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                user_message = msg.get("content", "")
-                break
-
-        if OPENROUTER_API_KEY:
-            for attempt in range(3):
-                try:
-                    import requests
-                    payload = {
-                        "model": "openrouter/free",
-                        "messages": all_msgs,
-                        "max_tokens": max_tokens,
-                    }
-
-                    def _openrouter_request():
-                        import requests
-                        return requests.post(
-                            f"{OPENROUTER_BASE_URL}/chat/completions",
-                            json=payload,
-                            headers={
-                                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                                "Content-Type": "application/json",
-                                "User-Agent": "Mozilla/5.0",
-                            },
-                            timeout=25,
-                        )
-
-                    loop = asyncio.get_event_loop()
-                    resp = await loop.run_in_executor(None, _openrouter_request)
-                    if resp.status_code == 200:
-                        content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-                        if self._is_valid(content):
-                            if self._is_repeated(content):
-                                logger.warning(f"[MODEL] OpenRouter response repeated, retrying...")
-                                continue
-                            logger.info(f"[MODEL] OpenRouter success (attempt {attempt + 1})")
-                            return content.strip()
-                    elif resp.status_code == 429:
-                        retry_after = resp.headers.get("retry-after", 5)
-                        logger.warning(f"[MODEL] OpenRouter rate limited, waiting {retry_after}s...")
-                        await asyncio.sleep(min(float(retry_after), 30))
-                        continue
-                    else:
-                        logger.warning(f"[MODEL] OpenRouter non-200 (attempt {attempt + 1}): {resp.status_code}")
-                except Exception as e:
-                    logger.warning(f"[MODEL] OpenRouter error (attempt {attempt + 1}): {e}")
-                await asyncio.sleep(1.5)
-
-        logger.warning("[MODEL] OpenRouter failed, trying g4f fallback...")
-        for attempt in range(2):
-            try:
-                from g4f.client import Client
-                client = Client(provider=provider_to_use)
-                
-                def _g4f_fallback():
-                    return client.chat.completions.create(
-                        model="",
-                        messages=all_msgs,
-                        timeout=45
-                    )
-                
-                loop = asyncio.get_event_loop()
-                resp = await asyncio.wait_for(
-                    loop.run_in_executor(None, _g4f_fallback),
-                    timeout=50,
-                )
-                if resp and resp.choices:
-                    content = resp.choices[0].message.content
-                    if isinstance(content, str) and self._is_valid(content):
-                        if self._is_repeated(content):
-                            logger.warning(f"[MODEL] g4f fallback response repeated, retrying...")
-                            continue
-                        logger.info(f"[MODEL] g4f fallback success (attempt {attempt + 1})")
-                        return content.strip()
-            except Exception as e:
-                logger.warning(f"[MODEL] g4f fallback failed (attempt {attempt + 1}): {e}")
-            await asyncio.sleep(2)
-
-        logger.warning("[MODEL] Trying ChatBotChatApp...")
-        try:
-            from src.utils.free_ai import _chatbot
-            combined_input = f"{system_prompt}\n\n" if system_prompt else ""
-            combined_input += f"Користувач: {user_message}\nNoxi:"
-            result = await _chatbot.chat(combined_input, system_prompt)
-            if result and self._is_valid(result):
-                logger.info("[MODEL] ChatBotChatApp success!")
-                return result.strip()
-            else:
-                logger.warning("[MODEL] ChatBotChatApp invalid response")
-        except Exception as e:
-            logger.warning(f"[MODEL] ChatBotChatApp error: {e}")
-
-        logger.warning("[MODEL] Trying DeepAI as last resort...")
-        try:
-            from src.utils.free_ai import _deepai
-            combined_input = f"{system_prompt}\n\n" if system_prompt else ""
-            combined_input += f"Користувач: {user_message}\nNoxi:"
-            result = await _deepai.chat(combined_input, system_prompt)
-            if result and self._is_valid(result):
-                logger.info("[MODEL] DeepAI success!")
-                return result.strip()
-            else:
-                logger.warning("[MODEL] DeepAI invalid response")
-        except Exception as e:
-            logger.warning(f"[MODEL] DeepAI failed: {e}")
-
-        logger.warning("[MODEL] All responses invalid, returning safe fallback")
         return None
-
-    async def vision_chat(
-        self,
-        messages: List[Dict[str, Any]],
-        max_tokens: int = 512,
-    ) -> Optional[str]:
-        from g4f import Provider
-        provider = Provider.PollinationsAI
-        for attempt in range(2):
-            try:
-                from g4f.client import Client
-                client = Client(provider=provider)
-                
-                def _vision_call():
-                    return client.chat.completions.create(
-                        model="",
-                        messages=messages,
-                        timeout=60
-                    )
-                
-                loop = asyncio.get_event_loop()
-                resp = await asyncio.wait_for(
-                    loop.run_in_executor(None, _vision_call),
-                    timeout=65,
-                )
-                if resp and resp.choices:
-                    content = resp.choices[0].message.content
-                    if content and self._is_valid(str(content)):
-                        logger.info(f"[VISION] g4f success (attempt {attempt + 1})")
-                        return str(content).strip()
-            except Exception as e:
-                logger.warning(f"[VISION] g4f failed (attempt {attempt + 1}): {e}")
-            await asyncio.sleep(2)
-
-        if OPENROUTER_API_KEY:
-            try:
-                import requests
-                payload = {
-                    "model": "openrouter/free",
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                }
-                loop = asyncio.get_event_loop()
-                resp = await loop.run_in_executor(
-                    None,
-                    lambda: requests.post(
-                        f"{OPENROUTER_BASE_URL}/chat/completions",
-                        json=payload,
-                        headers={
-                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                            "Content-Type": "application/json",
-                            "User-Agent": "Mozilla/5.0",
-                        },
-                        timeout=25,
-                    ),
-                )
-                if resp.status_code == 200:
-                    content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-                    if content:
-                        return content.strip()
-            except Exception as e:
-                logger.warning(f"[VISION] OpenRouter failed: {e}")
-
-        return None
-
-
-model_manager = ModelManager()
