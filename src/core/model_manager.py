@@ -294,3 +294,5 @@ class ModelManager:
                 await asyncio.sleep(2)
 
         return None
+        # Создаем экземпляр класса, который импортируется в aichat.py
+model_manager = ModelManager()
