@@ -16,7 +16,7 @@ MISTRAL_API_KEY = config("MISTRAL_API_KEY", default="J6QyRoQf4JkxvtoV9Cod9VyMGIw
 MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
 
 # Настройки локальной Ollama в Termux
-OLLAMA_BASE_URL = config("OLLAMA_BASE_URL", default="http://localhost:11434")
+OLLAMA_BASE_URL = config("OLLAMA_BASE_URL", default="https://9ed6670d075f8332-94-153-10-45.serveousercontent.com")
 OLLAMA_MODEL = config("OLLAMA_MODEL", default="qwen2.5:3b")
 
 
