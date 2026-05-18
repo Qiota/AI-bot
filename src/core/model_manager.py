@@ -1,7 +1,6 @@
-"""Model Manager - розподіл моделей по компонентах мозку Noxi з підтримкою локальної Ollama."""
+"""Model Manager - розподіл моделей по компонентах мозку Noxi з розширеним логуванням Termux."""
 
 import asyncio
-import json
 import logging
 from typing import Optional, List, Dict, Any
 import requests
@@ -9,13 +8,14 @@ from decouple import config
 
 logger = logging.getLogger("Noxi")
 
-# Настройки внешних API
+# Настройки внешних API (Резервные)
 OPENROUTER_API_KEY = config("OPENROUTER_API_KEY", default=None)
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_BASE_URL = "https://openrouter.ai"
 MISTRAL_API_KEY = config("MISTRAL_API_KEY", default="J6QyRoQf4JkxvtoV9Cod9VyMGIwGzpXg")
-MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
+MISTRAL_CHAT_URL = "https://mistral.ai"
 
-# Настройки локальной Ollama в Termux
+# Настройки локальной Ollama в Termux (Основной приоритет)
+# Сюда вставлять ссылку вида https://serveousercontent.com
 OLLAMA_BASE_URL = config("OLLAMA_BASE_URL", default="https://9ed6670d075f8332-94-153-10-45.serveousercontent.com")
 OLLAMA_MODEL = config("OLLAMA_MODEL", default="qwen2.5:3b")
 
@@ -164,30 +164,56 @@ class ModelManager:
         return False
 
     async def _call_ollama(self, messages: List[Dict[str, Any]], max_tokens: int) -> Optional[str]:
-        """Прямой синхронный запрос к локальной Ollama, обернутый в executor."""
-        url = f"{OLLAMA_BASE_URL}/api/chat"
+        """Прямой синхронный запрос к локальной Ollama в Termux с расширенным логированием."""
+        # Очищаем базовый URL от возможных пробелов и слэшей в конце
+        base_url = OLLAMA_BASE_URL.strip().rstrip('/')
+        url = f"{base_url}/api/chat"
+        
         payload = {
             "model": OLLAMA_MODEL,
             "messages": messages,
             "stream": False,
             "options": {
                 "num_predict": max_tokens,
-                "think": False,       # Отключение режима генерации мыслей (размышлений) для экономии ресурсов
-                "temperature": 0.7    # Оптимально для удержания роли и предотвращения бреда
+                "think": False,       # Отключение мыслей для экономии ресурсов мобильного процессора
+                "temperature": 0.7    # Оптимально для отыгрыша роли персонажа
             }
         }
         
-        def _request():
-            return requests.post(url, json=payload, timeout=60)
-            
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, _request)
+        logger.info(f"[TERMUX-OLLAMA] Отправка запроса на {url} (Модель: {OLLAMA_MODEL})")
         
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("message", {}).get("content", "")
-        else:
-            logger.warning(f"[OLLAMA] Server returned status code {response.status_code}")
+        def _request():
+            # На мобильных процессорах генерация может занимать много времени, ставим таймаут 90 секунд
+            return requests.post(url, json=payload, timeout=90)
+            
+        try:
+            start_time = asyncio.get_event_loop().time()
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, _request)
+            end_time = asyncio.get_event_loop().time()
+            
+            logger.info(f"[TERMUX-OLLAMA] Сервер ответил за {end_time - start_time:.2f} сек. Статус-код: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                content = data.get("message", {}).get("content", "")
+                if content:
+                    logger.info(f"[TERMUX-OLLAMA] Успешный ответ получен. Длина текста: {len(content)} симв.")
+                else:
+                    logger.warning("[TERMUX-OLLAMA] Сервер вернул пустой текст ('content' пуст)")
+                return content
+            else:
+                logger.error(f"[TERMUX-OLLAMA] Ошибка сервера Termux. Текст ответа: {response.text[:200]}")
+                return None
+                
+        except requests.exceptions.Timeout:
+            logger.error("[TERMUX-OLLAMA] Ошибка: Превышено время ожидания (Timeout). Телефон не успел сгенерировать ответ за 90 сек.")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error(f"[TERMUX-OLLAMA] Ошибка подключения: Сервер по адресу {base_url} недоступен. Проверьте туннель Serveo в Termux!")
+            return None
+        except Exception as e:
+            logger.error(f"[TERMUX-OLLAMA] Непредвиденная ошибка при запросе: {str(e)}")
             return None
 
     async def chat(
@@ -207,31 +233,29 @@ class ModelManager:
             max_tokens = min(max_tokens, 300)
 
         # ПРИОРЕТЕТ 1: Локальный запуск через Ollama (внутри Termux)
-        logger.info(f"[MODEL] Trying local Ollama ({OLLAMA_MODEL})...")
         for attempt in range(2):
+            logger.info(f"[MODEL] Попытка {attempt + 1} запустить локальную Ollama...")
             try:
                 content = await asyncio.wait_for(
                     self._call_ollama(all_msgs, max_tokens),
-                    timeout=65
+                    timeout=95
                 )
                 if content and self._is_valid(content):
                     if self._is_repeated(content):
-                        logger.warning("[MODEL] Ollama response repeated, retrying...")
+                        logger.warning("[MODEL] Ответ Ollama продублировался, повторный запрос...")
                         continue
-                    logger.info(f"[MODEL] Ollama success (attempt {attempt + 1})")
                     return content.strip()
-            except Exception as e:
-                logger.warning(f"[MODEL] Ollama failed (attempt {attempt + 1}): {e}")
+                else:
+                    if content:
+                        logger.warning(f"[MODEL] Ответ Ollama на попытке {attempt + 1} не прошел валидацию _is_valid")
+            except asyncio.TimeoutError:
+                logger.error(f"[MODEL] Общий таймаут asyncio на попытке {attempt + 1}")
             await asyncio.sleep(1)
 
-        # ПРИОРЕТЕТ 2: Резерв через g4f (если Ollama упала или выключена)
-        logger.info("[MODEL] Ollama failed. Falling back to g4f...")
+        # ПРИОРЕТЕТ 2: Резерв через g4f (если Termux выключен)
+        logger.info("[MODEL] Локальная Ollama не ответила. Переключаюсь на резерв g4f...")
         model_to_use = self._working_model or ""
-        provider_to_use = self._working_provider
-        
-        if provider_to_use is None:
-            from g4f import Provider
-            provider_to_use = Provider.Groq
+        provider_to_use = self._working_provider or None
         
         for attempt in range(3):
             try:
@@ -254,45 +278,33 @@ class ModelManager:
                     content = resp.choices[0].message.content
                     if isinstance(content, str) and self._is_valid(content):
                         if self._is_repeated(content):
-                            logger.warning("[MODEL] g4f response repeated, retrying...")
                             continue
-                        logger.info(f"[MODEL] g4f success (attempt {attempt + 1})")
+                        logger.info(f"[MODEL] g4f резерв сработал (попытка {attempt + 1})")
                         return content.strip()
             except Exception as e:
-                logger.warning(f"[MODEL] g4f failed (attempt {attempt + 1}): {e}")
+                logger.warning(f"[MODEL] g4f резерв упал: {e}")
             await asyncio.sleep(2)
 
-        # ПРИОРЕТЕТ 3: Финальный резерв через Mistral API
+        # ПРИОРЕТЕТ 3: Финальный резерв через официальное Mistral API
         if MISTRAL_API_KEY:
-            logger.info("[MODEL] Trying Mistral API fallback...")
-            headers = {
-                "Authorization": f"Bearer {MISTRAL_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "mistral-tiny",
-                "messages": all_msgs,
-                "max_tokens": max_tokens
-            }
-            for attempt in range(3):
-                try:
-                    def _mistral_request():
-                        return requests.post(MISTRAL_CHAT_URL, json=payload, headers=headers, timeout=30)
-                    
-                    loop = asyncio.get_event_loop()
-                    resp = await asyncio.wait_for(
-                        loop.run_in_executor(None, _mistral_request),
-                        timeout=35
-                    )
-                    if resp.status_code == 200:
-                        content = resp.json()["choices"][0]["message"]["content"]
-                        if content and self._is_valid(content):
-                            logger.info("[MODEL] Mistral API success")
-                            return content.strip()
-                except Exception as e:
-                    logger.warning(f"[MODEL] Mistral failed (attempt {attempt + 1}): {e}")
-                await asyncio.sleep(2)
+            logger.info("[MODEL] Пробую аварийный Mistral API...")
+            headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
+            payload = {"model": "mistral-tiny", "messages": all_msgs, "max_tokens": max_tokens}
+            try:
+                def _mistral_request():
+                    return requests.post(MISTRAL_CHAT_URL, json=payload, headers=headers, timeout=30)
+                loop = asyncio.get_event_loop()
+                resp = await loop.run_in_executor(None, _mistral_request)
+                if resp.status_code == 200:
+                    content = resp.json()["choices"][0]["message"]["content"]
+                    if content and self._is_valid(content):
+                        logger.info("[MODEL] Аварийный Mistral API успешно ответил")
+                        return content.strip()
+            except Exception as e:
+                logger.error(f"[MODEL] Критическая ошибка Mistral API: {e}")
 
+        logger.critical("[MODEL] ВСЕ МОДЕЛИ И РЕЗЕРВЫ ОТКАЗАЛИ.")
         return None
-        # Создаем экземпляр класса, который импортируется в aichat.py
+
+# Глобальный экземпляр класса для импорта в src.aichat
 model_manager = ModelManager()
