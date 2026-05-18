@@ -29,7 +29,7 @@ class ModelManager:
         from g4f import Provider
         
         models_to_test = [
-            ("ministral-3:14b", Provider.ollama),
+            ("gpt41", Provider.Perplexity),
             ("", Provider.PollinationsAI),
             ("", Provider.DeepInfra),
             ("", None),
