@@ -8,6 +8,8 @@ import asyncio
 import time
 import traceback
 from threading import Thread
+
+# type: ignore[attr-defined]  # logger.success is dynamically added
 from typing import Optional
 
 import discord
@@ -60,6 +62,7 @@ async def start_bot() -> None:
     bot_client.start_time = time.time()
 
     ai_chat = AIChat(bot_client)
+    bot_client._ai_chat = ai_chat
 
     bot_client.tree.error(_on_command_error)
 
@@ -69,6 +72,19 @@ async def start_bot() -> None:
         try:
             bot_client.bot.loop.create_task(set_bot_activity(bot_client.bot))
             await register_commands(bot_client.tree, bot_client)
+            
+            from src.core.model_manager import model_manager
+            logger.info("[DIAGNOSE] Запуск діагностики g4f...")
+            try:
+                results = await model_manager.diagnose_g4f()
+                working = [k for k, v in results.items() if v == "OK"]
+                if working:
+                    logger.success(f"[DIAGNOSE] Робочі моделі: {working}")
+                else:
+                    logger.warning("[DIAGNOSE] Жодна g4f модель не працює!")
+            except Exception as e:
+                logger.warning(f"[DIAGNOSE] Помилка діагностики: {e}")
+            
             logger.success(f"Бот {bot_client.bot.user} готов!")  # type: ignore[attr-defined]
         except Exception as e:
             logger.error(f"Ошибка в on_ready: {e}\n{traceback.format_exc()}")

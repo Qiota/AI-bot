@@ -1,15 +1,5 @@
-"""Система пам'яті ШІ: щоденник, емоції, сон, робоча пам'ять, думки."""
+"""Memory system backed by Firebase Realtime Database."""
 
-from .diary import Diary
-from .emotions import EmotionTracker
-from .working_memory import WorkingMemory
-from .sleep import SleepConsolidation
-from .thoughts import ThoughtGenerator
+from .firebase_memory import FirebaseMemory, get_memory
 
-__all__ = [
-    "Diary",
-    "EmotionTracker",
-    "WorkingMemory",
-    "SleepConsolidation",
-    "ThoughtGenerator",
-]
+__all__ = ["FirebaseMemory", "get_memory"]

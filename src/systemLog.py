@@ -15,7 +15,9 @@ logging.addLevelName(SUCCESS, "SUCCESS")
 def success(self, message, *args, **kwargs):
     if self.isEnabledFor(SUCCESS):
         self._log(SUCCESS, message, args, **kwargs)
-logging.Logger.success = success
+
+# Type ignore for custom method injection
+logging.Logger.success = success  # type: ignore[attr-defined]
 
 COLORS = {
     "DEBUG": Fore.CYAN,
@@ -46,7 +48,8 @@ def get_banner() -> str:
 
 def setup_logging():
     """Налаштування логування українською мовою."""
-    log_level = getattr(logging, config("LOG_LEVEL", default="INFO").upper(), logging.INFO)
+    log_level_str = str(config("LOG_LEVEL", default="INFO"))
+    log_level = getattr(logging, log_level_str.upper(), logging.INFO)
     
     logger = logging.getLogger()
     logger.setLevel(log_level)

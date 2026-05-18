@@ -1,12 +1,15 @@
 import discord
 from discord import app_commands
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 from .systemLog import logger
 import time
 from collections import defaultdict
 import uuid
 from src.utils.firebase.firebase_manager import FirebaseManager
 from g4f.client import AsyncClient as G4FClient
+
+if TYPE_CHECKING:
+    from src.aichat import AIChat
 
 class BotDiscordClient(discord.Client):
     bot_client: Optional["BotClient"]
@@ -38,6 +41,8 @@ class BotClient:
             "selected_text_model": "gpt-4o",
             "selected_provider": "Auto"
         })
+
+        self._ai_chat: Optional["AIChat"] = None
 
     def _setup_intents(self) -> discord.Intents:
         intents = discord.Intents.default()

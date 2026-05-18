@@ -68,14 +68,30 @@ def main() -> None:
 
 async def _run():
     cleanup_task = asyncio.create_task(memory_cleanup_service())
+    
+    from src.core.memory.firebase_memory import get_memory, MemoryConsolidationScheduler
+    from src.core.model_manager import ModelManager
+    
+    memory = get_memory()
+    model_manager = ModelManager()
+    consolidation_scheduler = MemoryConsolidationScheduler(memory, model_manager)
+    
+    consolidation_task = asyncio.create_task(consolidation_scheduler.start())
+    
     try:
         await start_bot()
     finally:
         cleanup_task.cancel()
+        consolidation_task.cancel()
         try:
             await cleanup_task
         except asyncio.CancelledError:
             pass
+        try:
+            await consolidation_task
+        except asyncio.CancelledError:
+            pass
+        await consolidation_scheduler.stop()
         logger.info("Закрытие цикла событий")
 
 if __name__ == "__main__":

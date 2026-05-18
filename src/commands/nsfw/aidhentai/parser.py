@@ -69,8 +69,8 @@ async def parse_search_results(session: aiohttp.ClientSession, soup: BeautifulSo
         if not elements:
             return []
 
-        banners = soup.select('div.anime-tb.pctr.rad1.por img[src]')
-        descriptions = soup.select('div.description.dn p')
+        banners: List[BeautifulSoup] = list(soup.select("div.anime-tb.pctr.rad1.por img[src]"))
+        descriptions: List[BeautifulSoup] = list(soup.select("div.description.dn p"))
 
         semaphore = asyncio.Semaphore(3)
 
@@ -79,8 +79,8 @@ async def parse_search_results(session: aiohttp.ClientSession, soup: BeautifulSo
                 return await process_search_element(session, e, i, banners, descriptions)
 
         tasks = [process_with_semaphore(i, e) for i, e in enumerate(elements)]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return [r for r in results if not isinstance(r, Exception) and r]
+        results: List[Optional[SearchResult]] = await asyncio.gather(*tasks, return_exceptions=True)
+        return [r for r in results if isinstance(r, SearchResult)]
     except Exception as e:
         logger.error(f"Ошибка парсинга результатов: {e}")
         return []
@@ -95,36 +95,44 @@ async def process_search_element(
 ) -> Optional[SearchResult]:
     """Обрабатывает элемент поиска."""
     try:
-        title = element.get('aria-label')
-        url = element.get('href')
-        if not (title and url and re.match(r'^https?://', url)):
+        raw_title = element.get("aria-label") or ""
+        raw_url = element.get("href") or ""
+        title = str(raw_title) if raw_title else ""
+        url = str(raw_url) if raw_url else ""
+
+        if not (title and url and re.match(r"^https?://", url)):
             logger.warning(f"Некорректный элемент {index}")
             return None
 
-        banner_url = banners[index].get('src') or "https://via.placeholder.com/100" if index < len(banners) else "https://via.placeholder.com/100"
-        description = descriptions[index].get_text(strip=True) or 'Описание отсутствует.' if index < len(descriptions) else 'Описание отсутствует.'
+        banner_url = str(banners[index].get("src")) if (index < len(banners) and banners[index].get("src")) else "https://via.placeholder.com/100"
+        raw_desc = descriptions[index].get_text(strip=True) if index < len(descriptions) else None
+        description = str(raw_desc) if raw_desc else "Описание отсутствует."
 
         detail_html = await fetch_html(session, url)
-        detail_soup = BeautifulSoup(detail_html, 'html.parser')
+        detail_soup = BeautifulSoup(detail_html, "html.parser")
 
-        iframe = detail_soup.select_one('iframe[src]')
-        video_link = iframe.get('src') if iframe else None
-        if video_link:
-            if video_link.startswith('//'):
-                video_link = f"https:{video_link}"
-            elif not re.match(r'^https?://', video_link):
-                video_link = None
+        iframe = detail_soup.select_one("iframe[src]")
+        raw_video = iframe.get("src") if iframe else None
+        video_link: Optional[str] = None
+        if raw_video:
+            vp = str(raw_video)
+            if vp.startswith("//"):
+                video_link = f"https:{vp}"
+            elif re.match(r"^https?://", vp):
+                video_link = vp
 
         image_url = await fetch_image_url(session, video_link) if video_link else None
         if not image_url:
-            img_element = detail_soup.select_one('img[src*="content/previews"]')
-            image_url = img_element.get('src') if img_element and re.match(r'^https?://', img_element.get('src')) else None
+            img_el = detail_soup.select_one("img[src*='content/previews']")
+            raw_src = img_el.get("src") if img_el else None
+            if raw_src and re.match(r"^https?://", str(raw_src)):
+                image_url = str(raw_src)
 
         additional_info = parse_additional_info(detail_soup)
-        tags = [
-            {'name': tag.get('aria-label'), 'url': tag.get('href')}
-            for tag in detail_soup.select('div.genres.mgt.df.fww.por a.btn.fz12.rad1.mgr.mgb.gray-bg[href][aria-label]')[:5]
-            if tag.get('aria-label') and tag.get('href')
+        tags: List[Dict[str, str]] = [
+            {"name": str(t.get("aria-label") or ""), "url": str(t.get("href") or "")}
+            for t in detail_soup.select("div.genres.mgt.df.fww.por a.btn.fz12.rad1.mgr.mgb.gray-bg[href][aria-label]")[:5]
+            if t.get("aria-label") and t.get("href")
         ]
 
         return SearchResult(
@@ -135,7 +143,7 @@ async def process_search_element(
             video_link=video_link,
             image_url=image_url,
             additional_info=additional_info,
-            tags=tags
+            tags=tags,
         )
     except Exception as e:
         logger.error(f"Ошибка обработки элемента {index}: {e}")
@@ -144,16 +152,17 @@ async def process_search_element(
 
 async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[str]) -> Optional[str]:
     """Получает URL изображения без кэширования."""
-    if not video_url or not re.match(r'^https?://', video_url):
+    if not video_url or not re.match(r"^https?://", str(video_url)):
         return None
 
     try:
         html = await fetch_html(session, video_url)
-        soup = BeautifulSoup(html, 'html.parser')
-        backdrop = soup.select_one('div.backdrop[style]')
-        if backdrop and backdrop.get('style'):
-            match = re.search(r'url\(["\']?(https:\/\/nhplayer\.com\/content\/previews\/[^"\']+\.jpg)["\']?\)', backdrop.get('style'))
-            return match.group(1) if match else None
+        soup = BeautifulSoup(html, "html.parser")
+        backdrop = soup.select_one("div.backdrop[style]")
+        raw_style = backdrop.get("style") if backdrop else None
+        if backdrop and raw_style:
+            m = re.search(r'url\(["\']?(https://nhplayer\.com/content/previews/[^"\']+\.jpg)["\']?\)', str(raw_style))
+            return m.group(1) if m else None
         return None
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         logger.error(f"Ошибка сети при запросе изображения: {e}")
@@ -165,15 +174,21 @@ async def fetch_image_url(session: aiohttp.ClientSession, video_url: Optional[st
 
 def parse_additional_info(soup: BeautifulSoup) -> List[Dict[str, str]]:
     """Парсит дополнительную информацию."""
-    return [
-        {
-            'name': translate_field_name(row.select_one('th.field').get_text(strip=True)),
-            'value': row.select_one('td.value').get_text(strip=True)[:512],
-            'inline': True
-        }
-        for row in soup.select('tbody tr:has(th.field, td.value)')[:5]
-        if row.select_one('th.field') and row.select_one('td.value') and translate_field_name(row.select_one('th.field').get_text(strip=True))
-    ]
+    result: List[Dict[str, str]] = []
+    for row in soup.select("tbody tr:has(th.field, td.value)")[:5]:
+        th_el = row.select_one("th.field")
+        td_el = row.select_one("td.value")
+        if th_el is None or td_el is None:
+            continue
+        th_text = th_el.get_text(strip=True)
+        translated = translate_field_name(th_text)
+        if translated:
+            result.append({
+                "name": translated,
+                "value": td_el.get_text(strip=True)[:512],
+                "inline": True
+            })
+    return result
 
 
 def translate_field_name(field_name: str) -> str:
