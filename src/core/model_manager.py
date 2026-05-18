@@ -29,7 +29,7 @@ class ModelManager:
         from g4f import Provider
         
         models_to_test = [
-            ("", Provider.Groq),
+            ("auto", Provider.Auto),
             ("", Provider.PollinationsAI),
             ("", Provider.DeepInfra),
             ("", None),
