@@ -15,8 +15,7 @@ MISTRAL_API_KEY = config("MISTRAL_API_KEY", default="J6QyRoQf4JkxvtoV9Cod9VyMGIw
 MISTRAL_CHAT_URL = "https://mistral.ai"
 
 # Настройки локальной Ollama в Termux (Основной приоритет)
-# Сюда вставлять ссылку вида https://serveousercontent.com
-OLLAMA_BASE_URL = config("OLLAMA_BASE_URL", default="https://9ed6670d075f8332-94-153-10-45.serveousercontent.com")
+OLLAMA_BASE_URL = config("OLLAMA_BASE_URL", default="https://4bef98ada8ddde1d-94-153-10-45.serveousercontent.com")
 OLLAMA_MODEL = config("OLLAMA_MODEL", default="qwen2.5:3b")
 
 
@@ -165,25 +164,23 @@ class ModelManager:
 
     async def _call_ollama(self, messages: List[Dict[str, Any]], max_tokens: int) -> Optional[str]:
         """Прямой синхронный запрос к локальной Ollama в Termux с расширенным логированием."""
-        # Очищаем базовый URL от возможных пробелов и слэшей в конце
         base_url = OLLAMA_BASE_URL.strip().rstrip('/')
         url = f"{base_url}/api/chat"
         
+        # Исправлено: Удален проблемный параметр "think": False из опций.
         payload = {
             "model": OLLAMA_MODEL,
             "messages": messages,
             "stream": False,
             "options": {
                 "num_predict": max_tokens,
-                "think": False,       # Отключение мыслей для экономии ресурсов мобильного процессора
-                "temperature": 0.7    # Оптимально для отыгрыша роли персонажа
+                "temperature": 0.7
             }
         }
         
         logger.info(f"[TERMUX-OLLAMA] Отправка запроса на {url} (Модель: {OLLAMA_MODEL})")
         
         def _request():
-            # На мобильных процессорах генерация может занимать много времени, ставим таймаут 90 секунд
             return requests.post(url, json=payload, timeout=90)
             
         try:
@@ -207,10 +204,10 @@ class ModelManager:
                 return None
                 
         except requests.exceptions.Timeout:
-            logger.error("[TERMUX-OLLAMA] Ошибка: Превышено время ожидания (Timeout). Телефон не успел сгенерировать ответ за 90 сек.")
+            logger.error("[TERMUX-OLLAMA] Ошибка: Превышено время ожидания (Timeout).")
             return None
         except requests.exceptions.ConnectionError:
-            logger.error(f"[TERMUX-OLLAMA] Ошибка подключения: Сервер по адресу {base_url} недоступен. Проверьте туннель Serveo в Termux!")
+            logger.error(f"[TERMUX-OLLAMA] Ошибка подключения: Сервер по адресу {base_url} недоступен.")
             return None
         except Exception as e:
             logger.error(f"[TERMUX-OLLAMA] Непредвиденная ошибка при запросе: {str(e)}")
@@ -252,7 +249,7 @@ class ModelManager:
                 logger.error(f"[MODEL] Общий таймаут asyncio на попытке {attempt + 1}")
             await asyncio.sleep(1)
 
-        # ПРИОРЕТЕТ 2: Резерв через g4f (если Termux выключен)
+        """ ПРИОРЕТЕТ 2: Резерв через g4f (ЗАКОММЕНТИРОВАНО)
         logger.info("[MODEL] Локальная Ollama не ответила. Переключаюсь на резерв g4f...")
         model_to_use = self._working_model or ""
         provider_to_use = self._working_provider or None
@@ -275,7 +272,7 @@ class ModelManager:
                     timeout=50,
                 )
                 if resp and resp.choices:
-                    content = resp.choices[0].message.content
+                    content = resp.choices.message.content
                     if isinstance(content, str) and self._is_valid(content):
                         if self._is_repeated(content):
                             continue
@@ -284,8 +281,9 @@ class ModelManager:
             except Exception as e:
                 logger.warning(f"[MODEL] g4f резерв упал: {e}")
             await asyncio.sleep(2)
+        """
 
-        # ПРИОРЕТЕТ 3: Финальный резерв через официальное Mistral API
+        """ ПРИОРЕТЕТ 3: Финальный резерв через официальное Mistral API (ЗАКОММЕНТИРОВАНО)
         if MISTRAL_API_KEY:
             logger.info("[MODEL] Пробую аварийный Mistral API...")
             headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
@@ -296,15 +294,17 @@ class ModelManager:
                 loop = asyncio.get_event_loop()
                 resp = await loop.run_in_executor(None, _mistral_request)
                 if resp.status_code == 200:
-                    content = resp.json()["choices"][0]["message"]["content"]
+                    content = resp.json()["choices"]["message"]["content"]
                     if content and self._is_valid(content):
                         logger.info("[MODEL] Аварийный Mistral API успешно ответил")
                         return content.strip()
             except Exception as e:
                 logger.error(f"[MODEL] Критическая ошибка Mistral API: {e}")
+        """
 
-        logger.critical("[MODEL] ВСЕ МОДЕЛИ И РЕЗЕРВЫ ОТКАЗАЛИ.")
+        logger.critical("[MODEL] Локальная Ollama отказала, а внешние резервы закомментированы.")
         return None
 
-# Глобальный экземпляр класса для импорта в src.aichat
+
+# Инициализация глобального экземпляра для корректного импорта в src.aichat
 model_manager = ModelManager()
